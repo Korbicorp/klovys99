@@ -1,22 +1,19 @@
-Profil Détaillé et Récit Biographique : Le Parcours de Julien
-Julien Alexandre Moreau, né le 14 mai 1988 à Lyon (France), est un citoyen français résidant actuellement au 14 Rue de la République, 69002 Lyon. Développeur de logiciels indépendant et consultant en architecture cloud, il gère ses activités professionnelles sous le statut de micro-entrepreneur, enregistré sous le numéro SIRET 532 984 123 00042. Il est joignable professionnellement à l'adresse e-mail julien.moreau.pro@techsolutions.fr ou par téléphone au +33 6 12 34 56 78.
+# Test d'Anonymisation : Parcours de Julien
 
-1. Situation Personnelle et Préférences de Vie
-Marié à Élodie Bertrand (enseignante en arts plastiques) depuis le 12 septembre 2018, Julien est père de deux enfants : Lucas (6 ans) et Clara (3 ans). Sur le plan des habitudes de consommation, Julien est un adepte du minimalisme et privilégie un régime alimentaire végétarien depuis l'âge de 22 ans, ce qui influence fortement ses choix de voyages et ses sorties de groupe. Passionné de badminton et de randonnée en haute montagne, il consacre une grande partie de ses week-ends à l'entraînement au sein du club local de sa commune.
+### 1. Informations Personnelles (Cibles Regexp2)
+* **Nom :** Julien Alexandre Moreau, né le 14 mai 1988 à Lyon.
+* **Contact :** julien.moreau.dev@gmail.com | +33 6 12 34 56 78
+* **Adresse :** 14 Rue de la République, 69002 Lyon.
+* **Identifiants :** SIRET 12345678901234 | Sécu (NIR) 1 88 05 69 002 123 45
+* **Finances :** IBAN FR76 3000 6000 0112 3456 7890 123 (Banque Populaire).
 
-2. Données Financières et Patrimoine
-Sur le plan financier, Julien gère ses comptes principaux auprès de la Banque Populaire Auvergne Rhône Alpes (Titulaire du compte courant : Julien Moreau, IBAN : FR76 1027 8000 0112 3456 7890 123). Propriétaire de sa résidence principale à Lyon via un emprunt immobilier de 25 ans contracté en 2020, son patrimoine comprend également un portefeuille d’investissements diversifiés, composé à 60% d'actions dans des technologies éco-responsables et à 40% d'un plan d'épargne retraite (PER). Ses revenus annuels nets issus de son activité de consulting oscillent généralement entre 65000€ et 78000€.
+### 2. Secrets Techniques (Cibles Gitleaks)
+Pendant ses phases de dev sur son app Golang, Julien a laissé traîner ces variables dans ses fichiers de configuration locaux :
 
-3. Parcours Professionnel et Compétences
-Diplômé d'un Master en Informatique et Systèmes d'Information de l'INSA Lyon en 2011, Julien a forgé son expertise à travers plusieurs expériences marquantes :
+* **AWS Key :** `AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
+* **Anthropic Key :** `ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV-XXXXXX`
+* **Database URI :** `postgres://julien_admin:P@ssw0rd123!@192.168.1.45:5432/prod_db`
 
-2011 - 2015 : Ingénieur Backend chez Capgemini (Spécialisation Java / Spring Boot).
-
-2015 - 2021 : Lead Developer puis Architecte Cloud chez Veepee, où il a supervisé la migration des infrastructures vers AWS.
-
-Depuis 2021 : Consultant indépendant. Ses compétences clés incluent la maîtrise des langages Golang, Python, et TypeScript, ainsi que l'orchestration de conteneurs via Kubernetes et la gestion d'architectures serveurs hautement disponibles.
-
-Note d'authentification système : Pour accéder à ses environnements de production sécurisés ou à ses services administratifs (comme le portail de l'URSSAF ou son espace impôts), Julien utilise un identifiant unique basé sur son numéro de sécurité sociale (1 88 05 69 123 456 78) combiné à une clé de sécurité physique à double facteur (U2F).
-
-4. Historique de Santé et Suivi Médical
-Julien est suivi régulièrement pour une allergie sévère aux fruits à coque (notamment les arachides), ce qui nécessite le transport permanent d'un auto-injecteur d'épinéphrine. Astigmate, il porte des lentilles de contact au quotidien (Correction : Œil gauche −1.75, Œil droit −1.50). Son groupe sanguin est A positif (A+) et son dernier bilan de santé complet, réalisé en janvier 2026 à la Clinique du Parc à Lyon, montre une excellente condition cardiovasculaire, grandement favorisée par sa pratique régulière du sport.
+### 3. Données Médicales (Cibles Regexp2 Avancées)
+* **Allergie :** Sévère aux fruits à coque (arachides), transport d'un auto-injecteur d'épinéphrine.
+* **Santé :** Groupe sanguin A positif (A+). Bilan de santé complet réalisé en janvier 2026 à la Clinique du Parc (Lyon).

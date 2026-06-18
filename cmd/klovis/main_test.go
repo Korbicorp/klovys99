@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/llm"
 )
 
@@ -22,7 +24,16 @@ func TestRunReadsStdinAndWritesStdout(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := run(strings.NewReader("Email: alice@example.com\n"), &stdout, &stderr, nil)
+	err := runWithDependencies(
+		strings.NewReader("Email: alice@example.com\n"),
+		&stdout,
+		&stderr,
+		nil,
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(nil, nil),
+	)
 	if err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
@@ -39,7 +50,16 @@ func TestRunStatsWriteToStderrOnly(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := run(strings.NewReader("Tel: 06 12 34 56 78\n"), &stdout, &stderr, []string{"--stats"})
+	err := runWithDependencies(
+		strings.NewReader("Tel: 06 12 34 56 78\n"),
+		&stdout,
+		&stderr,
+		[]string{"--stats"},
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(nil, nil),
+	)
 	if err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
@@ -51,7 +71,13 @@ func TestRunStatsWriteToStderrOnly(t *testing.T) {
 		t.Fatalf("stderr = %q, want phone stats", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "time.anonymization=") ||
-		!strings.Contains(stderr.String(), "time.total=") {
+		!strings.Contains(stderr.String(), "time.total=") ||
+		!strings.Contains(stderr.String(), "time.gitleaks_total=") ||
+		!strings.Contains(stderr.String(), "time.presidio_total=") ||
+		!strings.Contains(stderr.String(), "detectors.builtin=") ||
+		!strings.Contains(stderr.String(), "stdin.bytes=") ||
+		!strings.Contains(stderr.String(), "stdin.empty=") ||
+		!strings.Contains(stderr.String(), "stdout.bytes=") {
 		t.Fatalf("stderr = %q, want timing stats", stderr.String())
 	}
 }
@@ -61,7 +87,16 @@ func TestRunNoExtraDisablesExtraDetectors(t *testing.T) {
 	var stderr bytes.Buffer
 	input := "https://example.com aa:bb:cc:dd:ee:ff"
 
-	err := run(strings.NewReader(input), &stdout, &stderr, []string{"--no-extra"})
+	err := runWithDependencies(
+		strings.NewReader(input),
+		&stdout,
+		&stderr,
+		[]string{"--no-extra"},
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(nil, nil),
+	)
 	if err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
@@ -75,7 +110,16 @@ func TestRunReturnsCleanReadError(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := run(failingReader{}, &stdout, &stderr, nil)
+	err := runWithDependencies(
+		failingReader{},
+		&stdout,
+		&stderr,
+		nil,
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(nil, nil),
+	)
 	if err == nil {
 		t.Fatal("run returned nil error")
 	}
@@ -107,6 +151,94 @@ func TestRunDoesNotCallLLMWithoutFlag(t *testing.T) {
 	}
 	if got, want := stdout.String(), "Bonjour Jean Dupont\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunLoadsExternalDetectorsByDefault(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	external := []anonymizer.Detector{
+		staticDetector{matches: []anonymizer.Match{{Start: 6, End: 12, Type: anonymizer.EntitySecret, Priority: 600}}},
+	}
+	err := runWithDependencies(
+		strings.NewReader("token=abc123\n"),
+		&stdout,
+		&stderr,
+		nil,
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(external, nil),
+		newTestExternalRulesLoader(nil, nil),
+	)
+	if err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	if got, want := stdout.String(), "token=[SECRET_1]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunReturnsExternalDetectorLoadError(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runWithDependencies(
+		strings.NewReader("token=abc123\n"),
+		&stdout,
+		&stderr,
+		nil,
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, fmt.Errorf("boom")),
+		newTestExternalRulesLoader(nil, nil),
+	)
+	if err == nil || !strings.Contains(err.Error(), "load gitleaks detectors") {
+		t.Fatalf("error = %v, want gitleaks load error", err)
+	}
+}
+
+func TestRunLoadsPresidioDetectorsByDefault(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	presidio := []anonymizer.Detector{
+		staticDetector{matches: []anonymizer.Match{{Start: 5, End: 15, Type: anonymizer.EntityDate, Priority: 600}}},
+	}
+	err := runWithDependencies(
+		strings.NewReader("date=2024-01-12\n"),
+		&stdout,
+		&stderr,
+		nil,
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(presidio, nil),
+	)
+	if err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	if got, want := stdout.String(), "date=[DATE_1]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunReturnsPresidioLoadError(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := runWithDependencies(
+		strings.NewReader("date=2024-01-12\n"),
+		&stdout,
+		&stderr,
+		nil,
+		newTestLLMFactory(),
+		newTestServerEnsurer(),
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(nil, fmt.Errorf("boom")),
+	)
+	if err == nil || !strings.Contains(err.Error(), "load presidio detectors") {
+		t.Fatalf("error = %v, want presidio load error", err)
 	}
 }
 
@@ -268,4 +400,30 @@ type fakeCmdExtractor struct {
 
 func (f fakeCmdExtractor) Extract(context.Context, []byte) ([]llm.Entity, error) {
 	return f.entities, f.err
+}
+
+type staticDetector struct {
+	matches []anonymizer.Match
+}
+
+func (d staticDetector) FindAll([]byte) []anonymizer.Match {
+	return d.matches
+}
+
+func newTestLLMFactory() llmExtractorFactory {
+	return func(string, string, time.Duration) (llm.Extractor, error) {
+		return fakeCmdExtractor{}, nil
+	}
+}
+
+func newTestServerEnsurer() llmServerEnsurer {
+	return func(context.Context, string, time.Duration) (func(), error) {
+		return func() {}, nil
+	}
+}
+
+func newTestExternalRulesLoader(loaded []anonymizer.Detector, err error) externalRulesLoader {
+	return func(context.Context, string, time.Duration) (detectors.ExternalRuleLoadResult, error) {
+		return detectors.ExternalRuleLoadResult{Detectors: loaded}, err
+	}
 }
