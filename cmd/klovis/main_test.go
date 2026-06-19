@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +266,40 @@ func TestRunDoesNotEnsureOllamaWithoutLLMFlag(t *testing.T) {
 	}
 	if called {
 		t.Fatal("ollama ensure was called without --llm")
+	}
+}
+
+func TestRunProxySubcommandCallsProxyRunner(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	called := false
+
+	err := runWithRuntimeDependencies(
+		strings.NewReader("Email: alice@example.com\n"),
+		&stdout,
+		&stderr,
+		[]string{"proxy"},
+		func(string, string, time.Duration) (llm.Extractor, error) {
+			return nil, fmt.Errorf("should not be called")
+		},
+		func(context.Context, string, time.Duration) (func(), error) {
+			return nil, fmt.Errorf("should not be called")
+		},
+		newTestExternalRulesLoader(nil, nil),
+		newTestExternalRulesLoader(nil, nil),
+		func(io.Writer) error {
+			called = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("proxy runner was not called")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
 }
 
