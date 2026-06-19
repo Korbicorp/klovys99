@@ -142,6 +142,50 @@ contextual PII missed by regexes, including dates, document IDs, vehicle plates,
 medical providers, schools, employers, and pet identifiers when they are tied to
 the profile.
 
+### Anthropic proxy
+
+Klovis can also run a local reverse proxy for Anthropic requests:
+
+```sh
+go run ./cmd/klovis proxy
+```
+
+The proxy listens on `http://localhost:8080` and forwards every method, path,
+query string, header and body to `https://api.anthropic.com`. For example, a
+request sent to `http://localhost:8080/v1/messages` is forwarded to
+`https://api.anthropic.com/v1/messages`.
+
+Point Anthropic clients or curl commands at the local base URL while keeping the
+usual Anthropic headers:
+
+```sh
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":128,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+The proxy anonymizes each `<session>...</session>` block found anywhere in the
+JSON request body before forwarding the request. It emits only anonymization
+stats as structured zerolog events on stdout:
+
+```json
+{"level":"info","EMAIL":1,"PHONE":1,"message":"session prompt anonymized"}
+```
+
+By default, the proxy does not write traffic bodies to disk. To debug local
+traffic, enable the proxy debug mode before starting it:
+
+```sh
+KLOVIS_PROXY_DEBUG=1 go run ./cmd/klovis proxy
+```
+
+When `KLOVIS_PROXY_DEBUG` is set to `1`, `true`, `yes` or `on`, the proxy
+appends traffic bodies to `proxy.log`: `request.body` contains the final request
+body sent upstream after anonymization, and `response.body` contains the
+upstream response body decoded when `Content-Encoding: gzip` is present.
+
 ## Detectors
 
 When matches overlap, the detector with the highest priority wins. If priorities

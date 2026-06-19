@@ -12,6 +12,7 @@ import (
 	"github.com/Korbicorp/klovis/internal/anonymizer"
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/llm"
+	"github.com/Korbicorp/klovis/internal/proxy"
 )
 
 func main() {
@@ -37,6 +38,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 type llmExtractorFactory func(baseURL, model string, timeout time.Duration) (llm.Extractor, error)
 type llmServerEnsurer func(ctx context.Context, baseURL string, timeout time.Duration) (func(), error)
 type externalRulesLoader func(ctx context.Context, sourceURL string, timeout time.Duration) (detectors.ExternalRuleLoadResult, error)
+type proxyRunner func(stderr io.Writer) error
 
 func runWithLLMFactory(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory) error {
 	return runWithDependencies(
@@ -73,6 +75,17 @@ func runWithLLMDependencies(stdin io.Reader, stdout, stderr io.Writer, args []st
 }
 
 func runWithDependencies(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory, ensureServer llmServerEnsurer, loadGitleaks externalRulesLoader, loadPresidio externalRulesLoader) error {
+	return runWithRuntimeDependencies(stdin, stdout, stderr, args, factory, ensureServer, loadGitleaks, loadPresidio, runAnthropicProxy)
+}
+
+func runWithRuntimeDependencies(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory, ensureServer llmServerEnsurer, loadGitleaks externalRulesLoader, loadPresidio externalRulesLoader, runProxy proxyRunner) error {
+	if len(args) > 0 && args[0] == "proxy" {
+		if len(args) != 1 {
+			return fmt.Errorf("unexpected proxy arguments: %v", args[1:])
+		}
+		return runProxy(stderr)
+	}
+
 	totalStart := time.Now()
 	timings := runTimings{}
 
@@ -190,6 +203,10 @@ func runWithDependencies(stdin io.Reader, stdout, stderr io.Writer, args []strin
 	}
 
 	return nil
+}
+
+func runAnthropicProxy(stderr io.Writer) error {
+	return proxy.RunAnthropic(":8080")
 }
 
 func newOllamaExtractor(baseURL, model string, timeout time.Duration) (llm.Extractor, error) {
