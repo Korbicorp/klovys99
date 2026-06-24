@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func EnsureOllamaServer(ctx context.Context, baseURL string, timeout time.Duration) (func(), error) {
+func EnsureOllamaServer(ctx context.Context, baseURL string, timeout time.Duration, autoStart bool) (io.Closer, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse ollama URL: %w", err)
@@ -21,7 +21,7 @@ func EnsureOllamaServer(ctx context.Context, baseURL string, timeout time.Durati
 		return nil, fmt.Errorf("ollama URL must include scheme and host")
 	}
 	if !isLocalHost(parsed.Hostname()) {
-		return func() {}, nil
+		return noopCloser{}, nil
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -30,7 +30,10 @@ func EnsureOllamaServer(ctx context.Context, baseURL string, timeout time.Durati
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	healthURL := strings.TrimRight(parsed.String(), "/") + "/api/tags"
 	if ollamaReady(ctx, client, healthURL) {
-		return func() {}, nil
+		return noopCloser{}, nil
+	}
+	if !autoStart {
+		return nil, fmt.Errorf("ollama is not running at %s and autostart is disabled", strings.TrimRight(parsed.String(), "/"))
 	}
 
 	path, err := exec.LookPath("ollama")
@@ -38,15 +41,14 @@ func EnsureOllamaServer(ctx context.Context, baseURL string, timeout time.Durati
 		return nil, fmt.Errorf("ollama executable not found in PATH: %w", err)
 	}
 
-	serverCtx, stop := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(serverCtx, path, "serve")
+	cmd := exec.Command(path, "serve")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 
 	if err := cmd.Start(); err != nil {
-		stop()
 		return nil, fmt.Errorf("start ollama serve: %w", err)
 	}
+	process := &ollamaServerProcess{cmd: cmd}
 
 	exited := make(chan error, 1)
 	go func() {
@@ -62,23 +64,39 @@ func EnsureOllamaServer(ctx context.Context, baseURL string, timeout time.Durati
 	for {
 		select {
 		case <-ctx.Done():
-			stop()
+			_ = process.Close()
 			return nil, fmt.Errorf("wait for ollama startup: %w", ctx.Err())
 		case err := <-exited:
-			stop()
 			if err != nil {
 				return nil, fmt.Errorf("ollama serve exited before becoming ready: %w", err)
 			}
 			return nil, fmt.Errorf("ollama serve exited before becoming ready")
 		case <-deadline.C:
-			stop()
+			_ = process.Close()
 			return nil, fmt.Errorf("ollama did not become ready within %s", timeout)
 		case <-ticker.C:
 			if ollamaReady(ctx, client, healthURL) {
-				return stop, nil
+				return process, nil
 			}
 		}
 	}
+}
+
+type noopCloser struct{}
+
+func (noopCloser) Close() error {
+	return nil
+}
+
+type ollamaServerProcess struct {
+	cmd *exec.Cmd
+}
+
+func (p *ollamaServerProcess) Close() error {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	return p.cmd.Process.Kill()
 }
 
 func ollamaReady(ctx context.Context, client *http.Client, healthURL string) bool {

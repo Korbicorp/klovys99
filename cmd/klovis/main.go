@@ -2,310 +2,334 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"io"
+	"net/http"
+	"net/url"
 	"os"
-	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/llm"
 	"github.com/Korbicorp/klovis/internal/proxy"
+	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+const (
+	proxyDebugEnv   = "KLOVIS_PROXY_DEBUG"
+	llmEnabledEnv   = "KLOVIS_LLM_ENABLED"
+	llmURLEnv       = "KLOVIS_LLM_URL"
+	llmModelEnv     = "KLOVIS_LLM_MODEL"
+	llmTimeoutEnv   = "KLOVIS_LLM_TIMEOUT"
+	llmMaxCharsEnv  = "KLOVIS_LLM_MAX_CHARS"
+	llmAutoStartEnv = "KLOVIS_LLM_AUTOSTART"
+)
+
+const (
+	defaultProxyAdr         = ":8080"
+	defaultLLMEnable        = false
+	defaultLLMAutoStart     = false
+	defaultDebug            = false
+	defaultLLMTimeout       = llm.DefaultTimeout
+	defaultLLMMaxChunkBytes = llm.DefaultMaxChunkBytes
+	defaultLLMBaseUrl       = llm.DefaultBaseURL
+	defaultLLMModel         = llm.DefaultModel
 )
 
 func main() {
-	if err := run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "klovis: %v\n", err)
-		os.Exit(1)
+	config, err := runtimeConfigFromEnv()
+	if err != nil {
+		log.Fatal().Err(err).Msg("fail to parse runtime configuration")
+	}
+	if err := run(context.Background(), config); err != nil {
+		log.Fatal().Err(err).Msg("fail to start Anthropic proxy")
 	}
 }
 
-func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
-	return runWithDependencies(
-		stdin,
-		stdout,
-		stderr,
-		args,
-		newOllamaExtractor,
-		llm.EnsureOllamaServer,
-		detectors.LoadGitleaksRulesWithStats,
-		detectors.LoadPresidioRulesWithStats,
-	)
+type runtimeConfig struct {
+	Addr             string
+	Target           *url.URL
+	Logger           *zerolog.Logger
+	DebugTrafficLog  bool
+	Detectors        detectors.Config
+	LLMEnabled       bool
+	LLMBaseURL       string
+	LLMModel         string
+	LLMTimeout       time.Duration
+	LLMMaxChunkBytes int
+	LLMAutoStart     bool
 }
 
-type llmExtractorFactory func(baseURL, model string, timeout time.Duration) (llm.Extractor, error)
-type llmServerEnsurer func(ctx context.Context, baseURL string, timeout time.Duration) (func(), error)
-type externalRulesLoader func(ctx context.Context, sourceURL string, timeout time.Duration) (detectors.ExternalRuleLoadResult, error)
-type proxyRunner func(stderr io.Writer) error
-
-func runWithLLMFactory(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory) error {
-	return runWithDependencies(
-		stdin,
-		stdout,
-		stderr,
-		args,
-		factory,
-		func(context.Context, string, time.Duration) (func(), error) { return func() {}, nil },
-		func(context.Context, string, time.Duration) (detectors.ExternalRuleLoadResult, error) {
-			return detectors.ExternalRuleLoadResult{}, nil
-		},
-		func(context.Context, string, time.Duration) (detectors.ExternalRuleLoadResult, error) {
-			return detectors.ExternalRuleLoadResult{}, nil
-		},
-	)
+type application struct {
+	addr       string
+	handler    http.Handler
+	logger     *zerolog.Logger
+	logFile    *os.File
+	llmService *llm.Service
 }
 
-func runWithLLMDependencies(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory, ensureServer llmServerEnsurer) error {
-	return runWithDependencies(
-		stdin,
-		stdout,
-		stderr,
-		args,
-		factory,
-		ensureServer,
-		func(context.Context, string, time.Duration) (detectors.ExternalRuleLoadResult, error) {
-			return detectors.ExternalRuleLoadResult{}, nil
-		},
-		func(context.Context, string, time.Duration) (detectors.ExternalRuleLoadResult, error) {
-			return detectors.ExternalRuleLoadResult{}, nil
-		},
-	)
-}
-
-func runWithDependencies(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory, ensureServer llmServerEnsurer, loadGitleaks externalRulesLoader, loadPresidio externalRulesLoader) error {
-	return runWithRuntimeDependencies(stdin, stdout, stderr, args, factory, ensureServer, loadGitleaks, loadPresidio, runAnthropicProxy)
-}
-
-func runWithRuntimeDependencies(stdin io.Reader, stdout, stderr io.Writer, args []string, factory llmExtractorFactory, ensureServer llmServerEnsurer, loadGitleaks externalRulesLoader, loadPresidio externalRulesLoader, runProxy proxyRunner) error {
-	if len(args) > 0 && args[0] == "proxy" {
-		if len(args) != 1 {
-			return fmt.Errorf("unexpected proxy arguments: %v", args[1:])
-		}
-		return runProxy(stderr)
-	}
-
-	totalStart := time.Now()
-	timings := runTimings{}
-
-	// 0. CLI setup: parse runtime options before touching stdin or starting detectors.
-	flags := flag.NewFlagSet("klovis", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	stats := flags.Bool("stats", false, "write anonymization statistics to stderr")
-	noExtra := flags.Bool("no-extra", false, "disable extra detectors such as URL, IBAN, credit cards and MAC addresses")
-	noGitleaks := flags.Bool("no-gitleaks", false, "disable downloading and loading external Gitleaks secret detectors")
-	noPresidio := flags.Bool("no-presidio", false, "disable downloading and loading external Presidio regex detectors")
-	useLLM := flags.Bool("llm", false, "enable local LLM extraction through Ollama")
-	gitleaksURL := flags.String("gitleaks-url", detectors.DefaultGitleaksURL, "Gitleaks TOML config URL used to load external secret detectors")
-	gitleaksTimeout := flags.Duration("gitleaks-timeout", detectors.DefaultGitleaksTimeout, "timeout for downloading and parsing Gitleaks rules")
-	presidioURL := flags.String("presidio-url", detectors.DefaultPresidioURL, "Presidio YAML config URL used to load external regex detectors")
-	presidioTimeout := flags.Duration("presidio-timeout", detectors.DefaultPresidioTimeout, "timeout for downloading and parsing Presidio rules")
-	llmURL := flags.String("llm-url", "http://localhost:11434", "Ollama base URL")
-	llmModel := flags.String("llm-model", "mistral", "Ollama model name")
-	llmTimeout := flags.Duration("llm-timeout", 30*time.Second, "Ollama request timeout")
-	llmMaxChars := flags.Int("llm-max-chars", llm.DefaultMaxChunkBytes, "maximum input bytes sent to the LLM per chunk")
-
-	if err := flags.Parse(args); err != nil {
+func run(ctx context.Context, config runtimeConfig) error {
+	app, err := buildApplication(ctx, config)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected positional arguments: %v", flags.Args())
+	defer app.Close()
+
+	app.logger.Info().Msg("proxy starting")
+	return http.ListenAndServe(app.addr, app.handler)
+}
+
+func buildApplication(ctx context.Context, config runtimeConfig) (*application, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(config.Addr) == "" {
+		config.Addr = defaultProxyAdr
+	}
+	if config.Target == nil {
+		target, err := url.Parse(proxy.DefaultAnthropicURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse anthropic URL: %w", err)
+		}
+		config.Target = target
+	}
+	var logFile *os.File
+	if config.Logger == nil {
+		logger, openedLogFile, err := runtimeLogger(config.DebugTrafficLog)
+		if err != nil {
+			return nil, err
+		}
+		config.Logger = &logger
+		logFile = openedLogFile
 	}
 
-	var err error
-	externalDetectors := []anonymizer.Detector(nil)
-	if !*noGitleaks && loadGitleaks != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), *gitleaksTimeout)
-		loadResult, loadErr := loadGitleaks(ctx, *gitleaksURL, *gitleaksTimeout)
-		cancel()
-		if loadErr != nil {
-			return fmt.Errorf("load gitleaks detectors: %w", loadErr)
-		}
-		externalDetectors = append(externalDetectors, loadResult.Detectors...)
-		timings.Gitleaks = loadResult.Metrics
-	}
-	if !*noPresidio && loadPresidio != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), *presidioTimeout)
-		loadResult, loadErr := loadPresidio(ctx, *presidioURL, *presidioTimeout)
-		cancel()
-		if loadErr != nil {
-			return fmt.Errorf("load presidio detectors: %w", loadErr)
-		}
-		externalDetectors = append(externalDetectors, loadResult.Detectors...)
-		timings.Presidio = loadResult.Metrics
-	}
-	timings.ExternalDetectors = len(externalDetectors)
-
-	readStart := time.Now()
-	input, err := io.ReadAll(stdin)
-	timings.StdinRead = time.Since(readStart)
+	detectorService := detectors.NewService(config.Detectors)
+	detectorResult, err := detectorService.Load(ctx)
 	if err != nil {
-		return fmt.Errorf("read stdin: %w", err)
+		closeLogFile(logFile)
+		return nil, err
 	}
-	timings.StdinBytes = len(input)
+	logExternalLoadStats(config.Logger, "gitleaks", detectorResult.Gitleaks)
+	logExternalLoadStats(config.Logger, "presidio", detectorResult.Presidio)
+	config.Logger.Info().Int("detectors", len(detectorResult.Detectors)).Msg("proxy detectors loaded")
 
-	// 1. Local detection pipeline: regex and built-in detectors produce the baseline match set.
-	engineStart := time.Now()
-	builtinDetectors := detectors.Default(!*noExtra)
-	timings.BuiltinDetectors = len(builtinDetectors)
-	engine := anonymizer.New(append(builtinDetectors, externalDetectors...))
-	timings.EngineInit = time.Since(engineStart)
-	var llmMatches []anonymizer.Match
-	if *useLLM {
-		// 2. Optional LLM extraction: start Ollama, query the model, then merge those matches later.
-		startupCtx, startupCancel := context.WithTimeout(context.Background(), *llmTimeout)
-		startupStart := time.Now()
-		cleanup, err := ensureServer(startupCtx, *llmURL, *llmTimeout)
-		timings.LLMStartup = time.Since(startupStart)
-		startupCancel()
+	var matchFinder proxy.MatchFinder
+	var llmService *llm.Service
+	if config.LLMEnabled {
+		llmConfig := llmConfigFromRuntime(config)
+		service, err := llm.NewService(ctx, llmConfig)
 		if err != nil {
-			return fmt.Errorf("start ollama: %w", err)
+			closeLogFile(logFile)
+			return nil, err
 		}
+		llmService = service
+		matchFinder = service
+		config.Logger.Info().
+			Str("url", llmConfig.BaseURL).
+			Str("model", llmConfig.Model).
+			Dur("timeout", llmConfig.Timeout).
+			Int("max_chunk_bytes", llmConfig.MaxChunkBytes).
+			Bool("autostart", llmConfig.AutoStart).
+			Msg("llm enabled")
+	}
 
-		extractor, err := factory(*llmURL, *llmModel, *llmTimeout)
-		if err != nil {
-			shutdownStart := time.Now()
-			cleanup()
-			timings.LLMShutdown = time.Since(shutdownStart)
-			return fmt.Errorf("initialize llm extractor: %w", err)
+	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
+		Target:      config.Target,
+		Logger:      config.Logger,
+		Anonymizer:  anonymizer.NewService(detectorResult.Detectors),
+		MatchFinder: matchFinder,
+	})
+	if err != nil {
+		if llmService != nil {
+			llmService.Close()
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), *llmTimeout)
-		llmStart := time.Now()
-		llmMatches, timings.LLMChunks, err = llm.FindMatches(ctx, extractor, input, *llmMaxChars)
-		timings.LLMExtraction = time.Since(llmStart)
-		cancel()
-		shutdownStart := time.Now()
-		cleanup()
-		timings.LLMShutdown = time.Since(shutdownStart)
-		if err != nil {
-			return fmt.Errorf("extract llm pii: %w", err)
-		}
+		closeLogFile(logFile)
+		return nil, err
 	}
 
-	// 3.Final rewrite: apply all detected matches to the original input, then emit output and stats.
-	anonymizeStart := time.Now()
-	output, result := engine.AnonymizeWithMatches(input, llmMatches)
-	timings.Anonymization = time.Since(anonymizeStart)
+	handler := newHTTPHandler(proxyHandler)
+	return &application{
+		addr:       config.Addr,
+		handler:    handler,
+		logger:     config.Logger,
+		logFile:    logFile,
+		llmService: llmService,
+	}, nil
+}
 
-	writeStart := time.Now()
-	if _, err := stdout.Write(output); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
+func newHTTPHandler(proxyHandler gin.HandlerFunc) http.Handler {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.Any("/*proxyPath", proxyHandler)
+	return router
+}
+
+func (a *application) Close() {
+	if a == nil {
+		return
 	}
-	timings.StdoutWrite = time.Since(writeStart)
-	timings.StdoutBytes = len(output)
-	timings.Total = time.Since(totalStart)
-
-	if *stats {
-		writeStats(stderr, result, timings)
+	if a.llmService != nil {
+		a.llmService.Close()
 	}
-
-	return nil
-}
-
-func runAnthropicProxy(stderr io.Writer) error {
-	return proxy.RunAnthropic(":8080")
-}
-
-func newOllamaExtractor(baseURL, model string, timeout time.Duration) (llm.Extractor, error) {
-	return llm.NewOllamaExtractor(baseURL, model, timeout)
-}
-
-type runTimings struct {
-	StdinBytes        int
-	StdinRead         time.Duration
-	Gitleaks          detectors.ExternalLoadMetrics
-	Presidio          detectors.ExternalLoadMetrics
-	BuiltinDetectors  int
-	ExternalDetectors int
-	EngineInit        time.Duration
-	LLMStartup        time.Duration
-	LLMExtraction     time.Duration
-	LLMChunks         int
-	StdoutBytes       int
-	Anonymization     time.Duration
-	StdoutWrite       time.Duration
-	LLMShutdown       time.Duration
-	Total             time.Duration
-}
-
-func writeStats(writer io.Writer, result anonymizer.Result, timings runTimings) {
-	types := make([]string, 0, len(result.Stats))
-	for entityType := range result.Stats {
-		types = append(types, string(entityType))
+	if a.logFile != nil {
+		closeLogFile(a.logFile)
 	}
-	sort.Strings(types)
+}
 
-	for _, entityType := range types {
-		typedEntity := anonymizer.EntityType(entityType)
-		stats := result.Stats[typedEntity]
-		fmt.Fprintf(writer, "%s count=%d\n", statName(typedEntity), stats.Count)
+func closeLogFile(logFile *os.File) {
+	if logFile != nil {
+		_ = logFile.Close()
 	}
-
-	writeExternalLoadStats(writer, "gitleaks", timings.Gitleaks)
-	writeExternalLoadStats(writer, "presidio", timings.Presidio)
-	fmt.Fprintf(writer, "detectors.builtin=%d\n", timings.BuiltinDetectors)
-	fmt.Fprintf(writer, "detectors.external=%d\n", timings.ExternalDetectors)
-	fmt.Fprintf(writer, "stdin.bytes=%d\n", timings.StdinBytes)
-	fmt.Fprintf(writer, "stdin.empty=%t\n", timings.StdinBytes == 0)
-	fmt.Fprintf(writer, "time.external_rules_total=%s\n", timings.Gitleaks.Total+timings.Presidio.Total)
-	fmt.Fprintf(writer, "time.stdin_read=%s\n", timings.StdinRead)
-	fmt.Fprintf(writer, "time.engine_init=%s\n", timings.EngineInit)
-	fmt.Fprintf(writer, "time.llm_startup=%s\n", timings.LLMStartup)
-	fmt.Fprintf(writer, "time.llm_extraction=%s\n", timings.LLMExtraction)
-	fmt.Fprintf(writer, "llm.chunks=%d\n", timings.LLMChunks)
-	fmt.Fprintf(writer, "stdout.bytes=%d\n", timings.StdoutBytes)
-	fmt.Fprintf(writer, "time.anonymization=%s\n", timings.Anonymization)
-	fmt.Fprintf(writer, "time.stdout_write=%s\n", timings.StdoutWrite)
-	fmt.Fprintf(writer, "time.llm_shutdown=%s\n", timings.LLMShutdown)
-	fmt.Fprintf(writer, "time.total=%s\n", timings.Total)
 }
 
-func writeExternalLoadStats(writer io.Writer, prefix string, metrics detectors.ExternalLoadMetrics) {
-	fmt.Fprintf(writer, "%s.cache_hits=%d\n", prefix, metrics.CacheHits)
-	fmt.Fprintf(writer, "%s.cache_misses=%d\n", prefix, metrics.CacheMisses)
-	fmt.Fprintf(writer, "%s.cache_fallbacks=%d\n", prefix, metrics.CacheFallbacks)
-	fmt.Fprintf(writer, "%s.downloads=%d\n", prefix, metrics.Downloads)
-	fmt.Fprintf(writer, "%s.files=%d\n", prefix, metrics.Files)
-	fmt.Fprintf(writer, "%s.bytes=%d\n", prefix, metrics.Bytes)
-	fmt.Fprintf(writer, "%s.rules=%d\n", prefix, metrics.Rules)
-	fmt.Fprintf(writer, "%s.recognizers=%d\n", prefix, metrics.Recognizers)
-	fmt.Fprintf(writer, "%s.patterns=%d\n", prefix, metrics.Patterns)
-	fmt.Fprintf(writer, "%s.detectors=%d\n", prefix, metrics.Detectors)
-	fmt.Fprintf(writer, "time.%s_cache_read=%s\n", prefix, metrics.CacheRead)
-	fmt.Fprintf(writer, "time.%s_cache_write=%s\n", prefix, metrics.CacheWrite)
-	fmt.Fprintf(writer, "time.%s_download=%s\n", prefix, metrics.Download)
-	fmt.Fprintf(writer, "time.%s_parse=%s\n", prefix, metrics.Parse)
-	fmt.Fprintf(writer, "time.%s_compile=%s\n", prefix, metrics.Compile)
-	fmt.Fprintf(writer, "time.%s_total=%s\n", prefix, metrics.Total)
+func llmConfigFromRuntime(config runtimeConfig) llm.Config {
+	llmConfig := llm.Config{
+		BaseURL:       strings.TrimSpace(config.LLMBaseURL),
+		Model:         strings.TrimSpace(config.LLMModel),
+		Timeout:       config.LLMTimeout,
+		MaxChunkBytes: config.LLMMaxChunkBytes,
+		AutoStart:     config.LLMAutoStart,
+	}
+	if llmConfig.BaseURL == "" {
+		llmConfig.BaseURL = defaultLLMBaseUrl
+	}
+	if llmConfig.Model == "" {
+		llmConfig.Model = defaultLLMModel
+	}
+	if llmConfig.Timeout <= 0 {
+		llmConfig.Timeout = defaultLLMTimeout
+	}
+	if llmConfig.MaxChunkBytes <= 0 {
+		llmConfig.MaxChunkBytes = defaultLLMMaxChunkBytes
+	}
+	return llmConfig
 }
 
-func statName(entityType anonymizer.EntityType) string {
-	if isLLMEntityType(entityType) {
-		return "llm." + string(entityType)
+func runtimeConfigFromEnv() (runtimeConfig, error) {
+	target, err := url.Parse(proxy.DefaultAnthropicURL)
+	if err != nil {
+		return runtimeConfig{}, fmt.Errorf("parse DefaultAnthropicURL: %w", err)
+	}
+	debugTrafficLog, err := envBoolWithDefault(proxyDebugEnv, defaultDebug)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	llmEnabled, err := envBoolWithDefault(llmEnabledEnv, defaultLLMEnable)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	llmTimeout, err := envDurationWithDefault(llmTimeoutEnv, defaultLLMTimeout)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	llmMaxChunkBytes, err := envIntWithDefault(llmMaxCharsEnv, defaultLLMMaxChunkBytes)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	llmAutoStart, err := envBoolWithDefault(llmAutoStartEnv, defaultLLMAutoStart)
+	if err != nil {
+		return runtimeConfig{}, err
 	}
 
-	return string(entityType)
+	return runtimeConfig{
+		Addr:             defaultProxyAdr,
+		Target:           target,
+		DebugTrafficLog:  debugTrafficLog,
+		Detectors:        detectors.DefaultConfig(),
+		LLMEnabled:       llmEnabled,
+		LLMBaseURL:       envStringWithDefault(llmURLEnv, defaultLLMBaseUrl),
+		LLMModel:         envStringWithDefault(llmModelEnv, defaultLLMModel),
+		LLMTimeout:       llmTimeout,
+		LLMMaxChunkBytes: llmMaxChunkBytes,
+		LLMAutoStart:     llmAutoStart,
+	}, nil
 }
 
-func isLLMEntityType(entityType anonymizer.EntityType) bool {
-	switch entityType {
-	case anonymizer.EntityPersonName,
-		anonymizer.EntityLocation,
-		anonymizer.EntityOrganization,
-		anonymizer.EntityContextIdentifier,
-		anonymizer.EntityOtherPII,
-		anonymizer.EntityDate,
-		anonymizer.EntityDocumentID,
-		anonymizer.EntityVehiclePlate,
-		anonymizer.EntityMedicalProvider,
-		anonymizer.EntitySchool,
-		anonymizer.EntityEmployer,
-		anonymizer.EntityPetIdentifier:
-		return true
+func runtimeLogger(debugTraffic bool) (zerolog.Logger, *os.File, error) {
+	if !debugTraffic {
+		return zerolog.New(os.Stdout).With().Timestamp().Logger(), nil, nil
+	}
+
+	logFile, err := os.OpenFile(proxy.DefaultLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return zerolog.Logger{}, nil, fmt.Errorf("open proxy log file: %w", err)
+	}
+	logger := zerolog.New(logFile).Level(zerolog.DebugLevel).With().Timestamp().Logger()
+	return logger, logFile, nil
+}
+
+func logExternalLoadStats(logger *zerolog.Logger, prefix string, metrics detectors.ExternalLoadMetrics) {
+	logger.Info().
+		Str("source", prefix).
+		Int("cache_hits", metrics.CacheHits).
+		Int("cache_misses", metrics.CacheMisses).
+		Int("cache_fallbacks", metrics.CacheFallbacks).
+		Int("downloads", metrics.Downloads).
+		Int("files", metrics.Files).
+		Int("bytes", metrics.Bytes).
+		Int("rules", metrics.Rules).
+		Int("recognizers", metrics.Recognizers).
+		Int("patterns", metrics.Patterns).
+		Int("detectors", metrics.Detectors).
+		Dur("cache_read", metrics.CacheRead).
+		Dur("cache_write", metrics.CacheWrite).
+		Dur("download", metrics.Download).
+		Dur("parse", metrics.Parse).
+		Dur("compile", metrics.Compile).
+		Dur("total", metrics.Total).
+		Msg("external detectors loaded")
+}
+
+func envBoolWithDefault(name string, def bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return def, nil
+	}
+	switch value {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
 	default:
-		return false
+		return false, fmt.Errorf("parse %s: value must be true or false", name)
 	}
+}
+
+func envStringWithDefault(name, def string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return def
+	}
+	return value
+}
+
+func envDurationWithDefault(name string, def time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return def, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envIntWithDefault(name string, def int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return def, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("parse %s: value must be greater than zero", name)
+	}
+	return parsed, nil
 }

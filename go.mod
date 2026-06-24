@@ -10,6 +10,7 @@ require gopkg.in/yaml.v3 v3.0.1
 
 require (
 	github.com/gin-gonic/gin v1.10.1
+	github.com/go-resty/resty/v2 v2.17.2
 	github.com/rs/zerolog v1.35.1
 )
 

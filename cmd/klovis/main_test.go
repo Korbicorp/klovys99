@@ -1,464 +1,366 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
 	"github.com/Korbicorp/klovis/internal/detectors"
-	"github.com/Korbicorp/klovis/internal/llm"
+	"github.com/Korbicorp/klovis/internal/proxy"
+	"github.com/rs/zerolog"
 )
 
-type failingReader struct{}
+func TestEnvBoolWithDefault(t *testing.T) {
+	tests := []struct {
+		name      string
+		envValue  *string
+		def       bool
+		want      bool
+		wantError string
+	}{
+		{name: "unset uses false default", def: false, want: false},
+		{name: "unset uses true default", def: true, want: true},
+		{name: "empty uses default", envValue: stringPtr(""), def: true, want: true},
+		{name: "spaces use default", envValue: stringPtr("   "), def: false, want: false},
+		{name: "true enables", envValue: stringPtr("true"), def: false, want: true},
+		{name: "false disables", envValue: stringPtr("false"), def: true, want: false},
+		{name: "trimmed true enables", envValue: stringPtr(" true "), def: false, want: true},
+		{name: "trimmed false disables", envValue: stringPtr(" false "), def: true, want: false},
+		{name: "one rejected", envValue: stringPtr("1"), def: false, wantError: "value must be true or false"},
+		{name: "zero rejected", envValue: stringPtr("0"), def: false, wantError: "value must be true or false"},
+		{name: "yes rejected", envValue: stringPtr("yes"), def: false, wantError: "value must be true or false"},
+		{name: "on rejected", envValue: stringPtr("on"), def: false, wantError: "value must be true or false"},
+		{name: "uppercase true rejected", envValue: stringPtr("TRUE"), def: false, wantError: "value must be true or false"},
+	}
 
-func (failingReader) Read([]byte) (int, error) {
-	return 0, errors.New("boom")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const envName = "KLOVIS_TEST_BOOL"
+			setEnv(t, envName, tt.envValue)
+
+			got, err := envBoolWithDefault(envName, tt.def)
+			assertErrorContains(t, err, tt.wantError)
+			if tt.wantError == "" && got != tt.want {
+				t.Fatalf("envBoolWithDefault() = %t, want %t", got, tt.want)
+			}
+		})
+	}
 }
 
-func TestRunReadsStdinAndWritesStdout(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+func TestEnvStringWithDefault(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue *string
+		def      string
+		want     string
+	}{
+		{name: "unset uses default", def: "fallback", want: "fallback"},
+		{name: "empty uses default", envValue: stringPtr(""), def: "fallback", want: "fallback"},
+		{name: "spaces use default", envValue: stringPtr("   "), def: "fallback", want: "fallback"},
+		{name: "value is returned", envValue: stringPtr("mistral"), def: "fallback", want: "mistral"},
+		{name: "value is trimmed", envValue: stringPtr("  mistral  "), def: "fallback", want: "mistral"},
+	}
 
-	err := runWithDependencies(
-		strings.NewReader("Email: alice@example.com\n"),
-		&stdout,
-		&stderr,
-		nil,
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(nil, nil),
-	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const envName = "KLOVIS_TEST_STRING"
+			setEnv(t, envName, tt.envValue)
+
+			got := envStringWithDefault(envName, tt.def)
+			if got != tt.want {
+				t.Fatalf("envStringWithDefault() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnvDurationWithDefault(t *testing.T) {
+	tests := []struct {
+		name      string
+		envValue  *string
+		def       time.Duration
+		want      time.Duration
+		wantError string
+	}{
+		{name: "unset uses default", def: 30 * time.Second, want: 30 * time.Second},
+		{name: "empty uses default", envValue: stringPtr(""), def: time.Minute, want: time.Minute},
+		{name: "spaces use default", envValue: stringPtr("   "), def: time.Minute, want: time.Minute},
+		{name: "seconds parsed", envValue: stringPtr("5s"), def: time.Minute, want: 5 * time.Second},
+		{name: "trimmed duration parsed", envValue: stringPtr(" 250ms "), def: time.Minute, want: 250 * time.Millisecond},
+		{name: "compound duration parsed", envValue: stringPtr("1m30s"), def: time.Second, want: 90 * time.Second},
+		{name: "invalid duration rejected", envValue: stringPtr("soon"), def: time.Second, wantError: "parse KLOVIS_TEST_DURATION"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const envName = "KLOVIS_TEST_DURATION"
+			setEnv(t, envName, tt.envValue)
+
+			got, err := envDurationWithDefault(envName, tt.def)
+			assertErrorContains(t, err, tt.wantError)
+			if tt.wantError == "" && got != tt.want {
+				t.Fatalf("envDurationWithDefault() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnvIntWithDefault(t *testing.T) {
+	tests := []struct {
+		name      string
+		envValue  *string
+		def       int
+		want      int
+		wantError string
+	}{
+		{name: "unset uses default", def: 1000, want: 1000},
+		{name: "empty uses default", envValue: stringPtr(""), def: 1000, want: 1000},
+		{name: "spaces use default", envValue: stringPtr("   "), def: 1000, want: 1000},
+		{name: "integer parsed", envValue: stringPtr("64"), def: 1000, want: 64},
+		{name: "trimmed integer parsed", envValue: stringPtr(" 64 "), def: 1000, want: 64},
+		{name: "zero rejected", envValue: stringPtr("0"), def: 1000, wantError: "value must be greater than zero"},
+		{name: "negative rejected", envValue: stringPtr("-1"), def: 1000, wantError: "value must be greater than zero"},
+		{name: "invalid integer rejected", envValue: stringPtr("large"), def: 1000, wantError: "parse KLOVIS_TEST_INT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const envName = "KLOVIS_TEST_INT"
+			setEnv(t, envName, tt.envValue)
+
+			got, err := envIntWithDefault(envName, tt.def)
+			assertErrorContains(t, err, tt.wantError)
+			if tt.wantError == "" && got != tt.want {
+				t.Fatalf("envIntWithDefault() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigFromEnv(t *testing.T) {
+	t.Setenv(proxyDebugEnv, "true")
+	t.Setenv(llmEnabledEnv, "false")
+	t.Setenv(llmURLEnv, "http://localhost:11435")
+	t.Setenv(llmModelEnv, "llama")
+	t.Setenv(llmTimeoutEnv, "5s")
+	t.Setenv(llmMaxCharsEnv, "64")
+	t.Setenv(llmAutoStartEnv, "true")
+
+	config, err := runtimeConfigFromEnv()
 	if err != nil {
-		t.Fatalf("run returned error: %v", err)
+		t.Fatalf("runtimeConfigFromEnv returned error: %v", err)
 	}
 
-	if got, want := stdout.String(), "Email: [EMAIL_1]\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
+	if !config.DebugTrafficLog {
+		t.Fatal("DebugTrafficLog = false, want true")
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
+	if config.LLMEnabled {
+		t.Fatal("LLMEnabled = true, want false")
+	}
+	if config.LLMBaseURL != "http://localhost:11435" {
+		t.Fatalf("LLMBaseURL = %q, want custom URL", config.LLMBaseURL)
+	}
+	if config.LLMModel != "llama" {
+		t.Fatalf("LLMModel = %q, want llama", config.LLMModel)
+	}
+	if config.LLMTimeout != 5*time.Second {
+		t.Fatalf("LLMTimeout = %s, want 5s", config.LLMTimeout)
+	}
+	if config.LLMMaxChunkBytes != 64 {
+		t.Fatalf("LLMMaxChunkBytes = %d, want 64", config.LLMMaxChunkBytes)
+	}
+	if !config.LLMAutoStart {
+		t.Fatal("LLMAutoStart = false, want true")
 	}
 }
 
-func TestRunStatsWriteToStderrOnly(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+func TestRuntimeLoggerDisabledDoesNotCreateProxyLog(t *testing.T) {
+	t.Chdir(t.TempDir())
 
-	err := runWithDependencies(
-		strings.NewReader("Tel: 06 12 34 56 78\n"),
-		&stdout,
-		&stderr,
-		[]string{"--stats"},
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(nil, nil),
-	)
+	logger, closeLog, err := runtimeLogger(false)
 	if err != nil {
-		t.Fatalf("run returned error: %v", err)
+		t.Fatalf("runtime logger: %v", err)
 	}
-
-	if got, want := stdout.String(), "Tel: [PHONE_1]\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
+	logger.Debug().Str("body", "{}").Msg("traffic body")
+	if closeLog != nil {
+		t.Fatal("closeLog is not nil, want stdout logger without file")
 	}
-	if !strings.Contains(stderr.String(), "PHONE count=1") {
-		t.Fatalf("stderr = %q, want phone stats", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "time.anonymization=") ||
-		!strings.Contains(stderr.String(), "time.total=") ||
-		!strings.Contains(stderr.String(), "time.gitleaks_total=") ||
-		!strings.Contains(stderr.String(), "time.presidio_total=") ||
-		!strings.Contains(stderr.String(), "detectors.builtin=") ||
-		!strings.Contains(stderr.String(), "stdin.bytes=") ||
-		!strings.Contains(stderr.String(), "stdin.empty=") ||
-		!strings.Contains(stderr.String(), "stdout.bytes=") {
-		t.Fatalf("stderr = %q, want timing stats", stderr.String())
+	if _, err := os.Stat(proxy.DefaultLogPath); !os.IsNotExist(err) {
+		t.Fatalf("proxy log stat error = %v, want not exist", err)
 	}
 }
 
-func TestRunNoExtraDisablesExtraDetectors(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	input := "https://example.com aa:bb:cc:dd:ee:ff"
+func TestRuntimeLoggerDebugWritesProxyLog(t *testing.T) {
+	t.Chdir(t.TempDir())
 
-	err := runWithDependencies(
-		strings.NewReader(input),
-		&stdout,
-		&stderr,
-		[]string{"--no-extra"},
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(nil, nil),
-	)
+	logger, closeLog, err := runtimeLogger(true)
 	if err != nil {
-		t.Fatalf("run returned error: %v", err)
+		t.Fatalf("runtime logger: %v", err)
+	}
+	logger.Debug().Str("body", "{}").Msg("traffic body")
+	if closeLog == nil {
+		t.Fatal("closeLog is nil, want file logger")
+	}
+	if err := closeLog.Close(); err != nil {
+		t.Fatalf("close runtime logger: %v", err)
 	}
 
-	if got := stdout.String(); got != input {
-		t.Fatalf("stdout = %q, want original %q", got, input)
+	logContent, err := os.ReadFile(proxy.DefaultLogPath)
+	if err != nil {
+		t.Fatalf("read proxy log: %v", err)
+	}
+	if got := string(logContent); !strings.Contains(got, `"level":"debug"`) || !strings.Contains(got, `"body":"{}"`) {
+		t.Fatalf("proxy log = %q, want debug traffic event", got)
 	}
 }
 
-func TestRunReturnsCleanReadError(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+func TestBuildApplicationComposesServices(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
 
-	err := runWithDependencies(
-		failingReader{},
-		&stdout,
-		&stderr,
-		nil,
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(nil, nil),
-	)
+	ollama := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			writer.WriteHeader(http.StatusOK)
+		case "/api/generate":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"response":"{\"entities\":[{\"type\":\"PERSON_NAME\",\"text\":\"Jean Dupont\"}]}","done":true}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer ollama.Close()
+
+	var logs strings.Builder
+	logger := zerolog.New(&logs)
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Addr:             ":9090",
+		Target:           mustParseURL(t, upstream.URL),
+		Logger:           &logger,
+		Detectors:        noExternalDetectorsConfig(),
+		LLMEnabled:       true,
+		LLMBaseURL:       ollama.URL,
+		LLMModel:         "llama",
+		LLMTimeout:       5 * time.Second,
+		LLMMaxChunkBytes: 64,
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	if app.addr != ":9090" {
+		t.Fatalf("addr = %q, want :9090", app.addr)
+	}
+	if app.handler == nil || app.llmService == nil {
+		t.Fatalf("application dependencies not built: %#v", app)
+	}
+
+	proxyServer := httptest.NewServer(app.handler)
+	defer proxyServer.Close()
+
+	response, err := proxyServer.Client().Post(proxyServer.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Bonjour Jean Dupont"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("response status = %d, want 200", response.StatusCode)
+	}
+	if strings.Contains(upstreamBody, "Jean Dupont") || !strings.Contains(upstreamBody, "Bonjour [PERSON_NAME_1]") {
+		t.Fatalf("upstream body = %q, want LLM anonymized body", upstreamBody)
+	}
+	if !strings.Contains(logs.String(), `"message":"llm enabled"`) || !strings.Contains(logs.String(), `"autostart":false`) {
+		t.Fatalf("logs = %q, want llm enabled log", logs.String())
+	}
+}
+
+func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
+	_, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, "https://api.anthropic.com"),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		LLMEnabled: true,
+		LLMBaseURL: "localhost:11434",
+	})
+	if err == nil || !strings.Contains(err.Error(), "connect llm") {
+		t.Fatalf("error = %v, want llm startup error", err)
+	}
+}
+
+func setEnv(t *testing.T, name string, value *string) {
+	t.Helper()
+
+	if value == nil {
+		previous, existed := os.LookupEnv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset env %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv(name, previous)
+			} else {
+				_ = os.Unsetenv(name)
+			}
+		})
+		return
+	}
+	t.Setenv(name, *value)
+}
+
+func mustParseURL(t *testing.T, value string) *url.URL {
+	t.Helper()
+
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+	return parsed
+}
+
+func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
+	return &logger
+}
+
+func noExternalDetectorsConfig() detectors.Config {
+	config := detectors.DefaultConfig()
+	config.EnableGitleaks = false
+	config.EnablePresidio = false
+	return config
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func assertErrorContains(t *testing.T, err error, want string) {
+	t.Helper()
+
+	if want == "" {
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		return
+	}
 	if err == nil {
-		t.Fatal("run returned nil error")
+		t.Fatalf("error = nil, want containing %q", want)
 	}
-	if !strings.Contains(err.Error(), "read stdin") {
-		t.Fatalf("error = %q, want read stdin context", err.Error())
-	}
-}
-
-func TestRunDoesNotCallLLMWithoutFlag(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	called := false
-
-	err := runWithLLMFactory(
-		strings.NewReader("Bonjour Jean Dupont\n"),
-		&stdout,
-		&stderr,
-		nil,
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			called = true
-			return nil, fmt.Errorf("should not be called")
-		},
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if called {
-		t.Fatal("llm factory was called without --llm")
-	}
-	if got, want := stdout.String(), "Bonjour Jean Dupont\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-}
-
-func TestRunLoadsExternalDetectorsByDefault(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	external := []anonymizer.Detector{
-		staticDetector{matches: []anonymizer.Match{{Start: 6, End: 12, Type: anonymizer.EntitySecret, Priority: 600}}},
-	}
-	err := runWithDependencies(
-		strings.NewReader("token=abc123\n"),
-		&stdout,
-		&stderr,
-		nil,
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(external, nil),
-		newTestExternalRulesLoader(nil, nil),
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if got, want := stdout.String(), "token=[SECRET_1]\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-}
-
-func TestRunReturnsExternalDetectorLoadError(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := runWithDependencies(
-		strings.NewReader("token=abc123\n"),
-		&stdout,
-		&stderr,
-		nil,
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, fmt.Errorf("boom")),
-		newTestExternalRulesLoader(nil, nil),
-	)
-	if err == nil || !strings.Contains(err.Error(), "load gitleaks detectors") {
-		t.Fatalf("error = %v, want gitleaks load error", err)
-	}
-}
-
-func TestRunLoadsPresidioDetectorsByDefault(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	presidio := []anonymizer.Detector{
-		staticDetector{matches: []anonymizer.Match{{Start: 5, End: 15, Type: anonymizer.EntityDate, Priority: 600}}},
-	}
-	err := runWithDependencies(
-		strings.NewReader("date=2024-01-12\n"),
-		&stdout,
-		&stderr,
-		nil,
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(presidio, nil),
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if got, want := stdout.String(), "date=[DATE_1]\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-}
-
-func TestRunReturnsPresidioLoadError(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := runWithDependencies(
-		strings.NewReader("date=2024-01-12\n"),
-		&stdout,
-		&stderr,
-		nil,
-		newTestLLMFactory(),
-		newTestServerEnsurer(),
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(nil, fmt.Errorf("boom")),
-	)
-	if err == nil || !strings.Contains(err.Error(), "load presidio detectors") {
-		t.Fatalf("error = %v, want presidio load error", err)
-	}
-}
-
-func TestRunDoesNotEnsureOllamaWithoutLLMFlag(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	called := false
-
-	err := runWithLLMDependencies(
-		strings.NewReader("Bonjour Jean Dupont\n"),
-		&stdout,
-		&stderr,
-		nil,
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return nil, fmt.Errorf("should not be called")
-		},
-		func(context.Context, string, time.Duration) (func(), error) {
-			called = true
-			return func() {}, nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if called {
-		t.Fatal("ollama ensure was called without --llm")
-	}
-}
-
-func TestRunProxySubcommandCallsProxyRunner(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	called := false
-
-	err := runWithRuntimeDependencies(
-		strings.NewReader("Email: alice@example.com\n"),
-		&stdout,
-		&stderr,
-		[]string{"proxy"},
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return nil, fmt.Errorf("should not be called")
-		},
-		func(context.Context, string, time.Duration) (func(), error) {
-			return nil, fmt.Errorf("should not be called")
-		},
-		newTestExternalRulesLoader(nil, nil),
-		newTestExternalRulesLoader(nil, nil),
-		func(io.Writer) error {
-			called = true
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if !called {
-		t.Fatal("proxy runner was not called")
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
-	}
-}
-
-func TestRunWithLLMAnonymizesLLMEntities(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := runWithLLMFactory(
-		strings.NewReader("Bonjour Jean Dupont\n"),
-		&stdout,
-		&stderr,
-		[]string{"--llm", "--stats"},
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return fakeCmdExtractor{
-				entities: []llm.Entity{{Type: "PERSON_NAME", Text: "Jean Dupont"}},
-			}, nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if got, want := stdout.String(), "Bonjour [PERSON_NAME_1]\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-	if !strings.Contains(stderr.String(), "llm.PERSON_NAME count=1") {
-		t.Fatalf("stderr = %q, want person name stats", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "time.llm_startup=") ||
-		!strings.Contains(stderr.String(), "time.llm_extraction=") ||
-		!strings.Contains(stderr.String(), "time.llm_shutdown=") ||
-		!strings.Contains(stderr.String(), "llm.chunks=1") {
-		t.Fatalf("stderr = %q, want llm timing stats", stderr.String())
-	}
-}
-
-func TestRunWithLLMCallsShutdownCleanup(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cleanupCalled := false
-
-	err := runWithLLMDependencies(
-		strings.NewReader("Bonjour Jean Dupont\n"),
-		&stdout,
-		&stderr,
-		[]string{"--llm", "--stats"},
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return fakeCmdExtractor{}, nil
-		},
-		func(context.Context, string, time.Duration) (func(), error) {
-			return func() { cleanupCalled = true }, nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if !cleanupCalled {
-		t.Fatal("ollama cleanup was not called")
-	}
-	if !strings.Contains(stderr.String(), "time.llm_shutdown=") {
-		t.Fatalf("stderr = %q, want llm shutdown timing", stderr.String())
-	}
-}
-
-func TestRunWithLLMReturnsOllamaStartupError(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := runWithLLMDependencies(
-		strings.NewReader("Bonjour Jean Dupont\n"),
-		&stdout,
-		&stderr,
-		[]string{"--llm"},
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return fakeCmdExtractor{}, nil
-		},
-		func(context.Context, string, time.Duration) (func(), error) {
-			return nil, fmt.Errorf("ollama missing")
-		},
-	)
-	if err == nil || !strings.Contains(err.Error(), "start ollama") {
-		t.Fatalf("error = %v, want ollama startup error", err)
-	}
-}
-
-func TestRunWithLLMKeepsRegexPriorityOverLLM(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := runWithLLMFactory(
-		strings.NewReader("Email: alice@example.com\n"),
-		&stdout,
-		&stderr,
-		[]string{"--llm", "--stats"},
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return fakeCmdExtractor{
-				entities: []llm.Entity{{Type: "OTHER_PII", Text: "alice@example.com"}},
-			}, nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
-	}
-	if got, want := stdout.String(), "Email: [EMAIL_1]\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-	if strings.Contains(stderr.String(), "llm.OTHER_PII") {
-		t.Fatalf("stderr = %q, LLM overlap should not be counted", stderr.String())
-	}
-}
-
-func TestRunWithLLMReturnsExtractorError(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := runWithLLMFactory(
-		strings.NewReader("Bonjour Jean Dupont\n"),
-		&stdout,
-		&stderr,
-		[]string{"--llm"},
-		func(string, string, time.Duration) (llm.Extractor, error) {
-			return fakeCmdExtractor{err: fmt.Errorf("llm down")}, nil
-		},
-	)
-	if err == nil || !strings.Contains(err.Error(), "extract llm pii") {
-		t.Fatalf("error = %v, want llm extraction error", err)
-	}
-}
-
-type fakeCmdExtractor struct {
-	entities []llm.Entity
-	err      error
-}
-
-func (f fakeCmdExtractor) Extract(context.Context, []byte) ([]llm.Entity, error) {
-	return f.entities, f.err
-}
-
-type staticDetector struct {
-	matches []anonymizer.Match
-}
-
-func (d staticDetector) FindAll([]byte) []anonymizer.Match {
-	return d.matches
-}
-
-func newTestLLMFactory() llmExtractorFactory {
-	return func(string, string, time.Duration) (llm.Extractor, error) {
-		return fakeCmdExtractor{}, nil
-	}
-}
-
-func newTestServerEnsurer() llmServerEnsurer {
-	return func(context.Context, string, time.Duration) (func(), error) {
-		return func() {}, nil
-	}
-}
-
-func newTestExternalRulesLoader(loaded []anonymizer.Detector, err error) externalRulesLoader {
-	return func(context.Context, string, time.Duration) (detectors.ExternalRuleLoadResult, error) {
-		return detectors.ExternalRuleLoadResult{Detectors: loaded}, err
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want containing %q", err.Error(), want)
 	}
 }

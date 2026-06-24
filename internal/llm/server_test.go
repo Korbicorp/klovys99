@@ -18,25 +18,36 @@ func TestEnsureOllamaServerReturnsWhenServerIsReady(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cleanup, err := EnsureOllamaServer(context.Background(), server.URL, time.Second)
+	cleanup, err := EnsureOllamaServer(context.Background(), server.URL, time.Second, false)
 	if err != nil {
 		t.Fatalf("EnsureOllamaServer returned error: %v", err)
 	}
-	cleanup()
+	if err := cleanup.Close(); err != nil {
+		t.Fatalf("cleanup close: %v", err)
+	}
 }
 
 func TestEnsureOllamaServerSkipsNonLocalURL(t *testing.T) {
-	cleanup, err := EnsureOllamaServer(context.Background(), "http://example.com:11434", time.Millisecond)
+	cleanup, err := EnsureOllamaServer(context.Background(), "http://example.com:11434", time.Millisecond, false)
 	if err != nil {
 		t.Fatalf("EnsureOllamaServer returned error: %v", err)
 	}
-	cleanup()
+	if err := cleanup.Close(); err != nil {
+		t.Fatalf("cleanup close: %v", err)
+	}
+}
+
+func TestEnsureOllamaServerReturnsErrorWhenAutostartIsDisabled(t *testing.T) {
+	_, err := EnsureOllamaServer(context.Background(), "http://127.0.0.1:1", time.Millisecond, false)
+	if err == nil || !strings.Contains(err.Error(), "autostart is disabled") {
+		t.Fatalf("error = %v, want autostart disabled error", err)
+	}
 }
 
 func TestEnsureOllamaServerReturnsErrorWhenOllamaIsMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	_, err := EnsureOllamaServer(context.Background(), "http://127.0.0.1:1", time.Millisecond)
+	_, err := EnsureOllamaServer(context.Background(), "http://127.0.0.1:1", time.Millisecond, true)
 	if err == nil || !strings.Contains(err.Error(), "ollama executable not found") {
 		t.Fatalf("error = %v, want missing executable error", err)
 	}

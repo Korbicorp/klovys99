@@ -1,20 +1,15 @@
 package detectors
 
 import (
+	"context"
+	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
 	"github.com/dlclark/regexp2"
-)
-
-const (
-	priorityCritical = 1000
-	priorityHigh     = 900
-	priorityDefault  = 700
-	priorityMedium   = 600
-	priorityName     = 500
-	priorityGeneric  = 100
+	"github.com/rs/zerolog/log"
 )
 
 type regexDetector struct {
@@ -28,115 +23,73 @@ type regexDetector struct {
 	// Example: with "Prénom: Armand", group 0 is the full match and group 2 is
 	// only "Armand", which lets the anonymizer preserve the "Prénom:" label.
 	captureGroup int
-	// spanAdjuster trims or rejects a captured span after regex matching.
-	spanAdjuster func([]byte, int, int) (int, int)
-	// normalizer converts the matched value into a stable pseudonymization key.
-	normalizer func([]byte) string
-	// matchNormalizer can normalize from the full regex match context.
-	matchNormalizer func([]byte, []int) string
+	// spanPolicy trims or rejects a captured span after regex matching.
+	spanPolicy spanPolicy
+	// normalizerPolicy converts the matched value into a stable pseudonymization key.
+	normalizerPolicy normalizerPolicy
 }
 
-func (d regexDetector) FindAll(text []byte) []anonymizer.Match {
-	input := string(text)
-	runeToByte := runeToByteOffsets(input)
+type spanPolicy int
 
-	match, err := d.pattern.FindStringMatch(input)
-	if err != nil {
-		panic(err)
-	}
+const (
+	spanPolicyNone spanPolicy = iota
+	spanPolicyTrimConservative
+	spanPolicyRequireLettersAndDigits
+)
 
-	var matches []anonymizer.Match
-	for match != nil {
-		start, end, ok := captureByteRange(match, d.captureGroup, runeToByte)
-		if !ok {
-			next, nextErr := d.pattern.FindNextMatch(match)
-			if nextErr != nil {
-				panic(nextErr)
-			}
-			match = next
-			continue
-		}
-		if d.spanAdjuster != nil {
-			start, end = d.spanAdjuster(text, start, end)
-			if start >= end {
-				next, nextErr := d.pattern.FindNextMatch(match)
-				if nextErr != nil {
-					panic(nextErr)
-				}
-				match = next
-				continue
-			}
-		}
+type normalizerPolicy int
 
-		normalized := ""
-		switch {
-		case d.matchNormalizer != nil:
-			normalized = d.matchNormalizer(text, buildMatchIndex(match, runeToByte))
-		case d.normalizer != nil:
-			normalized = d.normalizer(text[start:end])
-		default:
-			normalized = normalizeFold(text[start:end])
-		}
+const (
+	normalizerPolicyFold normalizerPolicy = iota
+	normalizerPolicyDigitsAndLetters
+	normalizerPolicyPhone
+)
 
-		matches = append(matches, anonymizer.Match{
-			Start:      start,
-			End:        end,
-			Type:       d.entityType,
-			Priority:   d.priority,
-			Normalized: normalized,
-		})
+const (
+	priorityCritical = 1000
+	priorityHigh     = 900
+	priorityDefault  = 700
+	priorityMedium   = 600
+	priorityName     = 500
+	priorityGeneric  = 100
+)
 
-		match, err = d.pattern.FindNextMatch(match)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	return matches
+type Config struct {
+	EnableExtra     bool
+	EnableGitleaks  bool
+	EnablePresidio  bool
+	GitleaksURL     string
+	GitleaksTimeout time.Duration
+	PresidioURL     string
+	PresidioBaseURL string
+	PresidioTimeout time.Duration
 }
 
-func runeToByteOffsets(input string) []int {
-	offsets := make([]int, 0, len([]rune(input))+1)
-	for index := range input {
-		offsets = append(offsets, index)
-	}
-	offsets = append(offsets, len(input))
-	return offsets
+type LoadResult struct {
+	Detectors         []anonymizer.Detector
+	BuiltinDetectors  int
+	ExternalDetectors int
+	Gitleaks          ExternalLoadMetrics
+	Presidio          ExternalLoadMetrics
 }
 
-func captureByteRange(match *regexp2.Match, captureGroup int, runeToByte []int) (int, int, bool) {
-	group := match.GroupByNumber(captureGroup)
-	if group == nil || group.Length == 0 && captureGroup > 0 {
-		return 0, 0, false
-	}
-
-	start := group.Index
-	end := group.Index + group.Length
-	if start < 0 || end < start || end >= len(runeToByte) {
-		return 0, 0, false
-	}
-
-	return runeToByte[start], runeToByte[end], true
+type Service struct {
+	config Config
 }
 
-func buildMatchIndex(match *regexp2.Match, runeToByte []int) []int {
-	groups := match.Groups()
-	indices := make([]int, len(groups)*2)
-	for i, group := range groups {
-		groupStart, groupEnd := -1, -1
-		if group.Length > 0 || i == 0 {
-			start := group.Index
-			end := group.Index + group.Length
-			if start >= 0 && end >= start && end < len(runeToByte) {
-				groupStart = runeToByte[start]
-				groupEnd = runeToByte[end]
-			}
-		}
-		indices[i*2] = groupStart
-		indices[i*2+1] = groupEnd
+func DefaultConfig() Config {
+	return Config{
+		EnableExtra:    true,
+		EnableGitleaks: true,
+		EnablePresidio: true,
 	}
+}
 
-	return indices
+func NewService(config Config) *Service {
+	if config == (Config{}) {
+		config = DefaultConfig()
+	}
+	return &Service{config: config}
 }
 
 func Default(includeExtra bool) []anonymizer.Detector {
@@ -170,6 +123,188 @@ func Default(includeExtra bool) []anonymizer.Detector {
 	)
 }
 
+func (s *Service) Load(ctx context.Context) (LoadResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	detectors, err := loadBuiltinDetectors(s.config.EnableExtra)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	result := LoadResult{
+		Detectors:        detectors,
+		BuiltinDetectors: len(detectors),
+	}
+
+	if s.config.EnableGitleaks {
+		sourceURL := strings.TrimSpace(s.config.GitleaksURL)
+		if sourceURL == "" {
+			sourceURL = DefaultGitleaksURL
+		}
+		timeout := s.config.GitleaksTimeout
+		if timeout <= 0 {
+			timeout = DefaultGitleaksTimeout
+		}
+
+		loadCtx, cancel := context.WithTimeout(ctx, timeout)
+		loadResult, err := LoadGitleaksRulesWithStats(loadCtx, sourceURL, timeout)
+		cancel()
+		if err != nil {
+			return LoadResult{}, fmt.Errorf("load gitleaks detectors: %w", err)
+		}
+		result.Detectors = append(result.Detectors, loadResult.Detectors...)
+		result.ExternalDetectors += len(loadResult.Detectors)
+		result.Gitleaks = loadResult.Metrics
+	}
+
+	if s.config.EnablePresidio {
+		sourceURL := strings.TrimSpace(s.config.PresidioURL)
+		if sourceURL == "" {
+			sourceURL = DefaultPresidioURL
+		}
+		timeout := s.config.PresidioTimeout
+		if timeout <= 0 {
+			timeout = DefaultPresidioTimeout
+		}
+		sourceBaseURL := strings.TrimSpace(s.config.PresidioBaseURL)
+		if sourceBaseURL == "" {
+			sourceBaseURL = defaultPresidioSourceBase
+		}
+
+		loadCtx, cancel := context.WithTimeout(ctx, timeout)
+		loadResult, err := loadPresidioRulesWithStats(loadCtx, sourceURL, sourceBaseURL, timeout)
+		cancel()
+		if err != nil {
+			return LoadResult{}, fmt.Errorf("load presidio detectors: %w", err)
+		}
+		result.Detectors = append(result.Detectors, loadResult.Detectors...)
+		result.ExternalDetectors += len(loadResult.Detectors)
+		result.Presidio = loadResult.Metrics
+	}
+
+	return result, nil
+}
+
+func loadBuiltinDetectors(includeExtra bool) (detectors []anonymizer.Detector, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = builtinDetectorLoadError(recovered)
+		}
+	}()
+
+	return Default(includeExtra), nil
+}
+
+func builtinDetectorLoadError(recovered any) error {
+	return fmt.Errorf("load builtin detectors: %v", recovered)
+}
+
+func (d regexDetector) FindAll(text string) []anonymizer.Match {
+	runeToByte := runeToByteOffsets(text)
+
+	match, err := d.pattern.FindStringMatch(text)
+	if err != nil {
+		d.logMatchError(err)
+		return nil
+	}
+
+	var matches []anonymizer.Match
+	for match != nil {
+		start, end, ok := captureByteRange(match, d.captureGroup, runeToByte)
+		if !ok {
+			next, nextErr := d.pattern.FindNextMatch(match)
+			if nextErr != nil {
+				d.logMatchError(nextErr)
+				return matches
+			}
+			match = next
+			continue
+		}
+		if d.spanPolicy != spanPolicyNone {
+			start, end = d.adjustSpan(text, start, end)
+			if start >= end {
+				next, nextErr := d.pattern.FindNextMatch(match)
+				if nextErr != nil {
+					d.logMatchError(nextErr)
+					return matches
+				}
+				match = next
+				continue
+			}
+		}
+
+		matches = append(matches, anonymizer.Match{
+			Start:      start,
+			End:        end,
+			Type:       d.entityType,
+			Priority:   d.priority,
+			Normalized: d.normalize(text[start:end]),
+		})
+
+		match, err = d.pattern.FindNextMatch(match)
+		if err != nil {
+			d.logMatchError(err)
+			return matches
+		}
+	}
+
+	return matches
+}
+
+func (d regexDetector) logMatchError(err error) {
+	log.Error().
+		Err(err).
+		Str("entity_type", string(d.entityType)).
+		Msg("regex detector failed")
+}
+
+func (d regexDetector) adjustSpan(text string, start, end int) (int, int) {
+	switch d.spanPolicy {
+	case spanPolicyTrimConservative:
+		return trimConservativeValueSpan(text, start, end)
+	case spanPolicyRequireLettersAndDigits:
+		return requireLettersAndDigitsSpan(text, start, end)
+	default:
+		return start, end
+	}
+}
+
+func (d regexDetector) normalize(value string) string {
+	switch d.normalizerPolicy {
+	case normalizerPolicyDigitsAndLetters:
+		return keepDigitsAndLetters(value)
+	case normalizerPolicyPhone:
+		return normalizePhone(value)
+	default:
+		return normalizeFold(value)
+	}
+}
+
+func runeToByteOffsets(input string) []int {
+	offsets := make([]int, 0, len([]rune(input))+1)
+	for index := range input {
+		offsets = append(offsets, index)
+	}
+	offsets = append(offsets, len(input))
+	return offsets
+}
+
+func captureByteRange(match *regexp2.Match, captureGroup int, runeToByte []int) (int, int, bool) {
+	group := match.GroupByNumber(captureGroup)
+	if group == nil || group.Length == 0 && captureGroup > 0 {
+		return 0, 0, false
+	}
+
+	start := group.Index
+	end := group.Index + group.Length
+	if start < 0 || end < start || end >= len(runeToByte) {
+		return 0, 0, false
+	}
+
+	return runeToByte[start], runeToByte[end], true
+}
+
 func emailDetector() anonymizer.Detector {
 	return regexDetector{
 		entityType:   anonymizer.EntityEmail,
@@ -179,7 +314,7 @@ func emailDetector() anonymizer.Detector {
 			`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -192,7 +327,7 @@ func urlDetector() anonymizer.Detector {
 			`(?i)\b(?:https?://|www\.)[^\s<>"']+[^\s<>"'.,;:!?)]`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -216,7 +351,7 @@ func ipDetector() anonymizer.Detector {
 				`)\b`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -229,7 +364,7 @@ func nirDetector() anonymizer.Detector {
 			`\b[12]\s?\d{2}\s?(?:0[1-9]|1[0-2]|2[ABab])\s?\d{2}\s?\d{3}\s?\d{3}\s?\d{2}\b`,
 			regexp2.RE2,
 		),
-		normalizer: keepDigitsAndLetters,
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
 	}
 }
 
@@ -243,7 +378,7 @@ func phoneDetector() anonymizer.Detector {
 				`\b00[1-9]\d{0,2}(?:[\s.\-]?\d{2}){4,6}\b)`,
 			regexp2.RE2,
 		),
-		normalizer: normalizePhone,
+		normalizerPolicy: normalizerPolicyPhone,
 	}
 }
 
@@ -252,12 +387,12 @@ func firstNameDetector() anonymizer.Detector {
 		entityType:   anonymizer.EntityFirstName,
 		priority:     priorityName,
 		captureGroup: 2,
-		spanAdjuster: trimConservativeValueSpan,
+		spanPolicy:   spanPolicyTrimConservative,
 		pattern: regexp2.MustCompile(
 			`(?i)\b(pr[ée]nom|first[ -]?name)\s*[:=]\s*([A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ' -]{1,60})`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -266,12 +401,12 @@ func lastNameDetector() anonymizer.Detector {
 		entityType:   anonymizer.EntityLastName,
 		priority:     priorityName,
 		captureGroup: 2,
-		spanAdjuster: trimConservativeValueSpan,
+		spanPolicy:   spanPolicyTrimConservative,
 		pattern: regexp2.MustCompile(
 			`(?i)\b(nom|last[ -]?name|surname)\s*[:=]\s*([A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ' -]{1,80})`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -295,7 +430,7 @@ func ContextualNameDetector() anonymizer.Detector {
 			contextPattern+namePattern,
 			regexp2.None,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -304,7 +439,7 @@ func addressDetector() anonymizer.Detector {
 		entityType:   anonymizer.EntityAddress,
 		priority:     priorityDefault,
 		captureGroup: 1,
-		spanAdjuster: trimConservativeValueSpan,
+		spanPolicy:   spanPolicyTrimConservative,
 		pattern: regexp2.MustCompile(
 			`(?i)\b(?:adresse|address)\s*[:=]\s*(`+
 				`\d{1,4}\s*(?:bis|ter|quater)?\s+`+
@@ -315,7 +450,7 @@ func addressDetector() anonymizer.Detector {
 				`)`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -328,7 +463,7 @@ func FrenchAddressDetector() anonymizer.Detector {
 			`(?i)\b\d+(?:[\s,-]+(?:rue|avenue|boulevard|allée|place|route|chemin|faubourg|impasse|quai|square|cours)\b[\p{L}\s\d,'’.-]+)[\s,-]+\b\d{5}\b[\s,-]+(?-i:[A-ZÀ-ÖØ-Ý][\p{L}-]+(?:[\s-]+[A-ZÀ-ÖØ-Ý][\p{L}-]+){0,3})\b`,
 			regexp2.None,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -337,7 +472,7 @@ func birthDateDetector() anonymizer.Detector {
 		entityType:   anonymizer.EntityBirthDate,
 		priority:     priorityMedium,
 		captureGroup: 1,
-		spanAdjuster: trimConservativeValueSpan,
+		spanPolicy:   spanPolicyTrimConservative,
 		pattern: regexp2.MustCompile(
 			`(?i)\b(?:date\s+de\s+naissance|date\s+of\s+birth|birth\s*date|dob|n(?:é|ée|e)\s+le|born\s+on)\s*[:=]?\s*(`+
 				`(?:0?[1-9]|[12]\d|3[01])[\/.\-](?:0?[1-9]|1[0-2])[\/.\-](?:19|20)\d{2}|`+
@@ -346,7 +481,7 @@ func birthDateDetector() anonymizer.Detector {
 				`)`,
 			regexp2.RE2,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -368,7 +503,7 @@ func BloodTypeDetector() anonymizer.Detector {
 			contextPattern+bloodPattern,
 			regexp2.None,
 		),
-		normalizer: normalizeFold,
+		normalizerPolicy: normalizerPolicyFold,
 	}
 }
 
@@ -381,7 +516,7 @@ func ibanDetector() anonymizer.Detector {
 			`\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b`,
 			regexp2.RE2,
 		),
-		normalizer: keepDigitsAndLetters,
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
 	}
 }
 
@@ -394,7 +529,7 @@ func creditCardDetector() anonymizer.Detector {
 			`\b(?:\d[ -]?){13,19}\b`,
 			regexp2.RE2,
 		),
-		normalizer: keepDigitsAndLetters,
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
 	}
 }
 
@@ -407,7 +542,7 @@ func macAddressDetector() anonymizer.Detector {
 			`\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b|\b[0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5}\b`,
 			regexp2.RE2,
 		),
-		normalizer: keepDigitsAndLetters,
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
 	}
 }
 
@@ -420,7 +555,7 @@ func numericIDDetector() anonymizer.Detector {
 			`\b\d(?:[\s_-]?\d){6,}\b`,
 			regexp2.RE2,
 		),
-		normalizer: keepDigitsAndLetters,
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
 	}
 }
 
@@ -429,19 +564,19 @@ func referenceIDDetector() anonymizer.Detector {
 		entityType:   anonymizer.EntityReferenceID,
 		priority:     priorityGeneric,
 		captureGroup: 2,
-		spanAdjuster: requireLettersAndDigitsSpan,
+		spanPolicy:   spanPolicyRequireLettersAndDigits,
 		pattern: regexp2.MustCompile(
 			`(?i)\b(id|user id|client id|customer id|reference|ref|account|ticket)\s*[:=]\s*([A-Z0-9][A-Z0-9_-]{6,})\b`,
 			regexp2.RE2,
 		),
-		normalizer: keepDigitsAndLetters,
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
 	}
 }
 
-func requireLettersAndDigitsSpan(text []byte, start, end int) (int, int) {
+func requireLettersAndDigitsSpan(text string, start, end int) (int, int) {
 	hasLetter := false
 	hasDigit := false
-	for _, r := range string(text[start:end]) {
+	for _, r := range text[start:end] {
 		hasLetter = hasLetter || unicode.IsLetter(r)
 		hasDigit = hasDigit || unicode.IsDigit(r)
 	}
@@ -452,11 +587,11 @@ func requireLettersAndDigitsSpan(text []byte, start, end int) (int, int) {
 	return start, end
 }
 
-func normalizeFold(value []byte) string {
-	return strings.ToLower(strings.Join(strings.Fields(string(value)), " "))
+func normalizeFold(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
-func trimConservativeValueSpan(text []byte, start, end int) (int, int) {
+func trimConservativeValueSpan(text string, start, end int) (int, int) {
 	// Conservative name/address patterns intentionally require a label, but their
 	// value capture can otherwise consume the next labelled field on the same line.
 	for start < end && unicode.IsSpace(rune(text[start])) {
@@ -466,7 +601,7 @@ func trimConservativeValueSpan(text []byte, start, end int) (int, int) {
 		end--
 	}
 
-	value := strings.ToLower(string(text[start:end]))
+	value := strings.ToLower(text[start:end])
 	for _, label := range []string{
 		" email",
 		" e-mail",
@@ -506,9 +641,9 @@ func trimConservativeValueSpan(text []byte, start, end int) (int, int) {
 	return start, end
 }
 
-func normalizePhone(value []byte) string {
+func normalizePhone(value string) string {
 	var builder strings.Builder
-	for _, r := range string(value) {
+	for _, r := range value {
 		if unicode.IsDigit(r) || r == '+' {
 			builder.WriteRune(r)
 		}
@@ -516,9 +651,9 @@ func normalizePhone(value []byte) string {
 	return builder.String()
 }
 
-func keepDigitsAndLetters(value []byte) string {
+func keepDigitsAndLetters(value string) string {
 	var builder strings.Builder
-	for _, r := range string(value) {
+	for _, r := range value {
 		if unicode.IsDigit(r) || unicode.IsLetter(r) {
 			builder.WriteRune(unicode.ToUpper(r))
 		}
