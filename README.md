@@ -101,7 +101,13 @@ content, then forwards the modified request to Anthropic.
 The proxy anonymizes:
 
 - every `<session>...</session>` block found anywhere in a JSON request body;
-- user message content outside `<system-reminder>...</system-reminder>` blocks.
+- text content in prompts, system messages, `<system-reminder>` blocks, text file
+  context, and tool results;
+- text document sources where `source.type` is `text`.
+
+Structural metadata such as model names, roles, content block types, tool IDs,
+tool names, media types, cache-control values, and base64 document data is left
+unchanged so the Anthropic request shape remains valid.
 
 For a single proxy process, repeated values are mapped to stable tokens. For
 example, the same email address is replaced by the same `[EMAIL_N]` token across
@@ -116,7 +122,8 @@ Klovis is configured with environment variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic logging when set to `true`. |
+| `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic body logging when set to `true`. |
+| `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
 | `KLOVIS_LLM_ENABLED` | `false` | Enables optional local LLM extraction through Ollama. |
 | `KLOVIS_LLM_URL` | `http://localhost:11434` | Ollama base URL. |
 | `KLOVIS_LLM_MODEL` | `mistral` | Ollama model used for entity extraction. |
@@ -126,17 +133,24 @@ Klovis is configured with environment variables.
 
 Boolean variables accept only `true` or `false`.
 
-### Debug Logs
+### Logs
 
-By default, Klovis does not write traffic bodies to disk. To inspect the final
-request body sent upstream after anonymization, enable debug logging:
+Klovis writes structured application logs to stdout by default. To write logs to
+`proxy.log` instead, enable file logging:
 
 ```sh
-KLOVIS_PROXY_DEBUG=true go run ./cmd/klovis
+KLOVIS_LOG_TO_FILE=true go run ./cmd/klovis
 ```
 
-Debug mode writes logs to `proxy.log`. Use it only in local development, because
-it records the anonymized upstream request body.
+By default, Klovis does not write traffic bodies to disk. To also inspect the
+final request body sent upstream after anonymization, enable debug logging:
+
+```sh
+KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true go run ./cmd/klovis
+```
+
+Use debug mode carefully, because it records the anonymized upstream request body
+in whichever log destination is configured.
 
 ### Optional LLM Extraction
 

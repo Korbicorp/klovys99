@@ -24,6 +24,17 @@ const (
 	sessionCloseTag     = "</session>"
 )
 
+var metadataKeys = map[string]struct{}{
+	"cache_control": {},
+	"id":            {},
+	"media_type":    {},
+	"model":         {},
+	"name":          {},
+	"role":          {},
+	"tool_use_id":   {},
+	"type":          {},
+}
+
 type sessionPromptAnonymizer struct {
 	engine      TextAnonymizer
 	matchFinder MatchFinder
@@ -149,7 +160,7 @@ func (a *sessionPromptAnonymizer) anonymize(ctx context.Context, logger zerolog.
 	}
 
 	run := a.newRun(ctx, logger)
-	anonymized, changed := run.anonymizeSessionPrompts(payload)
+	anonymized, changed := run.anonymizeRequestValue(payload, anonymizationContext{})
 	if !changed {
 		return body
 	}
@@ -174,14 +185,18 @@ func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Log
 	}
 }
 
-func (r *promptAnonymizationRun) anonymizeSessionPrompts(value any) (any, bool) {
+type anonymizationContext struct {
+	textValue bool
+}
+
+func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonymizationContext) (any, bool) {
 	switch typed := value.(type) {
 	case string:
-		return r.anonymizeSessionPromptString(typed)
+		return r.anonymizeString(typed, context.textValue)
 	case []any:
 		changed := false
 		for index, item := range typed {
-			anonymized, itemChanged := r.anonymizeSessionPrompts(item)
+			anonymized, itemChanged := r.anonymizeRequestValue(item, context)
 			if itemChanged {
 				typed[index] = anonymized
 				changed = true
@@ -191,10 +206,14 @@ func (r *promptAnonymizationRun) anonymizeSessionPrompts(value any) (any, bool) 
 	case map[string]any:
 		changed := false
 		for key, item := range typed {
-			anonymized, itemChanged := r.anonymizeSessionPrompts(item)
-			if key == "content" && typed["role"] == "user" {
-				anonymized, itemChanged = r.anonymizeUserContent(item)
+			if isMetadataKey(key) {
+				continue
 			}
+
+			itemContext := anonymizationContext{
+				textValue: isTextValue(key, typed, context),
+			}
+			anonymized, itemChanged := r.anonymizeRequestValue(item, itemContext)
 			if itemChanged {
 				typed[key] = anonymized
 				changed = true
@@ -206,43 +225,53 @@ func (r *promptAnonymizationRun) anonymizeSessionPrompts(value any) (any, bool) 
 	}
 }
 
-func (r *promptAnonymizationRun) anonymizeUserContent(value any) (any, bool) {
-	switch typed := value.(type) {
-	case string:
-		return r.anonymizeUserText(typed)
-	case []any:
-		changed := false
-		for index, item := range typed {
-			anonymized, itemChanged := r.anonymizeUserContent(item)
-			if itemChanged {
-				typed[index] = anonymized
-				changed = true
-			}
-		}
-		return typed, changed
-	case map[string]any:
-		changed := false
-		for key, item := range typed {
-			anonymized, itemChanged := r.anonymizeUserContent(item)
-			if itemChanged {
-				typed[key] = anonymized
-				changed = true
-			}
-		}
-		return typed, changed
+func isMetadataKey(key string) bool {
+	_, ok := metadataKeys[key]
+	return ok
+}
+
+func isTextValue(key string, parent map[string]any, context anonymizationContext) bool {
+	if key == "data" {
+		return stringMapValue(parent, "type") == "text"
+	}
+
+	if key == "source" {
+		return false
+	}
+
+	if key == "content" && stringMapValue(parent, "type") == "tool_result" {
+		return true
+	}
+
+	if isTextualKey(key) {
+		return true
+	}
+
+	return context.textValue && !isMetadataKey(key)
+}
+
+func stringMapValue(value map[string]any, key string) string {
+	typed, _ := value[key].(string)
+	return typed
+}
+
+func isTextualKey(key string) bool {
+	switch key {
+	case "content", "error", "input", "output", "result", "system", "text":
+		return true
 	default:
-		return value, false
+		return false
 	}
 }
 
-func (r *promptAnonymizationRun) anonymizeUserText(value string) (string, bool) {
-	if strings.HasPrefix(strings.TrimSpace(value), "<system-reminder>") {
-		return value, false
+func (r *promptAnonymizationRun) anonymizeString(value string, textValue bool) (string, bool) {
+	if textValue {
+		return r.anonymizeTextValue(value)
 	}
-	if strings.Contains(value, sessionOpenTag) {
-		return r.anonymizeSessionPromptString(value)
-	}
+	return r.anonymizeSessionPromptString(value)
+}
 
+func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
 	anonymized, result := r.anonymizeText(value)
 	if len(result.Stats) == 0 {
 		return value, false
@@ -313,7 +342,7 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
 	}
-	event.Msg("session prompt anonymized")
+	event.Msg("request body anonymized")
 }
 
 func sortedEntityTypes(stats map[anonymizer.EntityType]int) []anonymizer.EntityType {

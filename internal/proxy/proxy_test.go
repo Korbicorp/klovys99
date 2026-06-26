@@ -140,7 +140,7 @@ func TestSessionPromptAnonymizerLogsOnlyStats(t *testing.T) {
 	}
 }
 
-func TestSessionPromptAnonymizerFindsPromptsInsideSystemPrompts(t *testing.T) {
+func TestSessionPromptAnonymizerAnonymizesSystemPrompts(t *testing.T) {
 	body := []byte(`{"system":[{"type":"text","text":"rules <session>Contact alice@example.com</session> keep alice@example.com"}]}`)
 
 	var logs bytes.Buffer
@@ -148,10 +148,10 @@ func TestSessionPromptAnonymizerFindsPromptsInsideSystemPrompts(t *testing.T) {
 	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
 	logOutput := logs.String()
 
-	if !strings.Contains(anonymizedBody, `rules <session>Contact [EMAIL_1]</session> keep alice@example.com`) {
-		t.Fatalf("body = %q, want only session content anonymized", anonymizedBody)
+	if !strings.Contains(anonymizedBody, `rules <session>Contact [EMAIL_1]</session> keep [EMAIL_1]`) {
+		t.Fatalf("body = %q, want system content anonymized", anonymizedBody)
 	}
-	if !strings.Contains(logOutput, `"EMAIL":1`) {
+	if !strings.Contains(logOutput, `"EMAIL":2`) {
 		t.Fatalf("logs = %q, want anonymized stats", logOutput)
 	}
 	for _, unexpected := range []string{"alice@example.com", "[EMAIL_1]", "prompt_original", "prompt_anonymized"} {
@@ -162,7 +162,7 @@ func TestSessionPromptAnonymizerFindsPromptsInsideSystemPrompts(t *testing.T) {
 }
 
 func TestSessionPromptAnonymizerAnonymizesUserContentOutsideSession(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>internal context</system-reminder>"},{"type":"text","text":"Donne moi l'IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}`)
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>Contact alice@example.com</system-reminder>"},{"type":"text","text":"Donne moi l'IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -175,10 +175,13 @@ func TestSessionPromptAnonymizerAnonymizesUserContentOutsideSession(t *testing.T
 	if !strings.Contains(anonymizedBody, "Donne moi l'IBAN [IBAN_1]") {
 		t.Fatalf("body = %q, want anonymized user content", anonymizedBody)
 	}
-	if !strings.Contains(logOutput, `"IBAN":1`) {
+	if !strings.Contains(anonymizedBody, "<system-reminder>Contact [EMAIL_1]</system-reminder>") {
+		t.Fatalf("body = %q, want system reminder anonymized", anonymizedBody)
+	}
+	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"IBAN":1`) {
 		t.Fatalf("logs = %q, want IBAN stats", logOutput)
 	}
-	for _, unexpected := range []string{"FR76 3000 6000 0112 3456 7890 189", "[IBAN_1]", "prompt_original", "prompt_anonymized"} {
+	for _, unexpected := range []string{"alice@example.com", "FR76 3000 6000 0112 3456 7890 189", "[EMAIL_1]", "[IBAN_1]", "prompt_original", "prompt_anonymized"} {
 		if strings.Contains(logOutput, unexpected) {
 			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
 		}
@@ -206,18 +209,114 @@ func TestSessionPromptAnonymizerLogsMultipleSessionsWithStableTokens(t *testing.
 	}
 }
 
-func TestSessionPromptAnonymizerDoesNotChangeNonUserBodyWithoutSession(t *testing.T) {
+func TestSessionPromptAnonymizerAnonymizesNonUserTextContext(t *testing.T) {
 	body := []byte(`{"system":[{"type":"text","text":"alice@example.com outside session"}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
 
-	if logs.Len() != 0 {
-		t.Fatalf("logs = %q, want empty logs without session prompt", logs.String())
+	if !strings.Contains(logs.String(), `"EMAIL":1`) {
+		t.Fatalf("logs = %q, want email stats", logs.String())
 	}
-	if anonymizedBody != string(body) {
-		t.Fatalf("body = %q, want original body", anonymizedBody)
+	if strings.Contains(anonymizedBody, "alice@example.com") || !strings.Contains(anonymizedBody, "[EMAIL_1] outside session") {
+		t.Fatalf("body = %q, want system text anonymized", anonymizedBody)
+	}
+}
+
+func TestSessionPromptAnonymizerAnonymizesDocumentTextSource(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"Owner alice@example.com uses gitleaks-secret"}}]}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	promptAnonymizer := newSessionPromptAnonymizer(anonymizer.NewService([]anonymizer.Detector{
+		literalDetector{entityType: anonymizer.EntityEmail, value: "alice@example.com"},
+		literalDetector{entityType: anonymizer.EntitySecret, value: "gitleaks-secret"},
+	}), nil)
+	anonymizedBody := promptAnonymizer.anonymize(context.Background(), logger, string(body))
+	logOutput := logs.String()
+
+	if strings.Contains(anonymizedBody, "alice@example.com") || strings.Contains(anonymizedBody, "gitleaks-secret") {
+		t.Fatalf("body = %q, want document text source anonymized", anonymizedBody)
+	}
+	if !strings.Contains(anonymizedBody, `"data":"Owner [EMAIL_1] uses [SECRET_1]"`) {
+		t.Fatalf("body = %q, want anonymized document data", anonymizedBody)
+	}
+	if !strings.Contains(anonymizedBody, `"type":"document"`) || !strings.Contains(anonymizedBody, `"type":"text"`) || !strings.Contains(anonymizedBody, `"media_type":"text/plain"`) {
+		t.Fatalf("body = %q, want document metadata preserved", anonymizedBody)
+	}
+	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"SECRET":1`) {
+		t.Fatalf("logs = %q, want document anonymization stats", logOutput)
+	}
+}
+
+func TestSessionPromptAnonymizerAnonymizesToolResults(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"},{"type":"tool_result","tool_use_id":"toolu_456","content":[{"type":"text","text":"IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
+	logOutput := logs.String()
+
+	if strings.Contains(anonymizedBody, "alice@example.com") || strings.Contains(anonymizedBody, "FR76 3000 6000 0112 3456 7890 189") {
+		t.Fatalf("body = %q, want tool results anonymized", anonymizedBody)
+	}
+	if !strings.Contains(anonymizedBody, `"content":"Email [EMAIL_1]"`) || !strings.Contains(anonymizedBody, `"text":"IBAN [IBAN_1]"`) {
+		t.Fatalf("body = %q, want string and block tool results anonymized", anonymizedBody)
+	}
+	if !strings.Contains(anonymizedBody, `"tool_use_id":"toolu_123"`) || !strings.Contains(anonymizedBody, `"tool_use_id":"toolu_456"`) {
+		t.Fatalf("body = %q, want tool result ids preserved", anonymizedBody)
+	}
+	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"IBAN":1`) {
+		t.Fatalf("logs = %q, want tool result stats", logOutput)
+	}
+}
+
+func TestSessionPromptAnonymizerKeepsTokensStableAcrossRequestContexts(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Email alice@example.com"},{"type":"document","source":{"type":"text","data":"File owner alice@example.com"}},{"type":"tool_result","tool_use_id":"toolu_123","content":"Tool saw alice@example.com"}]}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
+
+	if strings.Contains(anonymizedBody, "alice@example.com") {
+		t.Fatalf("body = %q, want email anonymized everywhere", anonymizedBody)
+	}
+	if strings.Count(anonymizedBody, "[EMAIL_1]") != 3 {
+		t.Fatalf("body = %q, want stable email token across prompt, file, and tool result", anonymizedBody)
+	}
+	if !strings.Contains(logs.String(), `"EMAIL":3`) {
+		t.Fatalf("logs = %q, want aggregated email stats", logs.String())
+	}
+}
+
+func TestSessionPromptAnonymizerPreservesMetadataAndBase64Sources(t *testing.T) {
+	body := []byte(`{"model":"claude","id":"msg_alice@example.com","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_alice@example.com","name":"lookup_alice@example.com","content":"Email alice@example.com"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YWxpY2VAZXhhbXBsZS5jb20="}}]}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
+
+	for _, preserved := range []string{
+		`"model":"claude"`,
+		`"id":"msg_alice@example.com"`,
+		`"role":"user"`,
+		`"type":"tool_result"`,
+		`"tool_use_id":"toolu_alice@example.com"`,
+		`"name":"lookup_alice@example.com"`,
+		`"type":"base64"`,
+		`"media_type":"application/pdf"`,
+		`"data":"YWxpY2VAZXhhbXBsZS5jb20="`,
+	} {
+		if !strings.Contains(anonymizedBody, preserved) {
+			t.Fatalf("body = %q, want preserved metadata %s", anonymizedBody, preserved)
+		}
+	}
+	if !strings.Contains(anonymizedBody, `"content":"Email [EMAIL_1]"`) {
+		t.Fatalf("body = %q, want tool result content anonymized", anonymizedBody)
+	}
+	if !strings.Contains(logs.String(), `"EMAIL":1`) {
+		t.Fatalf("logs = %q, want only text content email stats", logs.String())
 	}
 }
 

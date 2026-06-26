@@ -21,6 +21,7 @@ import (
 
 const (
 	proxyDebugEnv   = "KLOVIS_PROXY_DEBUG"
+	logToFileEnv    = "KLOVIS_LOG_TO_FILE"
 	llmEnabledEnv   = "KLOVIS_LLM_ENABLED"
 	llmURLEnv       = "KLOVIS_LLM_URL"
 	llmModelEnv     = "KLOVIS_LLM_MODEL"
@@ -34,6 +35,7 @@ const (
 	defaultLLMEnable        = false
 	defaultLLMAutoStart     = false
 	defaultDebug            = false
+	defaultLogToFile        = false
 	defaultLLMTimeout       = llm.DefaultTimeout
 	defaultLLMMaxChunkBytes = llm.DefaultMaxChunkBytes
 	defaultLLMBaseUrl       = llm.DefaultBaseURL
@@ -55,6 +57,7 @@ type runtimeConfig struct {
 	Target           *url.URL
 	Logger           *zerolog.Logger
 	DebugTrafficLog  bool
+	LogToFile        bool
 	Detectors        detectors.Config
 	LLMEnabled       bool
 	LLMBaseURL       string
@@ -99,11 +102,12 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	}
 	var logFile *os.File
 	if config.Logger == nil {
-		logger, openedLogFile, err := runtimeLogger(config.DebugTrafficLog)
+		logger, openedLogFile, err := runtimeLogger(config.DebugTrafficLog, config.LogToFile)
 		if err != nil {
 			return nil, err
 		}
 		config.Logger = &logger
+		log.Logger = logger
 		logFile = openedLogFile
 	}
 
@@ -218,6 +222,10 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	logToFile, err := envBoolWithDefault(logToFileEnv, defaultLogToFile)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	llmEnabled, err := envBoolWithDefault(llmEnabledEnv, defaultLLMEnable)
 	if err != nil {
 		return runtimeConfig{}, err
@@ -239,6 +247,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		Addr:             defaultProxyAdr,
 		Target:           target,
 		DebugTrafficLog:  debugTrafficLog,
+		LogToFile:        logToFile,
 		Detectors:        detectors.DefaultConfig(),
 		LLMEnabled:       llmEnabled,
 		LLMBaseURL:       envStringWithDefault(llmURLEnv, defaultLLMBaseUrl),
@@ -249,16 +258,21 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	}, nil
 }
 
-func runtimeLogger(debugTraffic bool) (zerolog.Logger, *os.File, error) {
-	if !debugTraffic {
-		return zerolog.New(os.Stdout).With().Timestamp().Logger(), nil, nil
+func runtimeLogger(debugTraffic, logToFile bool) (zerolog.Logger, *os.File, error) {
+	level := zerolog.InfoLevel
+	if debugTraffic {
+		level = zerolog.DebugLevel
+	}
+
+	if !logToFile {
+		return zerolog.New(os.Stdout).Level(level).With().Timestamp().Logger(), nil, nil
 	}
 
 	logFile, err := os.OpenFile(proxy.DefaultLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return zerolog.Logger{}, nil, fmt.Errorf("open proxy log file: %w", err)
 	}
-	logger := zerolog.New(logFile).Level(zerolog.DebugLevel).With().Timestamp().Logger()
+	logger := zerolog.New(logFile).Level(level).With().Timestamp().Logger()
 	return logger, logFile, nil
 }
 

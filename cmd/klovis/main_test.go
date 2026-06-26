@@ -14,6 +14,7 @@ import (
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/proxy"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 func TestEnvBoolWithDefault(t *testing.T) {
@@ -145,6 +146,7 @@ func TestEnvIntWithDefault(t *testing.T) {
 
 func TestRuntimeConfigFromEnv(t *testing.T) {
 	t.Setenv(proxyDebugEnv, "true")
+	t.Setenv(logToFileEnv, "true")
 	t.Setenv(llmEnabledEnv, "false")
 	t.Setenv(llmURLEnv, "http://localhost:11435")
 	t.Setenv(llmModelEnv, "llama")
@@ -159,6 +161,9 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 
 	if !config.DebugTrafficLog {
 		t.Fatal("DebugTrafficLog = false, want true")
+	}
+	if !config.LogToFile {
+		t.Fatal("LogToFile = false, want true")
 	}
 	if config.LLMEnabled {
 		t.Fatal("LLMEnabled = true, want false")
@@ -180,26 +185,55 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	}
 }
 
-func TestRuntimeLoggerDisabledDoesNotCreateProxyLog(t *testing.T) {
+func TestRuntimeLoggerDefaultsToStdoutWithoutProxyLog(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	logger, closeLog, err := runtimeLogger(false)
+	logger, closeLog, err := runtimeLogger(false, false)
 	if err != nil {
 		t.Fatalf("runtime logger: %v", err)
 	}
-	logger.Debug().Str("body", "{}").Msg("traffic body")
 	if closeLog != nil {
-		t.Fatal("closeLog is not nil, want stdout logger without file")
+		t.Fatal("closeLog is not nil, want stdout logger")
 	}
+	logger.Info().Str("event", "startup").Msg("runtime ready")
+
 	if _, err := os.Stat(proxy.DefaultLogPath); !os.IsNotExist(err) {
 		t.Fatalf("proxy log stat error = %v, want not exist", err)
+	}
+}
+
+func TestRuntimeLoggerWritesInfoLogsToProxyLog(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	logger, closeLog, err := runtimeLogger(false, true)
+	if err != nil {
+		t.Fatalf("runtime logger: %v", err)
+	}
+	if closeLog == nil {
+		t.Fatal("closeLog is nil, want file logger")
+	}
+	logger.Info().Str("event", "startup").Msg("runtime ready")
+	logger.Debug().Str("body", "{}").Msg("traffic body")
+	if err := closeLog.Close(); err != nil {
+		t.Fatalf("close runtime logger: %v", err)
+	}
+
+	logContent, err := os.ReadFile(proxy.DefaultLogPath)
+	if err != nil {
+		t.Fatalf("read proxy log: %v", err)
+	}
+	if got := string(logContent); !strings.Contains(got, `"level":"info"`) || !strings.Contains(got, `"event":"startup"`) {
+		t.Fatalf("proxy log = %q, want info event", got)
+	}
+	if got := string(logContent); strings.Contains(got, `"level":"debug"`) || strings.Contains(got, `"body":"{}"`) {
+		t.Fatalf("proxy log = %q, want no debug traffic event without debug mode", got)
 	}
 }
 
 func TestRuntimeLoggerDebugWritesProxyLog(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	logger, closeLog, err := runtimeLogger(true)
+	logger, closeLog, err := runtimeLogger(true, true)
 	if err != nil {
 		t.Fatalf("runtime logger: %v", err)
 	}
@@ -217,6 +251,40 @@ func TestRuntimeLoggerDebugWritesProxyLog(t *testing.T) {
 	}
 	if got := string(logContent); !strings.Contains(got, `"level":"debug"`) || !strings.Contains(got, `"body":"{}"`) {
 		t.Fatalf("proxy log = %q, want debug traffic event", got)
+	}
+}
+
+func TestBuildApplicationSetsGlobalLoggerToRuntimeFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	previousLogger := log.Logger
+	t.Cleanup(func() {
+		log.Logger = previousLogger
+	})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:    mustParseURL(t, upstream.URL),
+		LogToFile: true,
+		Detectors: noExternalDetectorsConfig(),
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+
+	log.Info().Str("source", "global").Msg("global log routed")
+	app.Close()
+
+	logContent, err := os.ReadFile(proxy.DefaultLogPath)
+	if err != nil {
+		t.Fatalf("read proxy log: %v", err)
+	}
+	if got := string(logContent); !strings.Contains(got, `"source":"global"`) || !strings.Contains(got, `"message":"global log routed"`) {
+		t.Fatalf("proxy log = %q, want global log event", got)
 	}
 }
 
