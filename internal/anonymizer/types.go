@@ -54,7 +54,7 @@ func (m Match) Len() int {
 
 type Detector interface {
 	// FindAll returns every sensitive span detected in text.
-	FindAll(text []byte) []Match
+	FindAll(text string) []Match
 }
 
 type EntityStats struct {

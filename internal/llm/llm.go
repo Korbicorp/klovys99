@@ -1,25 +1,62 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
+	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
+	ollamaclient "github.com/Korbicorp/klovis/internal/ollama/client"
+	"github.com/rs/zerolog/log"
 )
 
 const (
 	PriorityLLM          = 50
 	MaxEntityTextBytes   = 256
 	DefaultMaxChunkBytes = 1000
+	DefaultBaseURL       = "http://localhost:11434"
+	DefaultModel         = "mistral"
+	DefaultTimeout       = 30 * time.Second
 )
+
+const piiExtractionPromptTemplate = `You are a strict PII extraction engine.
+Return only a JSON object with this shape:
+{"entities":[{"type":"PERSON_NAME","text":"Jean Dupont"}]}
+
+Allowed types:
+- PERSON_NAME
+- ADDRESS
+- DATE
+- VEHICLE_PLATE
+
+Rules:
+- Return only strings that are exactly present in the input text.
+- Do not invent values.
+- Do not return emails, phone numbers, IP addresses, URLs, IBANs, credit cards, social security numbers, MAC addresses, or obvious numeric/reference IDs.
+- Extract only person names, addresses, dates, and vehicle plates.
+- Include full person names and repeated short references to known people, such as first names used alone.
+- Include dates tied to identity, family, documents, employment, education, health, subscriptions, payments, or events.
+- Prefer the longest exact string for names and addresses, for example "Thomas Alexandre Beaumont" instead of only "Thomas Beaumont".
+- Use PERSON_NAME for named people, including titles such as "Dr Jean-Louis Berger" when present.
+- Use DATE for dates like "14 mars 1988", "octobre 2023", "2024", or "12 janvier 2007" when they are tied to the person profile.
+- Use ADDRESS for complete address strings like "42 Rue de la République, 69002 Lyon".
+- Use VEHICLE_PLATE for vehicle registration plates like "GB-123-XT".
+- Ignore document numbers, schools, employers, medical providers, locations without a full address, organizations, and other contextual identifiers.
+- If nothing is found, return {"entities":[]}.
+
+Examples:
+Input: "Thomas Alexandre Beaumont est né le 14 mars 1988 à Lyon. Il réside au 42 Rue de la République, 69002 Lyon."
+Output: {"entities":[{"type":"PERSON_NAME","text":"Thomas Alexandre Beaumont"},{"type":"DATE","text":"14 mars 1988"},{"type":"ADDRESS","text":"42 Rue de la République, 69002 Lyon"}]}
+
+Input: "Son médecin traitant est le Dr Jean-Louis Berger. Il conduit une Peugeot immatriculée GB-123-XT."
+Output: {"entities":[{"type":"PERSON_NAME","text":"Dr Jean-Louis Berger"},{"type":"VEHICLE_PLATE","text":"GB-123-XT"}]}
+
+Input text:
+%s`
 
 type Entity struct {
 	Type string `json:"type"`
@@ -27,52 +64,132 @@ type Entity struct {
 }
 
 type Extractor interface {
-	Extract(ctx context.Context, text []byte) ([]Entity, error)
+	Extract(ctx context.Context, text string) ([]Entity, error)
 }
 
-type OllamaExtractor struct {
-	baseURL    string
-	model      string
-	httpClient *http.Client
+type Config struct {
+	BaseURL       string
+	Model         string
+	Timeout       time.Duration
+	MaxChunkBytes int
+	AutoStart     bool
 }
 
-func NewOllamaExtractor(baseURL, model string, timeout time.Duration) (*OllamaExtractor, error) {
-	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("ollama base URL is required")
-	}
-	if strings.TrimSpace(model) == "" {
-		return nil, fmt.Errorf("ollama model is required")
+type Service struct {
+	matcher *MatchFinder
+	server  io.Closer
+}
+
+func NewService(ctx context.Context, config Config) (*Service, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse ollama URL: %w", err)
+	baseURL := strings.TrimSpace(config.BaseURL)
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
 	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("ollama URL must include scheme and host")
+	model := strings.TrimSpace(config.Model)
+	if model == "" {
+		model = DefaultModel
 	}
+	timeout := config.Timeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = DefaultTimeout
+	}
+	maxChunkBytes := config.MaxChunkBytes
+	if maxChunkBytes <= 0 {
+		maxChunkBytes = DefaultMaxChunkBytes
 	}
 
-	return &OllamaExtractor{
-		baseURL: strings.TrimRight(parsed.String(), "/"),
-		model:   model,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+	startupCtx, startupCancel := context.WithTimeout(ctx, timeout)
+	server, err := EnsureOllamaServer(startupCtx, baseURL, timeout, config.AutoStart)
+	startupCancel()
+	if err != nil {
+		return nil, fmt.Errorf("connect llm: %w", err)
+	}
+
+	client, err := ollamaclient.New(baseURL, timeout)
+	if err != nil {
+		_ = server.Close()
+		return nil, fmt.Errorf("initialize llm extractor: %w", err)
+	}
+	extractor, err := NewOllamaExtractor(model, client)
+	if err != nil {
+		_ = server.Close()
+		return nil, fmt.Errorf("initialize llm extractor: %w", err)
+	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, timeout)
+	if _, err := extractor.Extract(verifyCtx, "No personal data."); err != nil {
+		verifyCancel()
+		_ = server.Close()
+		return nil, fmt.Errorf("verify llm extractor: %w", err)
+	}
+	verifyCancel()
+
+	return &Service{
+		matcher: NewMatchFinder(extractor, maxChunkBytes),
+		server:  server,
 	}, nil
 }
 
-func (e *OllamaExtractor) Extract(ctx context.Context, text []byte) ([]Entity, error) {
-	if e == nil {
-		return nil, fmt.Errorf("nil ollama extractor")
+func (s *Service) FindMatches(ctx context.Context, input string) ([]anonymizer.Match, error) {
+	if s == nil || s.matcher == nil {
+		return nil, fmt.Errorf("llm service is required")
 	}
 
-	response, err := e.generate(ctx, text, piiJSONSchema())
-	if err != nil {
-		response, err = e.generate(ctx, text, "json")
+	matches, _, err := s.matcher.FindMatches(ctx, input)
+	return matches, err
+}
+
+func (s *Service) Close() {
+	if s == nil || s.server == nil {
+		return
 	}
+	_ = s.server.Close()
+}
+
+type MatchFinder struct {
+	extractor     Extractor
+	maxChunkBytes int
+}
+
+func NewMatchFinder(extractor Extractor, maxChunkBytes int) *MatchFinder {
+	if maxChunkBytes <= 0 {
+		maxChunkBytes = DefaultMaxChunkBytes
+	}
+	return &MatchFinder{
+		extractor:     extractor,
+		maxChunkBytes: maxChunkBytes,
+	}
+}
+
+type OllamaClient interface {
+	Generate(ctx context.Context, model, prompt string, format any) (string, error)
+}
+
+type OllamaExtractor struct {
+	model  string
+	client OllamaClient
+}
+
+func NewOllamaExtractor(model string, client OllamaClient) (*OllamaExtractor, error) {
+	if strings.TrimSpace(model) == "" {
+		return nil, fmt.Errorf("ollama model is required")
+	}
+	if client == nil {
+		return nil, fmt.Errorf("ollama client is required")
+	}
+
+	return &OllamaExtractor{
+		model:  model,
+		client: client,
+	}, nil
+}
+
+func (e *OllamaExtractor) Extract(ctx context.Context, text string) ([]Entity, error) {
+	response, err := e.client.Generate(ctx, e.model, fmt.Sprintf(piiExtractionPromptTemplate, text), piiJSONSchema())
 	if err != nil {
 		return nil, err
 	}
@@ -83,78 +200,29 @@ func (e *OllamaExtractor) Extract(ctx context.Context, text []byte) ([]Entity, e
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, fmt.Errorf("parse llm JSON response: %w", err)
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("parse llm JSON response: trailing data")
-	}
 
 	return payload.Entities, nil
 }
 
-func (e *OllamaExtractor) generate(ctx context.Context, text []byte, format any) (string, error) {
-	requestBody := ollamaGenerateRequest{
-		Model:  e.model,
-		Prompt: buildPrompt(text),
-		Stream: false,
-		Format: format,
-	}
-
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(requestBody); err != nil {
-		return "", fmt.Errorf("encode ollama request: %w", err)
-	}
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/api/generate", &body)
-	if err != nil {
-		return "", fmt.Errorf("create ollama request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-
-	response, err := e.httpClient.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("call ollama: %w", err)
-	}
-	defer response.Body.Close()
-
-	rawBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		return "", fmt.Errorf("read ollama response: %w", err)
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("ollama returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(rawBody)))
-	}
-
-	var payload ollamaGenerateResponse
-	decoder := json.NewDecoder(bytes.NewReader(rawBody))
-	if err := decoder.Decode(&payload); err != nil {
-		return "", fmt.Errorf("parse ollama response: %w", err)
-	}
-	if payload.Response == "" {
-		return "", fmt.Errorf("ollama response is empty")
-	}
-
-	return payload.Response, nil
-}
-
-func FindMatches(ctx context.Context, extractor Extractor, input []byte, maxChunkBytes int) ([]anonymizer.Match, int, error) {
-	if extractor == nil {
+func (f *MatchFinder) FindMatches(ctx context.Context, input string) ([]anonymizer.Match, int, error) {
+	if f == nil || f.extractor == nil {
 		return nil, 0, fmt.Errorf("llm extractor is required")
 	}
 
-	chunks := splitChunks(input, maxChunkBytes)
+	chunks := splitChunks(input, f.maxChunkBytes)
 	var matches []anonymizer.Match
 	for _, chunk := range chunks {
-		entities, err := extractor.Extract(ctx, chunk.text)
+		entities, err := f.extractor.Extract(ctx, chunk.text)
 		if err != nil {
 			return nil, len(chunks), err
 		}
-		matches = append(matches, matchesFromEntities(chunk.text, chunk.offset, entities)...)
+		matches = append(matches, matchesFromEntities(chunk.text, chunk.start, entities)...)
 	}
 
 	return deduplicateMatches(matches), len(chunks), nil
 }
 
-func matchesFromEntities(text []byte, offset int, entities []Entity) []anonymizer.Match {
+func matchesFromEntities(text string, chunkStart int, entities []Entity) []anonymizer.Match {
 	matches := make([]anonymizer.Match, 0, len(entities))
 	for _, entity := range entities {
 		entityType, ok := entityTypeFromString(entity.Type)
@@ -172,8 +240,8 @@ func matchesFromEntities(text []byte, offset int, entities []Entity) []anonymize
 		}
 
 		matches = append(matches, anonymizer.Match{
-			Start:      offset + start,
-			End:        offset + end,
+			Start:      chunkStart + start,
+			End:        chunkStart + end,
 			Type:       entityType,
 			Priority:   PriorityLLM,
 			Normalized: normalizeLLMKey(value),
@@ -183,80 +251,36 @@ func matchesFromEntities(text []byte, offset int, entities []Entity) []anonymize
 	return matches
 }
 
-func locateEntity(text []byte, value string) (int, int, bool) {
-	if index := bytes.Index(text, []byte(value)); index >= 0 {
-		return index, index + len(value), true
-	}
-
-	return locateNormalized(text, value)
-}
-
-func locateNormalized(text []byte, value string) (int, int, bool) {
-	haystack, offsets := normalizeWithOffsets(text)
-	needle := normalizeString(value)
-	if len(needle) == 0 || len(needle) > len(haystack) {
+func locateEntity(text string, value string) (int, int, bool) {
+	pattern := entityPattern(value)
+	if pattern == "" {
 		return 0, 0, false
 	}
 
-	start := indexRunes(haystack, needle)
-	if start < 0 {
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		log.Error().Err(err).Msg("compile llm entity locator regex")
 		return 0, 0, false
 	}
-	end := start + len(needle)
 
-	byteStart := offsets[start]
-	byteEnd := len(text)
-	if end < len(offsets) {
-		byteEnd = offsets[end]
+	match := compiled.FindStringIndex(text)
+	if match == nil {
+		return 0, 0, false
 	}
 
-	return byteStart, byteEnd, true
+	return match[0], match[1], true
 }
 
-func normalizeWithOffsets(text []byte) ([]rune, []int) {
-	normalized := make([]rune, 0, len(text))
-	offsets := make([]int, 0, len(text))
-	lastWasSpace := false
-
-	for offset, r := range string(text) {
-		if unicode.IsSpace(r) {
-			if lastWasSpace {
-				continue
-			}
-			normalized = append(normalized, ' ')
-			offsets = append(offsets, offset)
-			lastWasSpace = true
-			continue
-		}
-
-		normalized = append(normalized, unicode.ToLower(r))
-		offsets = append(offsets, offset)
-		lastWasSpace = false
+func entityPattern(value string) string {
+	parts := strings.Fields(value)
+	if len(parts) == 0 {
+		return ""
+	}
+	for index, part := range parts {
+		parts[index] = regexp.QuoteMeta(part)
 	}
 
-	return normalized, offsets
-}
-
-func normalizeString(value string) []rune {
-	normalized, _ := normalizeWithOffsets([]byte(strings.TrimSpace(value)))
-	return normalized
-}
-
-func indexRunes(haystack, needle []rune) int {
-	for i := 0; i <= len(haystack)-len(needle); i++ {
-		matches := true
-		for j := range needle {
-			if haystack[i+j] != needle[j] {
-				matches = false
-				break
-			}
-		}
-		if matches {
-			return i
-		}
-	}
-
-	return -1
+	return `(?i)` + strings.Join(parts, `\s+`)
 }
 
 func entityTypeFromString(value string) (anonymizer.EntityType, bool) {
@@ -267,6 +291,8 @@ func entityTypeFromString(value string) (anonymizer.EntityType, bool) {
 		return anonymizer.EntityAddress, true
 	case anonymizer.EntityDate:
 		return anonymizer.EntityDate, true
+	case anonymizer.EntityVehiclePlate:
+		return anonymizer.EntityVehiclePlate, true
 	default:
 		return "", false
 	}
@@ -277,25 +303,25 @@ func normalizeLLMKey(value string) string {
 }
 
 type chunk struct {
-	text   []byte
-	offset int
+	text  string
+	start int
 }
 
-func splitChunks(input []byte, maxChunkBytes int) []chunk {
+func splitChunks(input string, maxChunkBytes int) []chunk {
 	if maxChunkBytes <= 0 || len(input) <= maxChunkBytes {
-		return []chunk{{text: input, offset: 0}}
+		return []chunk{{text: input, start: 0}}
 	}
 
 	var chunks []chunk
 	for start := 0; start < len(input); {
 		end := start + maxChunkBytes
 		if end >= len(input) {
-			chunks = append(chunks, chunk{text: input[start:], offset: start})
+			chunks = append(chunks, chunk{text: input[start:], start: start})
 			break
 		}
 
 		split := bestSplit(input, start, end)
-		chunks = append(chunks, chunk{text: input[start:split], offset: start})
+		chunks = append(chunks, chunk{text: input[start:split], start: start})
 
 		start = split
 	}
@@ -303,7 +329,7 @@ func splitChunks(input []byte, maxChunkBytes int) []chunk {
 	return chunks
 }
 
-func bestSplit(input []byte, start, end int) int {
+func bestSplit(input string, start, end int) int {
 	min := start + ((end - start) / 2)
 	for i := end; i > min; i-- {
 		if isSplitPunctuation(input[i-1]) {
@@ -330,10 +356,10 @@ func isSplitPunctuation(value byte) bool {
 }
 
 func deduplicateMatches(matches []anonymizer.Match) []anonymizer.Match {
-	seen := make(map[string]struct{}, len(matches))
+	seen := make(map[llmMatchKey]struct{}, len(matches))
 	deduplicated := matches[:0]
 	for _, match := range matches {
-		key := fmt.Sprintf("%d:%d:%s", match.Start, match.End, match.Type)
+		key := llmMatchKey{start: match.Start, end: match.End, entityType: match.Type}
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -344,69 +370,42 @@ func deduplicateMatches(matches []anonymizer.Match) []anonymizer.Match {
 	return deduplicated
 }
 
-func buildPrompt(text []byte) string {
-	return `You are a strict PII extraction engine.
-Return only a JSON object with this shape:
-{"entities":[{"type":"PERSON_NAME","text":"Jean Dupont"}]}
-
-Allowed types:
-- PERSON_NAME
-- ADDRESS
-- DATE
-
-Rules:
-- Return only strings that are exactly present in the input text.
-- Do not invent values.
-- Do not return emails, phone numbers, IP addresses, URLs, IBANs, credit cards, social security numbers, MAC addresses, or obvious numeric/reference IDs.
-- Extract only person names, addresses, and dates.
-- Include full person names and repeated short references to known people, such as first names used alone.
-- Include dates tied to identity, family, documents, employment, education, health, subscriptions, payments, or events.
-- Prefer the longest exact string for names and addresses, for example "Thomas Alexandre Beaumont" instead of only "Thomas Beaumont".
-- Use PERSON_NAME for named people, including titles such as "Dr Jean-Louis Berger" when present.
-- Use DATE for dates like "14 mars 1988", "octobre 2023", "2024", or "12 janvier 2007" when they are tied to the person profile.
-- Use ADDRESS for complete address strings like "42 Rue de la République, 69002 Lyon".
-- Ignore document numbers, vehicle plates, schools, employers, medical providers, locations without a full address, organizations, and other contextual identifiers.
-- If nothing is found, return {"entities":[]}.
-
-Examples:
-Input: "Thomas Alexandre Beaumont est né le 14 mars 1988 à Lyon. Il réside au 42 Rue de la République, 69002 Lyon."
-Output: {"entities":[{"type":"PERSON_NAME","text":"Thomas Alexandre Beaumont"},{"type":"DATE","text":"14 mars 1988"},{"type":"ADDRESS","text":"42 Rue de la République, 69002 Lyon"}]}
-
-Input: "Son médecin traitant est le Dr Jean-Louis Berger. Il conduit une Peugeot immatriculée GB-123-XT."
-Output: {"entities":[{"type":"PERSON_NAME","text":"Dr Jean-Louis Berger"}]}
-
-Input text:
-` + string(text)
+type llmMatchKey struct {
+	start      int
+	end        int
+	entityType anonymizer.EntityType
 }
 
-func piiJSONSchema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"entities": map[string]any{
-				"type": "array",
-				"items": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"type": map[string]any{
-							"type": "string",
-							"enum": []string{
+func piiJSONSchema() piiSchema {
+	noExtraFields := false
+	return piiSchema{
+		Type: "object",
+		Properties: piiSchemaProperties{
+			Entities: arraySchema{
+				Type: "array",
+				Items: objectSchema{
+					Type: "object",
+					Properties: entitySchemaProperties{
+						Type: enumSchema{
+							Type: "string",
+							Enum: []string{
 								string(anonymizer.EntityPersonName),
 								string(anonymizer.EntityAddress),
 								string(anonymizer.EntityDate),
+								string(anonymizer.EntityVehiclePlate),
 							},
 						},
-						"text": map[string]any{
-							"type": "string",
+						Text: scalarSchema{
+							Type: "string",
 						},
 					},
-					"required":             []string{"type", "text"},
-					"additionalProperties": false,
+					Required:             []string{"type", "text"},
+					AdditionalProperties: &noExtraFields,
 				},
 			},
 		},
-		"required":             []string{"entities"},
-		"additionalProperties": false,
+		Required:             []string{"entities"},
+		AdditionalProperties: &noExtraFields,
 	}
 }
 
@@ -414,13 +413,39 @@ type extractionResponse struct {
 	Entities []Entity `json:"entities"`
 }
 
-type ollamaGenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-	Format any    `json:"format"`
+type piiSchema struct {
+	Type                 string              `json:"type"`
+	Properties           piiSchemaProperties `json:"properties"`
+	Required             []string            `json:"required"`
+	AdditionalProperties *bool               `json:"additionalProperties"`
 }
 
-type ollamaGenerateResponse struct {
-	Response string `json:"response"`
+type piiSchemaProperties struct {
+	Entities arraySchema `json:"entities"`
+}
+
+type arraySchema struct {
+	Type  string       `json:"type"`
+	Items objectSchema `json:"items"`
+}
+
+type objectSchema struct {
+	Type                 string                 `json:"type"`
+	Properties           entitySchemaProperties `json:"properties"`
+	Required             []string               `json:"required"`
+	AdditionalProperties *bool                  `json:"additionalProperties"`
+}
+
+type entitySchemaProperties struct {
+	Type enumSchema   `json:"type"`
+	Text scalarSchema `json:"text"`
+}
+
+type enumSchema struct {
+	Type string   `json:"type"`
+	Enum []string `json:"enum"`
+}
+
+type scalarSchema struct {
+	Type string `json:"type"`
 }

@@ -56,12 +56,16 @@ func LoadPresidioRules(ctx context.Context, configURL string, timeout time.Durat
 }
 
 func LoadPresidioRulesWithStats(ctx context.Context, configURL string, timeout time.Duration) (ExternalRuleLoadResult, error) {
+	return loadPresidioRulesWithStats(ctx, configURL, defaultPresidioSourceBase, timeout)
+}
+
+func loadPresidioRulesWithStats(ctx context.Context, configURL, sourceBaseURL string, timeout time.Duration) (ExternalRuleLoadResult, error) {
 	if timeout <= 0 {
 		timeout = DefaultPresidioTimeout
 	}
 
 	client := &http.Client{Timeout: timeout}
-	return loadExternalPresidioRulesWithStats(ctx, client, configURL, defaultPresidioSourceBase, defaultExternalRulesCacheDir(), DefaultExternalRulesCacheTTL)
+	return loadExternalPresidioRulesWithStats(ctx, client, configURL, sourceBaseURL, defaultExternalRulesCacheDir(), DefaultExternalRulesCacheTTL)
 }
 
 func LoadExternalPresidioRules(ctx context.Context, client *http.Client, configURL, sourceBaseURL string) ([]anonymizer.Detector, error) {
@@ -185,11 +189,11 @@ func detectorsFromPresidioSourceWithMetrics(recognizerName, source string) ([]an
 			return nil, 0, parseDuration, 0, fmt.Errorf("compile presidio recognizer %q: %w", recognizerName, err)
 		}
 		detectors = append(detectors, regexDetector{
-			entityType:   entityType,
-			priority:     priorityMedium,
-			pattern:      compiled,
-			captureGroup: 0,
-			normalizer:   normalizerForEntityType(entityType),
+			entityType:       entityType,
+			priority:         priorityMedium,
+			pattern:          compiled,
+			captureGroup:     0,
+			normalizerPolicy: normalizerPolicyForEntityType(entityType),
 		})
 	}
 	compileDuration := time.Since(compileStart)
@@ -473,11 +477,11 @@ func presidioEntityType(entity string) (anonymizer.EntityType, bool) {
 	}
 }
 
-func normalizerForEntityType(entityType anonymizer.EntityType) func([]byte) string {
+func normalizerPolicyForEntityType(entityType anonymizer.EntityType) normalizerPolicy {
 	switch entityType {
 	case anonymizer.EntityIBAN, anonymizer.EntityCreditCard, anonymizer.EntityMACAddress:
-		return keepDigitsAndLetters
+		return normalizerPolicyDigitsAndLetters
 	default:
-		return normalizeFold
+		return normalizerPolicyFold
 	}
 }

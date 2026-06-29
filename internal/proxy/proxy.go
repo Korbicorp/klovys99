@@ -2,87 +2,69 @@ package proxy
 
 import (
 	"bytes"
-	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
-	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
 
 const (
 	DefaultLogPath      = "proxy.log"
-	DebugTrafficLogEnv  = "KLOVIS_PROXY_DEBUG"
-	defaultAnthropicURL = "https://api.anthropic.com"
+	DefaultAnthropicURL = "https://api.anthropic.com"
 	sessionOpenTag      = "<session>"
 	sessionCloseTag     = "</session>"
 )
 
+var metadataKeys = map[string]struct{}{
+	"cache_control": {},
+	"id":            {},
+	"media_type":    {},
+	"model":         {},
+	"name":          {},
+	"role":          {},
+	"tool_use_id":   {},
+	"type":          {},
+}
+
+type sessionPromptAnonymizer struct {
+	engine      TextAnonymizer
+	matchFinder MatchFinder
+}
+
+type promptAnonymizationRun struct {
+	anonymizer *sessionPromptAnonymizer
+	engine     *anonymizer.Run
+	ctx        context.Context
+	logger     zerolog.Logger
+	stats      map[anonymizer.EntityType]int
+}
+
+type TextAnonymizer interface {
+	NewRun() *anonymizer.Run
+}
+
+type MatchFinder interface {
+	FindMatches(ctx context.Context, input string) ([]anonymizer.Match, error)
+}
+
 type Config struct {
-	Target     *url.URL
-	Logger     *zerolog.Logger
-	TrafficLog io.Writer
-	Transport  http.RoundTripper
+	Target      *url.URL
+	Logger      *zerolog.Logger
+	Transport   http.RoundTripper
+	Anonymizer  TextAnonymizer
+	MatchFinder MatchFinder
 }
 
-func RunAnthropic(addr string) error {
-	target, err := url.Parse(defaultAnthropicURL)
-	if err != nil {
-		return fmt.Errorf("parse anthropic URL: %w", err)
-	}
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-	trafficLog, closeTrafficLog, err := trafficLogFromEnv()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = closeTrafficLog()
-	}()
-
-	handler, err := NewHandler(Config{
-		Target:     target,
-		Logger:     &logger,
-		TrafficLog: trafficLog,
-	})
-	if err != nil {
-		return err
-	}
-
-	return http.ListenAndServe(addr, handler)
-}
-
-func trafficLogFromEnv() (io.Writer, func() error, error) {
-	if !debugTrafficLogEnabled() {
-		return io.Discard, func() error { return nil }, nil
-	}
-
-	logFile, err := os.OpenFile(DefaultLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open proxy log file: %w", err)
-	}
-	return logFile, logFile.Close, nil
-}
-
-func debugTrafficLogEnabled() bool {
-	switch strings.TrimSpace(strings.ToLower(os.Getenv(DebugTrafficLogEnv))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-func NewHandler(config Config) (http.Handler, error) {
+func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	if config.Target == nil {
 		return nil, fmt.Errorf("proxy target is required")
 	}
@@ -93,35 +75,16 @@ func NewHandler(config Config) (http.Handler, error) {
 		logger := zerolog.Nop()
 		config.Logger = &logger
 	}
-	if config.TrafficLog == nil {
-		config.TrafficLog = io.Discard
+	if config.Anonymizer == nil {
+		return nil, fmt.Errorf("proxy anonymizer is required")
 	}
 
-	gin.SetMode(gin.ReleaseMode)
-	router := gin.New()
-	router.Any("/*proxyPath", newProxyHandler(config))
-
-	return router, nil
-}
-
-func newProxyHandler(config Config) gin.HandlerFunc {
-	target := *config.Target
 	logger := *config.Logger
-	trafficLogger := newTrafficLogger(config.TrafficLog)
-	promptAnonymizer := newSessionPromptAnonymizer()
-	proxy := httputil.NewSingleHostReverseProxy(&target)
-	proxy.Director = newDirector(&target, proxy.Director)
+	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder)
+	proxy := httputil.NewSingleHostReverseProxy(config.Target)
+	proxy.Director = newDirector(config.Target, proxy.Director)
 	if config.Transport != nil {
 		proxy.Transport = config.Transport
-	}
-	proxy.ModifyResponse = func(response *http.Response) error {
-		body, err := readBody(response.Body)
-		if err != nil {
-			return fmt.Errorf("read upstream response body: %w", err)
-		}
-		response.Body = io.NopCloser(bytes.NewReader(body))
-		trafficLogger.logResponse(body, response.Header.Get("Content-Encoding"))
-		return nil
 	}
 	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
 		logger.Error().Err(err).Msg("proxy error")
@@ -136,12 +99,13 @@ func newProxyHandler(config Config) gin.HandlerFunc {
 			return
 		}
 
-		requestBody = promptAnonymizer.anonymize(logger, requestBody)
+		anonymizedBody := promptAnonymizer.anonymize(ctx.Request.Context(), logger, string(requestBody))
+		requestBody = []byte(anonymizedBody)
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
-		trafficLogger.logRequest(requestBody)
+		logTrafficRequest(logger, anonymizedBody)
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
-	}
+	}, nil
 }
 
 func newDirector(target *url.URL, defaultDirector func(*http.Request)) func(*http.Request) {
@@ -169,61 +133,23 @@ func readBody(body io.ReadCloser) ([]byte, error) {
 	return content, nil
 }
 
-type trafficLogger struct {
-	mu     sync.Mutex
-	writer io.Writer
+func logTrafficRequest(logger zerolog.Logger, body string) {
+	logger.Debug().
+		Str("direction", "request").
+		Str("body", body).
+		Msg("traffic body")
 }
 
-func newTrafficLogger(writer io.Writer) *trafficLogger {
-	return &trafficLogger{writer: writer}
-}
-
-func (l *trafficLogger) logRequest(body []byte) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	fmt.Fprintf(l.writer, "request.body=%s\n", string(body))
-}
-
-func (l *trafficLogger) logResponse(body []byte, contentEncoding string) {
-	logBody, err := decodeGzipBodyForLog(body, contentEncoding)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err != nil {
-		fmt.Fprintf(l.writer, "response.body.decode_error=%v\n", err)
-		return
-	}
-	fmt.Fprintf(l.writer, "response.body=%s\n", string(logBody))
-}
-
-func decodeGzipBodyForLog(body []byte, contentEncoding string) ([]byte, error) {
-	if strings.TrimSpace(strings.ToLower(contentEncoding)) != "gzip" {
-		return body, nil
-	}
-
-	reader, err := gzip.NewReader(bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-
-	return io.ReadAll(reader)
-}
-
-type sessionPromptAnonymizer struct {
-	mu     sync.Mutex
-	engine *anonymizer.Anonymizer
-}
-
-func newSessionPromptAnonymizer() *sessionPromptAnonymizer {
+func newSessionPromptAnonymizer(engine TextAnonymizer, matchFinder MatchFinder) *sessionPromptAnonymizer {
 	return &sessionPromptAnonymizer{
-		engine: anonymizer.New(detectors.Default(true)),
+		engine:      engine,
+		matchFinder: matchFinder,
 	}
 }
 
-func (a *sessionPromptAnonymizer) anonymize(logger zerolog.Logger, body []byte) []byte {
+func (a *sessionPromptAnonymizer) anonymize(ctx context.Context, logger zerolog.Logger, body string) string {
 	var payload any
-	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder := json.NewDecoder(strings.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
 		return body
@@ -233,14 +159,12 @@ func (a *sessionPromptAnonymizer) anonymize(logger zerolog.Logger, body []byte) 
 		return body
 	}
 
-	stats := make(map[anonymizer.EntityType]int)
-	a.mu.Lock()
-	anonymized, changed := anonymizeSessionPrompts(payload, a.engine, stats)
-	a.mu.Unlock()
+	run := a.newRun(ctx, logger)
+	anonymized, changed := run.anonymizeRequestValue(payload, anonymizationContext{})
 	if !changed {
 		return body
 	}
-	logAnonymizedStats(logger, stats)
+	logAnonymizedStats(logger, run.stats)
 
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
@@ -248,17 +172,31 @@ func (a *sessionPromptAnonymizer) anonymize(logger zerolog.Logger, body []byte) 
 	if err := encoder.Encode(anonymized); err != nil {
 		return body
 	}
-	return bytes.TrimSuffix(output.Bytes(), []byte("\n"))
+	return strings.TrimSuffix(output.String(), "\n")
 }
 
-func anonymizeSessionPrompts(value any, engine *anonymizer.Anonymizer, stats map[anonymizer.EntityType]int) (any, bool) {
+func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Logger) *promptAnonymizationRun {
+	return &promptAnonymizationRun{
+		anonymizer: a,
+		engine:     a.engine.NewRun(),
+		ctx:        ctx,
+		logger:     logger,
+		stats:      make(map[anonymizer.EntityType]int),
+	}
+}
+
+type anonymizationContext struct {
+	textValue bool
+}
+
+func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonymizationContext) (any, bool) {
 	switch typed := value.(type) {
 	case string:
-		return anonymizeSessionPromptString(typed, engine, stats)
+		return r.anonymizeString(typed, context.textValue)
 	case []any:
 		changed := false
 		for index, item := range typed {
-			anonymized, itemChanged := anonymizeSessionPrompts(item, engine, stats)
+			anonymized, itemChanged := r.anonymizeRequestValue(item, context)
 			if itemChanged {
 				typed[index] = anonymized
 				changed = true
@@ -268,10 +206,14 @@ func anonymizeSessionPrompts(value any, engine *anonymizer.Anonymizer, stats map
 	case map[string]any:
 		changed := false
 		for key, item := range typed {
-			anonymized, itemChanged := anonymizeSessionPrompts(item, engine, stats)
-			if key == "content" && typed["role"] == "user" {
-				anonymized, itemChanged = anonymizeUserContent(item, engine, stats)
+			if isMetadataKey(key) {
+				continue
 			}
+
+			itemContext := anonymizationContext{
+				textValue: isTextValue(key, typed, context),
+			}
+			anonymized, itemChanged := r.anonymizeRequestValue(item, itemContext)
 			if itemChanged {
 				typed[key] = anonymized
 				changed = true
@@ -283,52 +225,62 @@ func anonymizeSessionPrompts(value any, engine *anonymizer.Anonymizer, stats map
 	}
 }
 
-func anonymizeUserContent(value any, engine *anonymizer.Anonymizer, stats map[anonymizer.EntityType]int) (any, bool) {
-	switch typed := value.(type) {
-	case string:
-		return anonymizeUserText(typed, engine, stats)
-	case []any:
-		changed := false
-		for index, item := range typed {
-			anonymized, itemChanged := anonymizeUserContent(item, engine, stats)
-			if itemChanged {
-				typed[index] = anonymized
-				changed = true
-			}
-		}
-		return typed, changed
-	case map[string]any:
-		changed := false
-		for key, item := range typed {
-			anonymized, itemChanged := anonymizeUserContent(item, engine, stats)
-			if itemChanged {
-				typed[key] = anonymized
-				changed = true
-			}
-		}
-		return typed, changed
+func isMetadataKey(key string) bool {
+	_, ok := metadataKeys[key]
+	return ok
+}
+
+func isTextValue(key string, parent map[string]any, context anonymizationContext) bool {
+	if key == "data" {
+		return stringMapValue(parent, "type") == "text"
+	}
+
+	if key == "source" {
+		return false
+	}
+
+	if key == "content" && stringMapValue(parent, "type") == "tool_result" {
+		return true
+	}
+
+	if isTextualKey(key) {
+		return true
+	}
+
+	return context.textValue && !isMetadataKey(key)
+}
+
+func stringMapValue(value map[string]any, key string) string {
+	typed, _ := value[key].(string)
+	return typed
+}
+
+func isTextualKey(key string) bool {
+	switch key {
+	case "content", "error", "input", "output", "result", "system", "text":
+		return true
 	default:
-		return value, false
+		return false
 	}
 }
 
-func anonymizeUserText(value string, engine *anonymizer.Anonymizer, stats map[anonymizer.EntityType]int) (string, bool) {
-	if strings.HasPrefix(strings.TrimSpace(value), "<system-reminder>") {
-		return value, false
+func (r *promptAnonymizationRun) anonymizeString(value string, textValue bool) (string, bool) {
+	if textValue {
+		return r.anonymizeTextValue(value)
 	}
-	if strings.Contains(value, sessionOpenTag) {
-		return anonymizeSessionPromptString(value, engine, stats)
-	}
+	return r.anonymizeSessionPromptString(value)
+}
 
-	anonymized, result := engine.Anonymize([]byte(value))
+func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
+	anonymized, result := r.anonymizeText(value)
 	if len(result.Stats) == 0 {
 		return value, false
 	}
-	addAnonymizedStats(stats, result)
-	return string(anonymized), true
+	r.addStats(result)
+	return anonymized, true
 }
 
-func anonymizeSessionPromptString(value string, engine *anonymizer.Anonymizer, stats map[anonymizer.EntityType]int) (string, bool) {
+func (r *promptAnonymizationRun) anonymizeSessionPromptString(value string) (string, bool) {
 	var builder strings.Builder
 	changed := false
 	remaining := value
@@ -349,11 +301,11 @@ func anonymizeSessionPromptString(value string, engine *anonymizer.Anonymizer, s
 
 		contentEnd := contentStart + closeIndex
 		prompt := remaining[contentStart:contentEnd]
-		anonymized, result := engine.Anonymize([]byte(prompt))
-		addAnonymizedStats(stats, result)
+		anonymized, result := r.anonymizeText(prompt)
+		r.addStats(result)
 
 		builder.WriteString(remaining[:contentStart])
-		builder.Write(anonymized)
+		builder.WriteString(anonymized)
 		builder.WriteString(sessionCloseTag)
 		remaining = remaining[contentEnd+len(sessionCloseTag):]
 		changed = true
@@ -365,9 +317,23 @@ func anonymizeSessionPromptString(value string, engine *anonymizer.Anonymizer, s
 	return builder.String(), true
 }
 
-func addAnonymizedStats(stats map[anonymizer.EntityType]int, result anonymizer.Result) {
+func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {
+	var llmMatches []anonymizer.Match
+	if r.anonymizer.matchFinder != nil {
+		matches, err := r.anonymizer.matchFinder.FindMatches(r.ctx, value)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("llm anonymization failed")
+		} else {
+			llmMatches = matches
+		}
+	}
+
+	return r.engine.AnonymizeWithMatches(value, llmMatches)
+}
+
+func (r *promptAnonymizationRun) addStats(result anonymizer.Result) {
 	for entityType, entityStats := range result.Stats {
-		stats[entityType] += entityStats.Count
+		r.stats[entityType] += entityStats.Count
 	}
 }
 
@@ -376,7 +342,7 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
 	}
-	event.Msg("session prompt anonymized")
+	event.Msg("request body anonymized")
 }
 
 func sortedEntityTypes(stats map[anonymizer.EntityType]int) []anonymizer.EntityType {

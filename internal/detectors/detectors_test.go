@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -9,14 +10,17 @@ import (
 	"time"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/dlclark/regexp2"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 func anonymize(t *testing.T, input string, includeExtra bool) (string, anonymizer.Result) {
 	t.Helper()
 
-	engine := anonymizer.New(Default(includeExtra))
-	output, result := engine.Anonymize([]byte(input))
-	return string(output), result
+	engine := anonymizer.NewService(Default(includeExtra))
+	output, result := engine.Anonymize(input)
+	return output, result
 }
 
 func TestDefaultDetectorsAnonymizeCoreEntities(t *testing.T) {
@@ -253,10 +257,10 @@ func TestDetectorsFromGitleaksRulesUseSecretGroup(t *testing.T) {
 		t.Fatalf("detectorsFromGitleaksRules returned error: %v", err)
 	}
 
-	engine := anonymizer.New(loaded)
-	output, result := engine.Anonymize([]byte("token=ABC123\n"))
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize("token=ABC123\n")
 
-	if got, want := string(output), "token=[SECRET_1]\n"; got != want {
+	if got, want := output, "token=[SECRET_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if got, want := result.Stats[anonymizer.EntitySecret].Count, 1; got != want {
@@ -295,9 +299,9 @@ secretGroup = 1
 		t.Fatalf("LoadExternalRules returned error: %v", err)
 	}
 
-	engine := anonymizer.New(loaded)
-	output, _ := engine.Anonymize([]byte("token=ABC123\n"))
-	if got, want := string(output), "token=[SECRET_1]\n"; got != want {
+	engine := anonymizer.NewService(loaded)
+	output, _ := engine.Anonymize("token=ABC123\n")
+	if got, want := output, "token=[SECRET_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
@@ -358,9 +362,9 @@ class EmailRecognizer(PatternRecognizer):
 		t.Fatalf("detectorsFromPresidioSource returned error: %v", err)
 	}
 
-	engine := anonymizer.New(loaded)
-	output, result := engine.Anonymize([]byte("foo@example.com\n"))
-	if got, want := string(output), "[EMAIL_1]\n"; got != want {
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize("foo@example.com\n")
+	if got, want := output, "[EMAIL_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if got, want := result.Stats[anonymizer.EntityEmail].Count, 1; got != want {
@@ -386,9 +390,9 @@ class UrlRecognizer(PatternRecognizer):
 		t.Fatalf("detectorsFromPresidioSource returned error: %v", err)
 	}
 
-	engine := anonymizer.New(loaded)
-	output, result := engine.Anonymize([]byte("example.com\n"))
-	if got, want := string(output), "[URL_1]\n"; got != want {
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize("example.com\n")
+	if got, want := output, "[URL_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if got, want := result.Stats[anonymizer.EntityURL].Count, 1; got != want {
@@ -485,9 +489,9 @@ class UrlRecognizer(PatternRecognizer):
 		t.Fatalf("detectorsFromPresidioSource returned error: %v", err)
 	}
 
-	engine := anonymizer.New(loaded)
-	output, result := engine.Anonymize([]byte(`"https://example.com"` + "\n"))
-	if got, want := string(output), "[URL_1]\n"; got != want {
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize(`"https://example.com"` + "\n")
+	if got, want := output, "[URL_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if got, want := result.Stats[anonymizer.EntityURL].Count, 1; got != want {
@@ -556,15 +560,157 @@ class EmailRecognizer(PatternRecognizer):
 		t.Fatalf("LoadExternalPresidioRules returned error: %v", err)
 	}
 
-	engine := anonymizer.New(loaded)
-	output, _ := engine.Anonymize([]byte("foo@example.com\n"))
-	if got, want := string(output), "[EMAIL_1]\n"; got != want {
+	engine := anonymizer.NewService(loaded)
+	output, _ := engine.Anonymize("foo@example.com\n")
+	if got, want := output, "[EMAIL_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestServiceLoadsExternalDetectorsStrictly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/gitleaks.toml":
+			_, _ = writer.Write([]byte(`
+title = "gitleaks config"
+
+[[rules]]
+id = "demo-secret"
+regex = 'gitleaks-secret'
+`))
+		case "/default_recognizers.yaml":
+			_, _ = writer.Write([]byte(`
+recognizers:
+  - name: EmailRecognizer
+    type: predefined
+`))
+		case "/email_recognizer.py":
+			_, _ = writer.Write([]byte(`
+class EmailRecognizer(PatternRecognizer):
+    PATTERNS = [
+        Pattern("Email", r"\bfoo@example\.com\b", 0.5),
+    ]
+
+    def __init__(
+        self,
+        supported_entity: str = "EMAIL_ADDRESS",
+    ):
+        pass
+`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.EnableExtra = false
+	config.GitleaksURL = server.URL + "/gitleaks.toml"
+	config.PresidioURL = server.URL + "/default_recognizers.yaml"
+	config.PresidioBaseURL = server.URL
+	service := NewService(config)
+
+	result, err := service.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	output, stats := anonymizer.NewService(result.Detectors).Anonymize("gitleaks-secret foo@example.com")
+	if got, want := output, "[SECRET_1] [EMAIL_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := stats.Stats[anonymizer.EntitySecret].Count, 1; got != want {
+		t.Fatalf("secret count = %d, want %d", got, want)
+	}
+	if got, want := stats.Stats[anonymizer.EntityEmail].Count, 1; got != want {
+		t.Fatalf("email count = %d, want %d", got, want)
+	}
+	if got, want := result.ExternalDetectors, 2; got != want {
+		t.Fatalf("external detectors = %d, want %d", got, want)
+	}
+}
+
+func TestServiceReturnsExternalLoadError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Error(writer, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.GitleaksURL = server.URL
+	config.EnablePresidio = false
+	service := NewService(config)
+
+	_, err := service.Load(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "load gitleaks detectors") {
+		t.Fatalf("error = %v, want gitleaks load error", err)
+	}
+}
+
+func TestRegexDetectorLogsAndReturnsPartialMatchesOnRegexpError(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := log.Logger
+	log.Logger = zerolog.New(&logs)
+	t.Cleanup(func() {
+		log.Logger = previousLogger
+	})
+
+	pattern := regexp2.MustCompile(`(a+)+$`, regexp2.None)
+	pattern.MatchTimeout = time.Nanosecond
+	detector := regexDetector{
+		entityType: anonymizer.EntitySecret,
+		priority:   priorityMedium,
+		pattern:    pattern,
+	}
+
+	matches := detector.FindAll(strings.Repeat("a", 1000) + "!")
+
+	if len(matches) != 0 {
+		t.Fatalf("matches = %#v, want none after regex timeout", matches)
+	}
+	if !strings.Contains(logs.String(), "regex detector failed") {
+		t.Fatalf("logs = %q, want regex detector error log", logs.String())
+	}
+}
+
+func TestBuiltinDetectorLoadPanicIsStartupError(t *testing.T) {
+	err := builtinDetectorLoadError("boom")
+
+	if err == nil || !strings.Contains(err.Error(), "load builtin detectors: boom") {
+		t.Fatalf("error = %v, want builtin detector startup error", err)
 	}
 }
 
 func BenchmarkAnonymizeSmall(b *testing.B) {
 	benchmarkAnonymize(b, "Contact Nom: Dupont Email: alice@example.com Tel: 06 12 34 56 78\n")
+}
+
+type literalDetector struct {
+	entityType anonymizer.EntityType
+	value      string
+}
+
+func (d literalDetector) FindAll(text string) []anonymizer.Match {
+	var matches []anonymizer.Match
+	remaining := text
+	offset := 0
+	for {
+		index := strings.Index(remaining, d.value)
+		if index < 0 {
+			return matches
+		}
+		start := offset + index
+		end := start + len(d.value)
+		matches = append(matches, anonymizer.Match{
+			Start:      start,
+			End:        end,
+			Type:       d.entityType,
+			Priority:   priorityMedium,
+			Normalized: d.value,
+		})
+		offset = end
+		remaining = text[offset:]
+	}
 }
 
 func BenchmarkAnonymizeMedium(b *testing.B) {
@@ -578,12 +724,11 @@ func BenchmarkAnonymizeLarge(b *testing.B) {
 func benchmarkAnonymize(b *testing.B, input string) {
 	b.Helper()
 
-	engine := anonymizer.New(Default(true))
-	data := []byte(input)
+	engine := anonymizer.NewService(Default(true))
 	b.ReportAllocs()
-	b.SetBytes(int64(len(data)))
+	b.SetBytes(int64(len(input)))
 
 	for i := 0; i < b.N; i++ {
-		_, _ = engine.Anonymize(data)
+		_, _ = engine.Anonymize(input)
 	}
 }

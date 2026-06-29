@@ -1,220 +1,264 @@
-# klovis
+# Klovis
 
-Klovis is a small Go CLI that anonymizes text from `stdin` and writes the
-anonymized text to `stdout`.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-By default, Klovis is regex-based and uses stable pseudonyms for a single
-execution: the same detected value is replaced by the same token during the run.
-An optional local LLM mode can be enabled to catch contextual PII that regexes
-miss. At startup, Klovis also downloads the official Gitleaks rule set and the
-default Microsoft Presidio recognizer config, then adds the supported external
-regex detectors dynamically. These external payloads are cached on disk for
-24 hours in the user cache directory, so they are not re-downloaded on every
-execution.
+Klovis is a local Anthropic reverse proxy that anonymizes sensitive prompt data
+before forwarding requests to the Anthropic API.
 
-Recent additions include:
+It is designed to sit between an Anthropic-compatible client and
+`https://api.anthropic.com`, replacing detected personal or sensitive values with
+stable pseudonym tokens before the request leaves the machine.
 
-- unlabelled French postal address detection, for example `14 Rue de la République, 69002 Lyon`
-- contextual name detection such as `Je m'appelle Jean-Pierre`, `Hello this is Alice`, or `**Nom :** JULIEN MOREAU`
-- contextual birth date detection
-- contextual blood type detection such as `Groupe sanguin O+` or `Blood type AB negative`
-- dynamic external regex loading from Gitleaks and Microsoft Presidio
+## Features
+
+- Local reverse proxy for Anthropic API requests.
+- Built-in deterministic detectors for common PII and sensitive identifiers.
+- Dynamic detector loading from the official Gitleaks and Microsoft Presidio
+  rule sources.
+- Optional local LLM extraction through Ollama for contextual names, addresses,
+  dates, and vehicle plates.
+- Stable pseudonym tokens for the lifetime of the proxy process.
+- Structured logs with anonymization counters instead of raw prompt values.
+- Disk cache for downloaded external rules to avoid repeated network fetches on
+  every startup.
 
 ## Requirements
 
-Core regex mode only requires Go:
+- Go 1.25 or newer.
+- Network access on first startup to download the default Gitleaks and Presidio
+  rule sources.
+- An Anthropic API key for upstream requests.
+- Ollama, only when `KLOVIS_LLM_ENABLED=true`.
+
+Check your Go installation:
 
 ```sh
 go version
 ```
 
-LLM mode requires Ollama to be installed and available in `PATH`, because Klovis
-starts `ollama serve` automatically when `--llm` is enabled:
+Optional LLM mode requires a local Ollama model:
 
 ```sh
-which ollama
 ollama --version
-```
-
-If Ollama is missing, install it first:
-
-```sh
-curl -fsSL https://ollama.com/install.sh | sh
-```
-
-The model must also be available locally before running Klovis with `--llm`:
-
-```sh
 ollama pull mistral
 ```
 
-## Usage
+## Installation
+
+Install from source:
 
 ```sh
-go run ./cmd/klovis < input.txt > output.txt
+git clone https://github.com/Korbicorp/klovis.git
+cd klovis
+go build -o klovis ./cmd/klovis
 ```
 
-Show anonymization statistics on `stderr`:
+Or run it directly without building a binary:
 
 ```sh
-go run ./cmd/klovis --stats < input.txt > output.txt
+go run ./cmd/klovis
 ```
 
-`--stats` prints entity counts and timing metrics on `stderr`, including stdin
-read time, external rule cache hits and misses, Gitleaks and Presidio
-download/parse/compile timings, detector initialization, Ollama startup, LLM
-extraction, anonymization, stdout write, Ollama shutdown, and total runtime.
-Entity counts produced by the LLM are prefixed with `llm.`, for example
-`llm.PERSON_NAME count=1`; regex counts keep their raw category name, for
-example `EMAIL count=1`.
+## Quick Start
 
-Disable extra detectors such as URLs, IBANs, credit card-like numbers and MAC
-addresses:
+Start the proxy:
 
 ```sh
-go run ./cmd/klovis --no-extra < input.txt > output.txt
+go run ./cmd/klovis
 ```
 
-Disable downloading Gitleaks secret detectors:
+By default, Klovis listens on `http://localhost:8080` and forwards requests to
+`https://api.anthropic.com`.
 
-```sh
-go run ./cmd/klovis --no-gitleaks < input.txt > output.txt
-```
-
-Disable downloading Presidio regex detectors:
-
-```sh
-go run ./cmd/klovis --no-presidio < input.txt > output.txt
-```
-
-Enable local LLM extraction through Ollama:
-
-```sh
-go run ./cmd/klovis --llm --llm-model mistral < input.txt > output.txt
-```
-
-When `--llm` is enabled, Klovis checks the local Ollama API and automatically
-starts `ollama serve` if it is not already running. This only applies to local
-URLs such as `localhost` or `127.0.0.1`; remote URLs are treated as already
-managed outside Klovis.
-
-Useful LLM flags:
-
-- `--llm`: enables local LLM extraction.
-- `--llm-url`: Ollama base URL, default `http://localhost:11434`.
-- `--llm-model`: Ollama model name, default `mistral`.
-- `--llm-timeout`: request timeout, default `30s`.
-- `--llm-max-chars`: maximum input bytes sent per chunk, default `3000`.
-
-Useful Gitleaks flags:
-
-- `--no-gitleaks`: disables downloading and loading external Gitleaks secret detectors.
-- `--gitleaks-url`: Gitleaks TOML config URL, default `https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml`.
-- `--gitleaks-timeout`: timeout for downloading and parsing Gitleaks rules, default `10s`.
-
-Useful Presidio flags:
-
-- `--no-presidio`: disables downloading and loading external Presidio regex detectors.
-- `--presidio-url`: Presidio YAML config URL, default `https://raw.githubusercontent.com/microsoft/presidio/main/presidio-analyzer/presidio_analyzer/conf/default_recognizers.yaml`.
-- `--presidio-timeout`: timeout for downloading and parsing Presidio rules, default `10s`.
-
-Microsoft Presidio integration:
-
-- Klovis downloads the default Presidio recognizer orchestration file from the official `microsoft/presidio` repository.
-- Klovis then loads the supported regex-based generic recognizers from Presidio source code.
-- Currently mapped Presidio entities are `EMAIL`, `IP`, `URL`, `IBAN`, `CREDIT_CARD`, `DATE`, `MAC_ADDRESS`, and `CRYPTO`.
-- Non-regex or validator-heavy recognizers which are not directly reusable in this Go pipeline are skipped.
-- Gitleaks and Presidio payloads are cached locally for 24 hours to avoid repeated downloads on each execution.
-
-Use a lower `--llm-max-chars` value to force smaller LLM chunks on dense texts:
-
-```sh
-go run ./cmd/klovis --llm --llm-max-chars 800 < input.txt > output.txt
-```
-
-The LLM never rewrites text directly. It returns JSON entities with a `type` and
-the exact `text` to anonymize; Go then relocalizes those strings and applies the
-same overlap resolution as regex detectors. If `--llm` is enabled and Ollama
-fails or returns invalid JSON, the command exits with an error.
-
-LLM extraction runs in a single pass. The prompt asks the model to return
-contextual PII missed by regexes, including dates, document IDs, vehicle plates,
-medical providers, schools, employers, and pet identifiers when they are tied to
-the profile.
-
-### Anthropic proxy
-
-Klovis can also run a local reverse proxy for Anthropic requests:
-
-```sh
-go run ./cmd/klovis proxy
-```
-
-The proxy listens on `http://localhost:8080` and forwards every method, path,
-query string, header and body to `https://api.anthropic.com`. For example, a
-request sent to `http://localhost:8080/v1/messages` is forwarded to
-`https://api.anthropic.com/v1/messages`.
-
-Point Anthropic clients or curl commands at the local base URL while keeping the
-usual Anthropic headers:
+Send Anthropic requests to the local proxy while keeping the usual Anthropic
+headers:
 
 ```sh
 curl http://localhost:8080/v1/messages \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
-  -d '{"model":"claude-sonnet-4-5","max_tokens":128,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 128,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Email Alice at alice@example.com"
+      }
+    ]
+  }'
 ```
 
-The proxy anonymizes each `<session>...</session>` block found anywhere in the
-JSON request body before forwarding the request. It emits only anonymization
-stats as structured zerolog events on stdout:
+The upstream Anthropic API receives the same request shape, with sensitive values
+replaced by pseudonym tokens such as `[EMAIL_1]`.
 
-```json
-{"level":"info","EMAIL":1,"PHONE":1,"message":"session prompt anonymized"}
-```
+## How It Works
 
-By default, the proxy does not write traffic bodies to disk. To debug local
-traffic, enable the proxy debug mode before starting it:
+Klovis reads each incoming request body, anonymizes supported JSON prompt
+content, then forwards the modified request to Anthropic.
 
-```sh
-KLOVIS_PROXY_DEBUG=1 go run ./cmd/klovis proxy
-```
+The proxy anonymizes:
 
-When `KLOVIS_PROXY_DEBUG` is set to `1`, `true`, `yes` or `on`, the proxy
-appends traffic bodies to `proxy.log`: `request.body` contains the final request
-body sent upstream after anonymization, and `response.body` contains the
-upstream response body decoded when `Content-Encoding: gzip` is present.
+- every `<session>...</session>` block found anywhere in a JSON request body;
+- text content in prompts, system messages, `<system-reminder>` blocks, text file
+  context, and tool results;
+- text document sources where `source.type` is `text`.
 
-## Detectors
+Structural metadata such as model names, roles, content block types, tool IDs,
+tool names, media types, cache-control values, and base64 document data is left
+unchanged so the Anthropic request shape remains valid.
+
+For a single proxy process, repeated values are mapped to stable tokens. For
+example, the same email address is replaced by the same `[EMAIL_N]` token across
+requests handled by that process.
 
 When matches overlap, the detector with the highest priority wins. If priorities
 are equal, the longest match wins.
 
-| Category | Scope | Priority | Description |
-| --- | --- | ---: | --- |
-| `EMAIL` | Core | 1000 | Email addresses, normalized in lowercase for stable tokens. |
-| `NIR` | Core | 1000 | French social security numbers, including spaced formats and Corsica departments `2A`/`2B`. |
-| `IBAN` | Extra | 1000 | IBAN-like account identifiers, normalized by removing separators. |
-| `IP` | Core | 900 | IPv4 and IPv6 addresses. |
-| `URL` | Extra | 900 | HTTP(S) and `www.` URLs. Lower priority than emails, so emails inside URLs can win. |
-| `CREDIT_CARD` | Extra | 900 | Credit card-like digit sequences. Lower than NIR/IBAN to avoid stealing structured IDs. |
-| `MAC_ADDRESS` | Extra | 900 | MAC addresses with `:` or `-` separators. |
-| `PHONE` | Core | 700 | French and common international phone numbers. |
-| `BIRTH_DATE` | Core | 600 | Conservatively labelled birth dates such as `Date de naissance: 14 mars 1988` or `Née le 12/01/1988`. |
-| `BLOOD_TYPE` | Core | 600 | Contextual blood groups such as `Groupe sanguin O+` or `Blood type AB negative`. |
-| `SECRET` | Gitleaks | 600 | Secrets loaded dynamically from the official Gitleaks config at startup. Path-scoped Gitleaks rules are skipped because Klovis only scans raw stdin text. |
-| `CRYPTO` | Presidio | 600 | Cryptocurrency wallet identifiers loaded from supported Microsoft Presidio regex recognizers. |
-| `ADDRESS` | Core / LLM | 900 / 700 / 50 | Regex catches both unlabelled French postal addresses such as `14 Rue de la République, 69002 Lyon` and conservatively labelled addresses, including common street types and optional residence/building complements; LLM can add complex contextual addresses with lower priority. |
-| `NAME` | Core | 900 | Contextual names following strong FR/EN cues or form labels, including Markdown variants such as `Je m'appelle Jean-Pierre`, `Hello this is Alice`, or `**Nom :** JULIEN MOREAU`. |
-| `FIRST_NAME` | Core | 500 | Conservatively labelled first names, for example `Prénom: Jean`. |
-| `LAST_NAME` | Core | 500 | Conservatively labelled last names, for example `Nom: Dupont`. |
-| `NUMERIC_ID` | Extra | 100 | Generic long numeric IDs of at least 7 digits. Low priority fallback. |
-| `REFERENCE_ID` | Extra | 100 | Labelled alphanumeric IDs such as `Ref: ABC12345`, requiring letters and digits. |
-| `PERSON_NAME` | LLM | 50 | Contextual full names found by the local model. |
-| `DATE` | LLM | 50 | Dates tied to identity, documents, family, employment, education, health, or events. |
+## Configuration
 
-Extra detectors are enabled by default and can be disabled with `--no-extra`.
-Gitleaks secret detectors are enabled by default and can be disabled with `--no-gitleaks`.
-Supported Presidio regex detectors are enabled by default and can be disabled with `--no-presidio`.
-LLM detectors are disabled by default and require `--llm`.
+Klovis is configured with environment variables.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic body logging when set to `true`. |
+| `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
+| `KLOVIS_LLM_ENABLED` | `false` | Enables optional local LLM extraction through Ollama. |
+| `KLOVIS_LLM_URL` | `http://localhost:11434` | Ollama base URL. |
+| `KLOVIS_LLM_MODEL` | `mistral` | Ollama model used for entity extraction. |
+| `KLOVIS_LLM_TIMEOUT` | `30s` | Startup and request timeout for LLM calls. |
+| `KLOVIS_LLM_MAX_CHARS` | `1000` | Maximum input bytes sent to the LLM per chunk. |
+| `KLOVIS_LLM_AUTOSTART` | `false` | Starts `ollama serve` automatically when the Ollama URL is local and not already reachable. |
+
+Boolean variables accept only `true` or `false`.
+
+### Logs
+
+Klovis writes structured application logs to stdout by default. To write logs to
+`proxy.log` instead, enable file logging:
+
+```sh
+KLOVIS_LOG_TO_FILE=true go run ./cmd/klovis
+```
+
+By default, Klovis does not write traffic bodies to disk. To also inspect the
+final request body sent upstream after anonymization, enable debug logging:
+
+```sh
+KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true go run ./cmd/klovis
+```
+
+Use debug mode carefully, because it records the anonymized upstream request body
+in whichever log destination is configured.
+
+### Optional LLM Extraction
+
+LLM extraction is disabled by default. Enable it with:
+
+```sh
+KLOVIS_LLM_ENABLED=true go run ./cmd/klovis
+```
+
+When enabled, Klovis checks the Ollama connection during startup and runs a small
+extraction probe before accepting traffic. If startup verification fails, the
+proxy exits.
+
+By default, Klovis does not start Ollama for you. Start Ollama separately before
+enabling LLM extraction, or opt in to local autostart:
+
+```sh
+KLOVIS_LLM_ENABLED=true KLOVIS_LLM_AUTOSTART=true go run ./cmd/klovis
+```
+
+Autostart only applies to local Ollama URLs such as `http://localhost:11434` or
+loopback IP addresses. Remote Ollama URLs are never started by Klovis.
+
+Deterministic detectors remain the baseline. LLM matches are added when
+available and have lower priority than deterministic regex, Gitleaks, and
+Presidio matches. If the LLM fails during a request, Klovis logs the technical
+error and continues with deterministic anonymization.
+
+## Detectors
+
+Klovis combines built-in detectors with external rules loaded at startup.
+External rule payloads are cached for 24 hours in the user cache directory under
+`klovis/external-rules`.
+
+| Category | Source | Priority | Description |
+| --- | --- | ---: | --- |
+| `EMAIL` | Built-in / Presidio | 1000 / 600 | Email addresses, normalized in lowercase for stable tokens. |
+| `NIR` | Built-in | 1000 | French social security numbers, including spaced formats and Corsica departments `2A` and `2B`. |
+| `IBAN` | Built-in / Presidio | 1000 / 600 | IBAN-like account identifiers, normalized by removing separators. |
+| `IP` | Built-in / Presidio | 900 / 600 | IPv4 and IPv6 addresses. |
+| `URL` | Built-in / Presidio | 900 / 600 | HTTP(S) and `www.` URLs. |
+| `CREDIT_CARD` | Built-in / Presidio | 900 / 600 | Credit card-like digit sequences. |
+| `MAC_ADDRESS` | Built-in / Presidio | 900 / 600 | MAC addresses with `:` or `-` separators. |
+| `PHONE` | Built-in | 700 | French and common international phone numbers. |
+| `BIRTH_DATE` | Built-in | 600 | Conservatively labelled birth dates. |
+| `BLOOD_TYPE` | Built-in | 600 | Contextual blood groups such as `Groupe sanguin O+`. |
+| `SECRET` | Gitleaks | 600 | Secrets loaded dynamically from the official Gitleaks config. |
+| `CRYPTO` | Presidio | 600 | Cryptocurrency wallet identifiers loaded from supported Presidio recognizers. |
+| `ADDRESS` | Built-in / LLM | 900 / 700 / 50 | French postal addresses, labelled addresses, and optional contextual LLM matches. |
+| `NAME` | Built-in | 900 | Contextual names following strong French or English cues and form labels. |
+| `FIRST_NAME` | Built-in | 500 | Conservatively labelled first names. |
+| `LAST_NAME` | Built-in | 500 | Conservatively labelled last names. |
+| `NUMERIC_ID` | Built-in | 100 | Generic long numeric IDs. |
+| `REFERENCE_ID` | Built-in | 100 | Labelled alphanumeric references requiring letters and digits. |
+| `PERSON_NAME` | LLM | 50 | Contextual full names found by the local model. |
+| `DATE` | LLM / Presidio | 50 / 600 | Dates tied to identity, family, documents, health, work, or events. |
+| `VEHICLE_PLATE` | LLM | 50 | Vehicle registration plates found by the local model. |
+
+## Development
+
+Clone the repository and install dependencies:
+
+```sh
+git clone https://github.com/Korbicorp/klovis.git
+cd klovis
+go mod download
+```
+
+Run the test suite:
+
+```sh
+go test ./...
+```
+
+Run the proxy locally:
+
+```sh
+go run ./cmd/klovis
+```
+
+Format Go code before submitting changes:
+
+```sh
+gofmt -w ./cmd ./internal
+```
+
+## Security Notes
+
+Klovis reduces the amount of sensitive data sent upstream, but it is not a
+formal data-loss-prevention guarantee. Review detector coverage for your own
+threat model before using it with production data.
+
+External Gitleaks and Presidio rules are loaded from their upstream repositories
+by default. Cached copies are reused for 24 hours and stale cache entries may be
+used as a fallback if a refresh fails.
+
+## Contributing
+
+Issues and pull requests are welcome. For code changes, please include focused
+tests that cover the behavior being changed.
+
+Useful checks before opening a pull request:
+
+```sh
+go test ./...
+gofmt -w ./cmd ./internal
+```
+
+## License
+
+Klovis is released under the [MIT License](LICENSE).

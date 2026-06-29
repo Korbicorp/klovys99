@@ -101,8 +101,8 @@ func detectorsFromGitleaksRules(rules []gitleaksRule) ([]anonymizer.Detector, er
 		if strings.TrimSpace(rule.Regex) == "" {
 			continue
 		}
-		// Klovis scans raw stdin without file metadata, so path-scoped rules cannot be
-		// applied faithfully and are skipped to avoid context-free false positives.
+		// Klovis scans request text without file metadata, so path-scoped rules cannot
+		// be applied faithfully and are skipped to avoid context-free false positives.
 		if strings.TrimSpace(rule.Path) != "" {
 			continue
 		}
@@ -118,11 +118,11 @@ func detectorsFromGitleaksRules(rules []gitleaksRule) ([]anonymizer.Detector, er
 		}
 
 		detectors = append(detectors, regexDetector{
-			entityType:   anonymizer.EntitySecret,
-			priority:     priorityMedium,
-			pattern:      compiled,
-			captureGroup: captureGroup,
-			normalizer:   normalizeFold,
+			entityType:       anonymizer.EntitySecret,
+			priority:         priorityMedium,
+			pattern:          compiled,
+			captureGroup:     captureGroup,
+			normalizerPolicy: normalizerPolicyFold,
 		})
 	}
 
