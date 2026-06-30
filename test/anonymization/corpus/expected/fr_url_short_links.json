@@ -1,0 +1,6 @@
+{
+  "entities": [
+    { "type": "EMAIL", "value": "support-client@example.fr" },
+    { "type": "REFERENCE_ID", "value": "URLFR2026A" }
+  ]
+}

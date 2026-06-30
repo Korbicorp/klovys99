@@ -1,0 +1,4 @@
+Claude Code, resume ce bug report sans garder les URLs completes.
+La page de paiement echoue sur https://shop.example.fr/checkout/payment?session_id=sess_1234567890abcdef&customer=alice@example.fr&redirect=https%3A%2F%2Fshop.example.fr%2Fmerci#step-card.
+Le callback configure est https://api.example.fr:8443/v1/hooks/payment/success?tenant=fr-prod&retry=3.
+Contact: alice.ops@example.fr.

@@ -36,7 +36,7 @@ Allowed types:
 Rules:
 - Return only strings that are exactly present in the input text.
 - Do not invent values.
-- Do not return emails, phone numbers, IP addresses, URLs, IBANs, credit cards, social security numbers, MAC addresses, or obvious numeric/reference IDs.
+- Do not return emails, phone numbers, IP addresses, IBANs, credit cards, social security numbers, MAC addresses, or obvious numeric/reference IDs.
 - Extract only person names, addresses, dates, and vehicle plates.
 - Include full person names and repeated short references to known people, such as first names used alone.
 - Include dates tied to identity, family, documents, employment, education, health, subscriptions, payments, or events.

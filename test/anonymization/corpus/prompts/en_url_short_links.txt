@@ -1,0 +1,3 @@
+Please clean this support reply before I paste it into Slack.
+The public page https://status.example.com is fine, but www.example.com/help still returns 502.
+The customer contact is web-support@example.com and the ticket is ref: URLEN2026A.

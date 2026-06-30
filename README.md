@@ -191,7 +191,6 @@ External rule payloads are cached for 24 hours in the user cache directory under
 | `NIR` | Built-in | 1000 | French social security numbers, including spaced formats and Corsica departments `2A` and `2B`. |
 | `IBAN` | Built-in / Presidio | 1000 / 600 | IBAN-like account identifiers, normalized by removing separators. |
 | `IP` | Built-in / Presidio | 900 / 600 | IPv4 and IPv6 addresses. |
-| `URL` | Built-in / Presidio | 900 / 600 | HTTP(S) and `www.` URLs. |
 | `CREDIT_CARD` | Built-in / Presidio | 900 / 600 | Credit card-like digit sequences. |
 | `MAC_ADDRESS` | Built-in / Presidio | 900 / 600 | MAC addresses with `:` or `-` separators. |
 | `PHONE` | Built-in | 700 | French and common international phone numbers. |

@@ -1,0 +1,3 @@
+Peux-tu reformuler ce message de support sans exposer les liens internes ?
+Le client dit que https://status.example.fr est vert mais que www.example.fr/aide ne charge pas.
+Son email est support-client@example.fr et le ticket est Ref: URLFR2026A.

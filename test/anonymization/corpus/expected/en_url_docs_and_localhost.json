@@ -1,0 +1,7 @@
+{
+  "entities": [
+    { "type": "IP", "value": "127.0.0.1" },
+    { "type": "NUMERIC_ID", "value": "123456789" },
+    { "type": "EMAIL", "value": "abc123@example.ingest.sentry.io" }
+  ]
+}

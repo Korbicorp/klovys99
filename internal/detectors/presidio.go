@@ -460,8 +460,6 @@ func presidioEntityType(entity string) (anonymizer.EntityType, bool) {
 		return anonymizer.EntityEmail, true
 	case "IP_ADDRESS":
 		return anonymizer.EntityIP, true
-	case "URL":
-		return anonymizer.EntityURL, true
 	case "IBAN_CODE":
 		return anonymizer.EntityIBAN, true
 	case "CREDIT_CARD":

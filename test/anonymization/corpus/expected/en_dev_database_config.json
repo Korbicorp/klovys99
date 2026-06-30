@@ -1,9 +1,8 @@
 {
   "entities": [
-    { "type": "SECRET", "value": "mongodb://reports_user:ReportsPass!2026@10.9.8.7:27017/reports" },
+    { "type": "GENERIC_PASSWORD", "value": "ReportsPass!2026" },
     { "type": "IP", "value": "10.9.8.7" },
-    { "type": "SECRET", "value": "https://elastic:ElasticPass!2026@172.18.0.22:9200" },
-    { "type": "URL", "value": "https://elastic:ElasticPass!2026@172.18.0.22:9200" },
+    { "type": "GENERIC_PASSWORD", "value": "ElasticPass!2026" },
     { "type": "IP", "value": "172.18.0.22" },
     { "type": "EMAIL", "value": "platform-maintainer@example.com" },
     { "type": "REFERENCE_ID", "value": "DBCONF2026EN" }

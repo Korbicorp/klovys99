@@ -4,7 +4,6 @@
     { "type": "EMAIL", "value": "malik.arnaud@example.net" },
     { "type": "PHONE", "value": "+33 6 80 70 60 50" },
     { "type": "IP", "value": "192.168.12.42" },
-    { "type": "URL", "value": "https://api-staging.example.net/login" },
     { "type": "SECRET", "value": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" }
   ]
 }

@@ -4,7 +4,6 @@
     { "type": "EMAIL", "value": "james.white@example.dev" },
     { "type": "IP", "value": "10.0.8.15" },
     { "type": "MAC_ADDRESS", "value": "12-34-56-78-9A-BC" },
-    { "type": "URL", "value": "https://console.example.dev/projects/alpha" },
     { "type": "SECRET", "value": "ghp_abcdefghijklmnopqrstuvwxyz1234567890ABCD" },
     { "type": "REFERENCE_ID", "value": "OPSEN26JW" }
   ]

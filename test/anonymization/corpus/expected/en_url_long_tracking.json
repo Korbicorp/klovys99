@@ -1,0 +1,7 @@
+{
+  "entities": [
+    { "type": "GENERIC_ID", "value": "T123456" },
+    { "type": "SECRET", "value": "xoxb-1234567890abcdef" },
+    { "type": "EMAIL", "value": "frontend.owner@example.com" }
+  ]
+}

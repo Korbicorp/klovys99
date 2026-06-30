@@ -52,6 +52,8 @@ const (
 	priorityMedium   = 600
 	priorityName     = 500
 	priorityGeneric  = 100
+	priorityWeakID   = 60
+	priorityFallback = 50
 )
 
 type Config struct {
@@ -114,10 +116,12 @@ func Default(includeExtra bool) []anonymizer.Detector {
 	}
 
 	return append(base,
-		urlDetector(),
 		ibanDetector(),
 		creditCardDetector(),
 		macAddressDetector(),
+		uriPasswordDetector(),
+		genericPasswordDetector(),
+		genericIDDetector(),
 		numericIDDetector(),
 		referenceIDDetector(),
 	)
@@ -312,19 +316,6 @@ func emailDetector() anonymizer.Detector {
 		captureGroup: 0,
 		pattern: regexp2.MustCompile(
 			`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`,
-			regexp2.RE2,
-		),
-		normalizerPolicy: normalizerPolicyFold,
-	}
-}
-
-func urlDetector() anonymizer.Detector {
-	return regexDetector{
-		entityType:   anonymizer.EntityURL,
-		priority:     priorityHigh,
-		captureGroup: 0,
-		pattern: regexp2.MustCompile(
-			`(?i)\b(?:https?://|www\.)[^\s<>"']+[^\s<>"'.,;:!?)]`,
 			regexp2.RE2,
 		),
 		normalizerPolicy: normalizerPolicyFold,
@@ -540,6 +531,46 @@ func macAddressDetector() anonymizer.Detector {
 		captureGroup: 0,
 		pattern: regexp2.MustCompile(
 			`\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b|\b[0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5}\b`,
+			regexp2.RE2,
+		),
+		normalizerPolicy: normalizerPolicyDigitsAndLetters,
+	}
+}
+
+func uriPasswordDetector() anonymizer.Detector {
+	return regexDetector{
+		entityType:   anonymizer.EntityGenericPassword,
+		priority:     priorityDefault,
+		captureGroup: 1,
+		pattern: regexp2.MustCompile(
+			`(?i)\b[a-z][a-z0-9+.-]*://(?:[^:@\s/?#]+)?:([^@\s/?#]+)@`,
+			regexp2.RE2,
+		),
+		normalizerPolicy: normalizerPolicyFold,
+	}
+}
+
+func genericPasswordDetector() anonymizer.Detector {
+	return regexDetector{
+		entityType:   anonymizer.EntityGenericPassword,
+		priority:     priorityFallback,
+		captureGroup: 0,
+		pattern: regexp2.MustCompile(
+			`(?=[^\s]*[A-Za-z])(?=[^\s]*\d)(?=[^\s]*[!@#$%^&*_=+\-/\\])[^\s]+`,
+			regexp2.RE2,
+		),
+		normalizerPolicy: normalizerPolicyFold,
+	}
+}
+
+func genericIDDetector() anonymizer.Detector {
+	return regexDetector{
+		entityType:   anonymizer.EntityGenericID,
+		priority:     priorityWeakID,
+		captureGroup: 1,
+		spanPolicy:   spanPolicyRequireLettersAndDigits,
+		pattern: regexp2.MustCompile(
+			`(?i)(?:^|[\s=@&])([a-z0-9]{6,})(?=$|[\s=@&])`,
 			regexp2.RE2,
 		),
 		normalizerPolicy: normalizerPolicyDigitsAndLetters,

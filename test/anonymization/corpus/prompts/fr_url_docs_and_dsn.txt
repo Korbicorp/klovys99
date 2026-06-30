@@ -1,0 +1,4 @@
+Prepare une note pour l'equipe dev a partir de ces liens.
+Documentation: https://docs.example.dev/fr/guides/authentication/oauth2?version=2026.06&lang=fr.
+DSN de test: https://publickey@example.ingest.sentry.io/987654.
+Dashboard local: http://localhost:3000/admin/users?id=1234567.

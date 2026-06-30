@@ -2,7 +2,6 @@
   "entities": [
     { "type": "SECRET", "value": "jwt-prod-secret-2026-abcdef" },
     { "type": "EMAIL", "value": "sarah.admin@example.fr" },
-    { "type": "URL", "value": "https://admin.example.fr/auth/callback" },
     { "type": "MAC_ADDRESS", "value": "de:ad:be:ef:00:01" },
     { "type": "REFERENCE_ID", "value": "PATCHFR26SA" }
   ]

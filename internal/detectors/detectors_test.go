@@ -181,28 +181,24 @@ func TestFrenchAddressDetectorSupportsUnlabelledAddresses(t *testing.T) {
 	}
 }
 
-func TestEmailWinsOverExtraURLOverlap(t *testing.T) {
+func TestURLIsPreservedWhileEmailInsideIsAnonymized(t *testing.T) {
 	output, result := anonymize(t, "Contact: https://example.com/a?email=alice@example.com", true)
 
-	if strings.Contains(output, "alice@example.com") {
-		t.Fatalf("email was not anonymized: %s", output)
+	if got, want := output, "Contact: https://example.com/a?email=[EMAIL_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if got, want := result.Stats[anonymizer.EntityEmail].Count, 1; got != want {
 		t.Fatalf("email count = %d, want %d", got, want)
 	}
-	if _, ok := result.Stats[anonymizer.EntityURL]; ok {
-		t.Fatalf("overlapping lower priority URL should not be counted: %#v", result.Stats)
-	}
 }
 
 func TestExtraDetectorsCanBeDisabled(t *testing.T) {
-	input := "URL https://example.com IBAN FR76 3000 6000 0112 3456 7890 189 MAC aa:bb:cc:dd:ee:ff ID 1234567 Ref: ABC12345"
+	input := "IBAN FR76 3000 6000 0112 3456 7890 189 MAC aa:bb:cc:dd:ee:ff ID 1234567 Ref: ABC12345"
 
 	withExtra, _ := anonymize(t, input, true)
 	withoutExtra, _ := anonymize(t, input, false)
 
-	if strings.Contains(withExtra, "https://example.com") ||
-		strings.Contains(withExtra, "FR76 3000") ||
+	if strings.Contains(withExtra, "FR76 3000") ||
 		strings.Contains(withExtra, "aa:bb:cc") ||
 		strings.Contains(withExtra, "1234567") ||
 		strings.Contains(withExtra, "ABC12345") {
@@ -242,6 +238,86 @@ func TestReferenceIDRequiresLettersAndDigits(t *testing.T) {
 	}
 	if got, want := result.Stats[anonymizer.EntityReferenceID].Count, 1; got != want {
 		t.Fatalf("reference id count = %d, want %d", got, want)
+	}
+}
+
+func TestURIPasswordDetectorSupportsAnyScheme(t *testing.T) {
+	input := strings.Join([]string{
+		`dsn := "mysql://app_user:SuperSecret42!@172.20.10.8:3306/app_prod"`,
+		`redisURL := "redis://:redisPass2026@10.0.0.5:6379/0"`,
+		`elastic := "https://elastic:ElasticPass!2026@172.18.0.22:9200"`,
+		`replica := "postgresql+srv://svc:OtherPass99!@db.example.com/app"`,
+	}, "\n")
+
+	output, result := anonymize(t, input, true)
+
+	want := strings.Join([]string{
+		`dsn := "mysql://app_user:[GENERIC_PASSWORD_1]@[IP_1]:3306/app_prod"`,
+		`redisURL := "redis://:[GENERIC_PASSWORD_2]@[IP_2]:6379/0"`,
+		`elastic := "https://elastic:[GENERIC_PASSWORD_3]@[IP_3]:9200"`,
+		`replica := "postgresql+srv://svc:[GENERIC_PASSWORD_4]@db.example.com/app"`,
+	}, "\n")
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityGenericPassword].Count, 4; got != want {
+		t.Fatalf("generic password count = %d, want %d", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityIP].Count, 3; got != want {
+		t.Fatalf("ip count = %d, want %d", got, want)
+	}
+}
+
+func TestGenericPasswordDetectorRequiresLettersDigitsAndSpecials(t *testing.T) {
+	output, result := anonymize(t, "PASSWORD=dockerPassword2026! plain ABC12345 digits 12345678", true)
+
+	if got, want := output, "[GENERIC_PASSWORD_1] plain [GENERIC_ID_1] digits [NUMERIC_ID_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityGenericPassword].Count, 1; got != want {
+		t.Fatalf("generic password count = %d, want %d", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityGenericID].Count, 1; got != want {
+		t.Fatalf("generic id count = %d, want %d", got, want)
+	}
+}
+
+func TestReferenceIDWinsOverGenericPassword(t *testing.T) {
+	output, result := anonymize(t, "Account: CRMEN-443322", true)
+
+	if got, want := output, "Account: [REFERENCE_ID_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityReferenceID].Count, 1; got != want {
+		t.Fatalf("reference id count = %d, want %d", got, want)
+	}
+	if _, ok := result.Stats[anonymizer.EntityGenericPassword]; ok {
+		t.Fatalf("generic password should not win over reference id: %#v", result.Stats)
+	}
+}
+
+func TestGenericIDDetectorUsesWhitespaceEqualsAtAndAmpersandDelimiters(t *testing.T) {
+	output, result := anonymize(t, "workspace=T123456&owner user@ABC789 plain ABC12345 key=abcdef", true)
+
+	if got, want := output, "workspace=[GENERIC_ID_1]&owner user@[GENERIC_ID_2] plain [GENERIC_ID_3] key=abcdef"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityGenericID].Count, 3; got != want {
+		t.Fatalf("generic id count = %d, want %d", got, want)
+	}
+}
+
+func TestReferenceIDWinsOverGenericID(t *testing.T) {
+	output, result := anonymize(t, "Account: AB123456", true)
+
+	if got, want := output, "Account: [REFERENCE_ID_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityReferenceID].Count, 1; got != want {
+		t.Fatalf("reference id count = %d, want %d", got, want)
+	}
+	if _, ok := result.Stats[anonymizer.EntityGenericID]; ok {
+		t.Fatalf("generic id should not win over reference id: %#v", result.Stats)
 	}
 }
 
@@ -373,16 +449,16 @@ class EmailRecognizer(PatternRecognizer):
 }
 
 func TestDetectorsFromPresidioSourceResolvesStringConstants(t *testing.T) {
-	loaded, err := detectorsFromPresidioSource("UrlRecognizer", `
-BASE_URL_REGEX = r"example\.com"
-class UrlRecognizer(PatternRecognizer):
+	loaded, err := detectorsFromPresidioSource("EmailRecognizer", `
+BASE_EMAIL_REGEX = r"foo@example\.com"
+class EmailRecognizer(PatternRecognizer):
     PATTERNS = [
-        Pattern("URL", "(?i)" + BASE_URL_REGEX, 0.5),
+        Pattern("Email", "(?i)" + BASE_EMAIL_REGEX, 0.5),
     ]
 
     def __init__(
         self,
-        supported_entity: str = "URL",
+        supported_entity: str = "EMAIL_ADDRESS",
     ):
         pass
 `)
@@ -391,12 +467,12 @@ class UrlRecognizer(PatternRecognizer):
 	}
 
 	engine := anonymizer.NewService(loaded)
-	output, result := engine.Anonymize("example.com\n")
-	if got, want := output, "[URL_1]\n"; got != want {
+	output, result := engine.Anonymize("foo@example.com\n")
+	if got, want := output, "[EMAIL_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if got, want := result.Stats[anonymizer.EntityURL].Count, 1; got != want {
-		t.Fatalf("url count = %d, want %d", got, want)
+	if got, want := result.Stats[anonymizer.EntityEmail].Count, 1; got != want {
+		t.Fatalf("email count = %d, want %d", got, want)
 	}
 }
 
@@ -472,16 +548,16 @@ class EmailRecognizer(PatternRecognizer):
 }
 
 func TestDetectorsFromPresidioSourceSupportsRawStringsWithEscapedQuotes(t *testing.T) {
-	loaded, err := detectorsFromPresidioSource("UrlRecognizer", `
-BASE_URL_REGEX = r"example\.com"
-class UrlRecognizer(PatternRecognizer):
+	loaded, err := detectorsFromPresidioSource("EmailRecognizer", `
+BASE_EMAIL_REGEX = r"foo@example\.com"
+class EmailRecognizer(PatternRecognizer):
     PATTERNS = [
-        Pattern("Quoted URL", r'(?i)["\'](https?://' + BASE_URL_REGEX + r')["\']', 0.6),
+        Pattern("Quoted email", r'(?i)["\'](' + BASE_EMAIL_REGEX + r')["\']', 0.6),
     ]
 
     def __init__(
         self,
-        supported_entity: str = "URL",
+        supported_entity: str = "EMAIL_ADDRESS",
     ):
         pass
 `)
@@ -490,25 +566,25 @@ class UrlRecognizer(PatternRecognizer):
 	}
 
 	engine := anonymizer.NewService(loaded)
-	output, result := engine.Anonymize(`"https://example.com"` + "\n")
-	if got, want := output, "[URL_1]\n"; got != want {
+	output, result := engine.Anonymize(`"foo@example.com"` + "\n")
+	if got, want := output, "[EMAIL_1]\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if got, want := result.Stats[anonymizer.EntityURL].Count, 1; got != want {
-		t.Fatalf("url count = %d, want %d", got, want)
+	if got, want := result.Stats[anonymizer.EntityEmail].Count, 1; got != want {
+		t.Fatalf("email count = %d, want %d", got, want)
 	}
 }
 
 func TestDetectorsFromPresidioSourceSkipsUnknownExpressions(t *testing.T) {
-	loaded, err := detectorsFromPresidioSource("UrlRecognizer", `
-class UrlRecognizer(PatternRecognizer):
+	loaded, err := detectorsFromPresidioSource("EmailRecognizer", `
+class EmailRecognizer(PatternRecognizer):
     PATTERNS = [
-        Pattern("URL", "(?i)" + UNKNOWN_REGEX, 0.5),
+        Pattern("Email", "(?i)" + UNKNOWN_REGEX, 0.5),
     ]
 
     def __init__(
         self,
-        supported_entity: str = "URL",
+        supported_entity: str = "EMAIL_ADDRESS",
     ):
         pass
 `)

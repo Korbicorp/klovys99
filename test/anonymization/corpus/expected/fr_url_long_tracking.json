@@ -1,0 +1,7 @@
+{
+  "entities": [
+    { "type": "SECRET", "value": "sess_1234567890abcdef" },
+    { "type": "EMAIL", "value": "alice@example.fr" },
+    { "type": "EMAIL", "value": "alice.ops@example.fr" }
+  ]
+}

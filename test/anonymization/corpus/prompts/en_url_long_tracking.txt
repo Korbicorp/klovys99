@@ -1,0 +1,4 @@
+Claude Code, summarize this frontend bug without keeping the exact links.
+The failing URL is https://app.example.com/projects/alpha/settings/integrations/slack?workspace=T123456&token=xoxb-1234567890abcdef&return_to=https%3A%2F%2Fapp.example.com%2Fdone#oauth.
+The webhook target is https://api.example.com:9443/v2/hooks/slack/events?env=prod-us&debug=false.
+Contact owner: frontend.owner@example.com.

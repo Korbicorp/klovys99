@@ -2,7 +2,6 @@
   "entities": [
     { "type": "SECRET", "value": "payment-secret-2026-qwerty" },
     { "type": "EMAIL", "value": "billing-support@example.com" },
-    { "type": "URL", "value": "https://pay.example.com/webhooks/private" },
     { "type": "MAC_ADDRESS", "value": "12:34:56:78:9a:bc" },
     { "type": "REFERENCE_ID", "value": "PATCHEN26BS" }
   ]

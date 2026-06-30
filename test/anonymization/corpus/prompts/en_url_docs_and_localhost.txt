@@ -1,0 +1,4 @@
+Turn these notes into a concise issue description.
+Docs link: https://docs.example.dev/en/reference/api/errors?code=AUTH_401&tab=node.
+Local reproduction: http://127.0.0.1:8080/debug/session/123456789?verbose=true.
+Monitoring DSN: https://abc123@example.ingest.sentry.io/654321.
