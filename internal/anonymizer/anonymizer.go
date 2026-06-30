@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/rs/zerolog/log"
 )
 
 type Service struct {
@@ -52,6 +54,8 @@ func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, 
 	sort.SliceStable(matches, func(i, j int) bool {
 		return matches[i].Start < matches[j].Start
 	})
+
+	log.Info().Interface("pii", matches).Msg("Secret and PII found")
 
 	result := Result{Stats: make(map[EntityType]EntityStats)}
 
