@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Lea Marchand" },
+    { "type": "SECRET", "value": "ProdPassword!2026" },
+    { "type": "URL", "value": "https://10.44.0.12:8443/private" },
+    { "type": "IP", "value": "10.44.0.12" },
+    { "type": "PHONE", "value": "+33 6 18 19 20 21" }
+  ]
+}

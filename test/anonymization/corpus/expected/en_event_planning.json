@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Emily Parker" },
+    { "type": "EMAIL", "value": "emily.parker@example.com" },
+    { "type": "PHONE", "value": "06 60 70 80 90" },
+    { "type": "ADDRESS", "value": "16 place du Capitole, 31000 Toulouse" },
+    { "type": "REFERENCE_ID", "value": "EVTEN2026EP" }
+  ]
+}

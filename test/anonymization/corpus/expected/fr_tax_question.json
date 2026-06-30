@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Paul Bernard" },
+    { "type": "NIR", "value": "1 79 04 75 056 123 40" },
+    { "type": "EMAIL", "value": "paul.bernard@example.fr" },
+    { "type": "NUMERIC_ID", "value": "1234567890123" },
+    { "type": "ADDRESS", "value": "6 impasse des Acacias, 33000 Bordeaux" }
+  ]
+}

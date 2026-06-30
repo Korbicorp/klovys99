@@ -1,0 +1,4 @@
+Summarize this for a new clinic intake form.
+Patient name: Ethan Brooks, born on 1990-05-14.
+Email ethan.brooks@example.org and phone 00 44 20 12 34 56 78.
+Blood type is AB negative and the old clinic address is 48 rue de Rivoli, 75004 Paris.

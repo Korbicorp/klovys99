@@ -68,8 +68,16 @@ func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, 
 
 		value := input[match.Start:match.End]
 		key := normalizedKey(match, value)
-		output.WriteString(r.tokenFor(match.Type, key))
+		token := r.tokenFor(match.Type, key)
+		output.WriteString(token)
 		updateStats(result.Stats, match.Type)
+		result.Findings = append(result.Findings, Finding{
+			Type:  match.Type,
+			Value: value,
+			Start: match.Start,
+			End:   match.End,
+			Token: token,
+		})
 
 		last = match.End
 	}

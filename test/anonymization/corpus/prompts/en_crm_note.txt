@@ -1,0 +1,4 @@
+Clean up this CRM call note before I share it internally.
+Customer: Sophia Turner, email sophia.turner@example.co, phone 07 09 08 07 06.
+Account: CRMEN-443322 and delivery address 7 place Massena, 06000 Nice.
+She also gave card 5555 4444 3333 1111 for the deposit.

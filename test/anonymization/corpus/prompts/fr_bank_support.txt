@@ -1,0 +1,5 @@
+Ecris au support bancaire pour signaler un virement non reconnu.
+Nom: Nadia Benali
+Email: nadia.benali@example.com
+IBAN FR76 1027 8006 0002 1234 5678 901, transaction 987654321 du 18 juin.
+Numero client: CLIENTFR2026A et telephone 07 45 67 89 10.

@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Hugo Lefevre" },
+    { "type": "BIRTH_DATE", "value": "3 fevrier 1991" },
+    { "type": "EMAIL", "value": "hugo.lefevre@example.fr" },
+    { "type": "PHONE", "value": "06 11 22 33 44" },
+    { "type": "BLOOD_TYPE", "value": "O+" },
+    { "type": "ADDRESS", "value": "22 avenue Jean Jaures, 69007 Lyon" }
+  ]
+}

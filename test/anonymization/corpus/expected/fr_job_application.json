@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "FIRST_NAME", "value": "Elodie" },
+    { "type": "LAST_NAME", "value": "Garnier" },
+    { "type": "EMAIL", "value": "elodie.garnier@example.fr" },
+    { "type": "PHONE", "value": "+33 7 50 12 34 98" },
+    { "type": "URL", "value": "https://portfolio.example.fr/elodie" },
+    { "type": "ADDRESS", "value": "9 place Bellecour, 69002 Lyon" }
+  ]
+}

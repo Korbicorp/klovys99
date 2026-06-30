@@ -1,0 +1,5 @@
+Please turn these notes into a concise cover letter.
+First name: Liam
+Last name: Wilson
+Contact liam.wilson@example.dev and phone +33 6 55 44 33 22.
+Portfolio is www.liamwilson.example and the invoice address is 3 avenue Kleber, 75116 Paris.

@@ -1,0 +1,4 @@
+Organize these notes into an insurance claim summary.
+Policyholder: Lucas Green, date of birth: 07/09/1985.
+Incident address 4 route de Lyon, 38000 Grenoble and contact lucas.green@example.com.
+Contract id: CLAIM2026LG, phone 04 76 11 22 33.

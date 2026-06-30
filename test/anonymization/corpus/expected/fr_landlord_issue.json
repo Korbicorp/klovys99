@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Romain Petit" },
+    { "type": "ADDRESS", "value": "5 boulevard Voltaire, 75011 Paris" },
+    { "type": "PHONE", "value": "06.32.10.98.76" },
+    { "type": "EMAIL", "value": "romain.petit@example.fr" },
+    { "type": "REFERENCE_ID", "value": "BAIL75011RP26" }
+  ]
+}

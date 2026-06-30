@@ -1,0 +1,4 @@
+Ecris un message au vendeur pour demander un retour.
+Bonjour, mon nom est Camille Robert.
+Commande ID: RETOUR2026CR, email camille.robert@example.fr, mobile +33 6 44 55 66 77.
+Livraison initiale au 8 rue Nationale, 59800 Lille, paiement carte 4716-1089-9971-6531.

@@ -1,0 +1,8 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Nora Evans" },
+    { "type": "SECRET", "value": "svc_live_abcdefghijklmnopqrstuvwxyz123456" },
+    { "type": "URL", "value": "https://internal.example.com/hook" },
+    { "type": "PHONE", "value": "06 25 26 27 28" }
+  ]
+}

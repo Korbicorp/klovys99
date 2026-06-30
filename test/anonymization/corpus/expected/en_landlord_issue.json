@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Noah Bennett" },
+    { "type": "ADDRESS", "value": "14 rue de la Paix, 75002 Paris" },
+    { "type": "EMAIL", "value": "noah.bennett@example.net" },
+    { "type": "PHONE", "value": "06 45 45 45 45" },
+    { "type": "REFERENCE_ID", "value": "LEASE2026NB" }
+  ]
+}

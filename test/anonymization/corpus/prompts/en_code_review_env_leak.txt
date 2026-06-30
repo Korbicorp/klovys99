@@ -1,0 +1,6 @@
+Claude Code, review this change before I open a PR.
+The file services/auth/.env contains:
+DATABASE_URL=postgres://auth_admin:LocalOnly!2026@192.168.56.12:5432/auth
+OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJK
+ADMIN_EMAIL=zoe.reed@example.dev
+Review ticket: CODEREVEN2026ZR.

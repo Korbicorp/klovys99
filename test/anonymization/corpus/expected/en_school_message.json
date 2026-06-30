@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Grace Miller" },
+    { "type": "EMAIL", "value": "grace.miller@example.com" },
+    { "type": "PHONE", "value": "+33 6 77 88 99 00" },
+    { "type": "REFERENCE_ID", "value": "STUDENT26AM" },
+    { "type": "ADDRESS", "value": "19 boulevard Carnot, 59000 Lille" }
+  ]
+}

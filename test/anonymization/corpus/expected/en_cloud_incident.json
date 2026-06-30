@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Benjamin Hall" },
+    { "type": "EMAIL", "value": "benjamin.hall@example.io" },
+    { "type": "PHONE", "value": "+33 6 12 98 76 54" },
+    { "type": "IP", "value": "172.16.5.20" },
+    { "type": "URL", "value": "https://ops.example.io/admin" },
+    { "type": "SECRET", "value": "xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwxyz" }
+  ]
+}

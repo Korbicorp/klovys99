@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "SECRET", "value": "AKIAIOSFODNN7EXAMPLE" },
+    { "type": "SECRET", "value": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" },
+    { "type": "URL", "value": "https://publickey@example.ingest.sentry.io/123456" },
+    { "type": "NAME", "value": "Pierre Lambert" },
+    { "type": "EMAIL", "value": "pierre.lambert@example.dev" }
+  ]
+}

@@ -1,0 +1,6 @@
+I pasted a repo scan into Claude Code. Can you identify sensitive values before I share the summary?
+File: backend/.env.production
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=abcdEFGHijklMNOPqrstUVWXyz1234567890ABCD
+ROLLBAR_TOKEN=post_server_item_1234567890abcdef1234567890abcdef
+Owner: my name is Marcus Hill, marcus.hill@example.dev.

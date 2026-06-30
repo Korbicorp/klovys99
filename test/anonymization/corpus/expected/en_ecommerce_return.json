@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Hannah Cooper" },
+    { "type": "REFERENCE_ID", "value": "RETURN2026HC" },
+    { "type": "EMAIL", "value": "hannah.cooper@example.com" },
+    { "type": "PHONE", "value": "+33 6 21 43 65 87" },
+    { "type": "ADDRESS", "value": "11 quai de la Tournelle, 75005 Paris" },
+    { "type": "CREDIT_CARD", "value": "4012-8888-8888-1881" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Sophie Durant" },
+    { "type": "EMAIL", "value": "sophie.durant@example.fr" },
+    { "type": "PHONE", "value": "06 98 76 54 32" },
+    { "type": "REFERENCE_ID", "value": "ELEVE2026LD" },
+    { "type": "ADDRESS", "value": "12 rue Victor Hugo, 31000 Toulouse" }
+  ]
+}

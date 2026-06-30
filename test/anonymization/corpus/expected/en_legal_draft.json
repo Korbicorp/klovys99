@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Daniel Reed" },
+    { "type": "EMAIL", "value": "daniel.reed@example.org" },
+    { "type": "PHONE", "value": "01 55 66 77 88" },
+    { "type": "ADDRESS", "value": "23 rue Saint Honore, 75001 Paris" },
+    { "type": "REFERENCE_ID", "value": "LEGALEN2026DR" }
+  ]
+}

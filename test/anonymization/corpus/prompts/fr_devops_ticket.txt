@@ -1,0 +1,5 @@
+Redige un ticket Jira clair a partir de ce copier-coller.
+Reporter: Thomas Noel, thomas.noel@example.dev.
+IP source: 10.20.30.40, MAC aa:bb:cc:dd:ee:ff, URL https://admin.example.dev/reset.
+Secret colle par erreur: ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV-XXXXXX.
+Ticket: DEVOPS26TN.

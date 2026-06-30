@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Emma Rousseau" },
+    { "type": "EMAIL", "value": "emma.rousseau@example.fr" },
+    { "type": "PHONE", "value": "07 12 12 12 12" },
+    { "type": "REFERENCE_ID", "value": "CRMFR-998877" },
+    { "type": "ADDRESS", "value": "44 chemin des Lilas, 44000 Nantes" },
+    { "type": "IBAN", "value": "FR14 2004 1010 0505 0001 3M02 606" }
+  ]
+}

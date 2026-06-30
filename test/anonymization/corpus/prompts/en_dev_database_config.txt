@@ -1,0 +1,5 @@
+Can you explain why this Node config fails locally?
+const mongo = "mongodb://reports_user:ReportsPass!2026@10.9.8.7:27017/reports";
+const elastic = "https://elastic:ElasticPass!2026@172.18.0.22:9200";
+const maintainer = "platform-maintainer@example.com";
+account: DBCONF2026EN.

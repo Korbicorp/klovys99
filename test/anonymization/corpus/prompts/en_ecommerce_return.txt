@@ -1,0 +1,4 @@
+Help me write a product return request.
+Hello, this is Hannah Cooper.
+Order ticket: RETURN2026HC, email hannah.cooper@example.com, mobile +33 6 21 43 65 87.
+Original shipment went to 11 quai de la Tournelle, 75005 Paris and the payment card was 4012-8888-8888-1881.

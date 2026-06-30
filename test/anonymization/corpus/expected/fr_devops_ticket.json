@@ -1,0 +1,11 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Thomas Noel" },
+    { "type": "EMAIL", "value": "thomas.noel@example.dev" },
+    { "type": "IP", "value": "10.20.30.40" },
+    { "type": "MAC_ADDRESS", "value": "aa:bb:cc:dd:ee:ff" },
+    { "type": "URL", "value": "https://admin.example.dev/reset" },
+    { "type": "SECRET", "value": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV-XXXXXX" },
+    { "type": "REFERENCE_ID", "value": "DEVOPS26TN" }
+  ]
+}

@@ -62,7 +62,22 @@ type EntityStats struct {
 	Count int
 }
 
+type Finding struct {
+	// Type controls the token prefix used for replacement, for example EMAIL.
+	Type EntityType
+	// Value is the original sensitive value replaced in the input.
+	Value string
+	// Start is the byte offset where the sensitive value starts in the input.
+	Start int
+	// End is the byte offset just after the sensitive value in the input.
+	End int
+	// Token is the pseudonym emitted in the anonymized output.
+	Token string
+}
+
 type Result struct {
 	// Stats is keyed by entity type and summarizes replacements for one call.
 	Stats map[EntityType]EntityStats
+	// Findings lists every resolved replacement made for one call.
+	Findings []Finding
 }

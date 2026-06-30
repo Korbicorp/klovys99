@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Anais Girard" },
+    { "type": "EMAIL", "value": "anais.girard@example.fr" },
+    { "type": "PHONE", "value": "06 75 31 09 88" },
+    { "type": "ADDRESS", "value": "2 cours Mirabeau, 13100 Aix" },
+    { "type": "REFERENCE_ID", "value": "EVTFR2026AG" }
+  ]
+}

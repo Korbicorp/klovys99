@@ -1,0 +1,6 @@
+Je lance Claude Code sur un vieux repo, peux-tu m'aider a lister ce qui doit etre masque avant de coller le rapport ?
+Fichier config/prod.env:
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+SENTRY_DSN=https://publickey@example.ingest.sentry.io/123456
+Owner: hello this is Pierre Lambert, pierre.lambert@example.dev.

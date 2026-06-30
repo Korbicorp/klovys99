@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Sophia Turner" },
+    { "type": "EMAIL", "value": "sophia.turner@example.co" },
+    { "type": "PHONE", "value": "07 09 08 07 06" },
+    { "type": "REFERENCE_ID", "value": "CRMEN-443322" },
+    { "type": "ADDRESS", "value": "7 place Massena, 06000 Nice" },
+    { "type": "CREDIT_CARD", "value": "5555 4444 3333 1111" }
+  ]
+}

@@ -1,0 +1,4 @@
+Aide-moi a faire une checklist administrative pour le demenagement de ma mere.
+Elle s'appelle Monique Faure, nee le 21 mars 1954.
+Son telephone est 04 91 22 33 44 et son email monique.faure@example.fr.
+Nouvelle adresse: 25 allée des Pins, 13009 Marseille.

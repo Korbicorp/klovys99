@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Claire Martin" },
+    { "type": "REFERENCE_ID", "value": "FRTRV2026149" },
+    { "type": "EMAIL", "value": "claire.martin@example.fr" },
+    { "type": "PHONE", "value": "+33 6 24 18 90 45" },
+    { "type": "CREDIT_CARD", "value": "4539 1488 0343 6467" },
+    { "type": "ADDRESS", "value": "18 rue des Martyrs, 75009 Paris" }
+  ]
+}

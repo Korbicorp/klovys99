@@ -1,0 +1,6 @@
+Claude Code, peux-tu reviewer ce diff et me dire si je peux le commiter ?
+Dans apps/api/.env.local j'ai:
+DATABASE_URL=postgres://billing_admin:Passw0rd!2026@10.12.4.20:5432/billing
+STRIPE_SECRET_KEY=sk_test_51NfakeStripeSecretValueABCDEFG1234567890
+ADMIN_EMAIL=marie.devaux@example.dev
+Le ticket de review est ref: CODEREVFR2026MD.

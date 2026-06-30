@@ -1,0 +1,4 @@
+Resume ce compte-rendu pour mon nouveau medecin sans perdre les infos importantes.
+Patient: mon nom est Hugo Lefevre, ne le 3 fevrier 1991.
+Contact: hugo.lefevre@example.fr, 06 11 22 33 44.
+Groupe sanguin O+ et antecedent d'allergie documente au cabinet du 22 avenue Jean Jaures, 69007 Lyon.

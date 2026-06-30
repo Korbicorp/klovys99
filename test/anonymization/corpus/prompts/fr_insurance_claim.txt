@@ -1,0 +1,4 @@
+Peux-tu organiser ces infos pour une declaration de sinistre ?
+Assure: Antoine Mercier, date de naissance: 12/01/1988.
+Adresse du sinistre 17 route de Vannes, 44000 Nantes et contact antoine.mercier@example.fr.
+Contrat account: ASSUR2026AM et telephone 02 40 12 34 56.

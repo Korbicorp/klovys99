@@ -31,6 +31,15 @@ func TestAnonymizeKeepsStableTokensForRepeatedValues(t *testing.T) {
 	if got, want := result.Stats[EntityEmail].Count, 2; got != want {
 		t.Fatalf("count = %d, want %d", got, want)
 	}
+	if got, want := len(result.Findings), 2; got != want {
+		t.Fatalf("findings count = %d, want %d", got, want)
+	}
+	if got, want := result.Findings[0].Value, "alice@example.io"; got != want {
+		t.Fatalf("finding value = %q, want %q", got, want)
+	}
+	if got, want := result.Findings[0].Token, "[EMAIL_1]"; got != want {
+		t.Fatalf("finding token = %q, want %q", got, want)
+	}
 }
 
 func TestAnonymizeAllocatesDistinctTokensForDistinctValues(t *testing.T) {

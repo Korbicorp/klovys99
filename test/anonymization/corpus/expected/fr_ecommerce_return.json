@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Camille Robert" },
+    { "type": "REFERENCE_ID", "value": "RETOUR2026CR" },
+    { "type": "EMAIL", "value": "camille.robert@example.fr" },
+    { "type": "PHONE", "value": "+33 6 44 55 66 77" },
+    { "type": "ADDRESS", "value": "8 rue Nationale, 59800 Lille" },
+    { "type": "CREDIT_CARD", "value": "4716-1089-9971-6531" }
+  ]
+}

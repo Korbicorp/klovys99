@@ -1,0 +1,12 @@
+Peux-tu reviewer ce manifest Kubernetes avant que je le mette dans le repo ?
+metadata:
+  name: payments-api
+  annotations:
+    owner: "Name: Lea Marchand"
+env:
+  - name: DATABASE_PASSWORD
+    value: "ProdPassword!2026"
+  - name: INTERNAL_API
+    value: "https://10.44.0.12:8443/private"
+  - name: OPS_PHONE
+    value: "+33 6 18 19 20 21"

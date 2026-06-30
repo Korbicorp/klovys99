@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Victor Chevalier" },
+    { "type": "ADDRESS", "value": "31 avenue Foch, 75116 Paris" },
+    { "type": "EMAIL", "value": "victor.chevalier@example.org" },
+    { "type": "PHONE", "value": "01 42 88 10 10" },
+    { "type": "REFERENCE_ID", "value": "LEGALFR2026VC" }
+  ]
+}

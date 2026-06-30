@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Olivia Carter" },
+    { "type": "EMAIL", "value": "olivia.carter@example.com" },
+    { "type": "PHONE", "value": "+33 6 10 20 30 40" },
+    { "type": "REFERENCE_ID", "value": "ENTRV2026OC" },
+    { "type": "ADDRESS", "value": "12 Baker Street, 75008 Paris" },
+    { "type": "CREDIT_CARD", "value": "4242 4242 4242 4242" }
+  ]
+}

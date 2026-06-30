@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "SECRET", "value": "mysql://app_user:SuperSecret42!@172.20.10.8:3306/app_prod" },
+    { "type": "IP", "value": "172.20.10.8" },
+    { "type": "SECRET", "value": "redis://:redisPass2026@10.0.0.5:6379/0" },
+    { "type": "IP", "value": "10.0.0.5" },
+    { "type": "EMAIL", "value": "ops-platform@example.fr" },
+    { "type": "REFERENCE_ID", "value": "DBCONF2026FR" }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Mia Johnson" },
+    { "type": "EMAIL", "value": "mia.johnson@example.com" },
+    { "type": "IBAN", "value": "GB82 WEST 1234 5698 7654 32" },
+    { "type": "REFERENCE_ID", "value": "BANKEN2026MJ" },
+    { "type": "NUMERIC_ID", "value": "8844221100" },
+    { "type": "PHONE", "value": "+33 7 01 02 03 04" }
+  ]
+}

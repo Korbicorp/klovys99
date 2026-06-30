@@ -1,0 +1,5 @@
+Write a message to my bank about a suspicious debit.
+Name: Mia Johnson
+Email: mia.johnson@example.com
+IBAN: GB82 WEST 1234 5698 7654 32 and customer id: BANKEN2026MJ.
+The debit id is 8844221100 and my phone is +33 7 01 02 03 04.

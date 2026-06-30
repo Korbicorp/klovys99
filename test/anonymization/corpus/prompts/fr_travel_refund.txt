@@ -1,0 +1,4 @@
+Peux-tu m'aider a rediger un message a la compagnie aerienne pour demander le remboursement du billet de Claire Martin ?
+Le dossier est REF: FRTRV2026149, son email est claire.martin@example.fr et son telephone est +33 6 24 18 90 45.
+Le vol partait de Paris le 12/04/2026 et la facture a ete payee avec la carte 4539 1488 0343 6467.
+Merci d'inclure l'adresse de retour: 18 rue des Martyrs, 75009 Paris.

@@ -1,0 +1,7 @@
+J'ai colle ce patch dans Claude Code, peux-tu me dire s'il y a un probleme de securite ?
+diff --git a/config/auth.ts b/config/auth.ts
++ export const jwtSecret = "jwt-prod-secret-2026-abcdef"
++ export const adminEmail = "sarah.admin@example.fr"
++ export const callback = "https://admin.example.fr/auth/callback"
++ export const mac = "de:ad:be:ef:00:01"
+Ticket: PATCHFR26SA.

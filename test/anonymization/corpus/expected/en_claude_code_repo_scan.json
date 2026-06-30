@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "SECRET", "value": "AKIAIOSFODNN7EXAMPLE" },
+    { "type": "SECRET", "value": "abcdEFGHijklMNOPqrstUVWXyz1234567890ABCD" },
+    { "type": "SECRET", "value": "post_server_item_1234567890abcdef1234567890abcdef" },
+    { "type": "NAME", "value": "Marcus Hill" },
+    { "type": "EMAIL", "value": "marcus.hill@example.dev" }
+  ]
+}

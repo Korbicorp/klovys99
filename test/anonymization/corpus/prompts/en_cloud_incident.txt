@@ -1,0 +1,4 @@
+Create a short incident report for the security channel.
+Reporter: Benjamin Hall, benjamin.hall@example.io, phone +33 6 12 98 76 54.
+Affected host 172.16.5.20 and dashboard https://ops.example.io/admin.
+A fake credential appeared in a paste: SLACK_BOT_TOKEN=xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwxyz.

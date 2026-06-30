@@ -1,0 +1,5 @@
+Aide-moi a adapter cette candidature pour un poste de product designer.
+Prenom: Elodie
+Nom: Garnier
+Email elodie.garnier@example.fr, tel +33 7 50 12 34 98.
+Portfolio: https://portfolio.example.fr/elodie et adresse perso 9 place Bellecour, 69002 Lyon.

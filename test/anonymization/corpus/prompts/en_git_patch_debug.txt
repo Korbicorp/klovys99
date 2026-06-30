@@ -1,0 +1,7 @@
+I pasted this patch into Claude Code; can you flag what should be redacted?
+diff --git a/src/payment.ts b/src/payment.ts
++ const apiSecret = "payment-secret-2026-qwerty"
++ const support = "billing-support@example.com"
++ const webhook = "https://pay.example.com/webhooks/private"
++ const macAddress = "12:34:56:78:9a:bc"
+Ticket: PATCHEN26BS.

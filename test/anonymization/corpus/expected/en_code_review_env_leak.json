@@ -1,0 +1,9 @@
+{
+  "entities": [
+    { "type": "SECRET", "value": "postgres://auth_admin:LocalOnly!2026@192.168.56.12:5432/auth" },
+    { "type": "IP", "value": "192.168.56.12" },
+    { "type": "SECRET", "value": "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJK" },
+    { "type": "EMAIL", "value": "zoe.reed@example.dev" },
+    { "type": "REFERENCE_ID", "value": "CODEREVEN2026ZR" }
+  ]
+}

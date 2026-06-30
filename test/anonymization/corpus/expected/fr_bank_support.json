@@ -1,0 +1,10 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Nadia Benali" },
+    { "type": "EMAIL", "value": "nadia.benali@example.com" },
+    { "type": "IBAN", "value": "FR76 1027 8006 0002 1234 5678 901" },
+    { "type": "NUMERIC_ID", "value": "987654321" },
+    { "type": "REFERENCE_ID", "value": "CLIENTFR2026A" },
+    { "type": "PHONE", "value": "07 45 67 89 10" }
+  ]
+}
