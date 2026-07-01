@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
+	blconfig "github.com/betterleaks/betterleaks/config"
 	"github.com/dlclark/regexp2"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -321,17 +322,15 @@ func TestReferenceIDWinsOverGenericID(t *testing.T) {
 	}
 }
 
-func TestDetectorsFromGitleaksRulesUseSecretGroup(t *testing.T) {
-	loaded, err := detectorsFromGitleaksRules([]gitleaksRule{
-		{
-			ID:          "demo-secret",
-			Regex:       `token=([A-Z0-9]{6})`,
-			SecretGroup: 1,
-		},
-	})
-	if err != nil {
-		t.Fatalf("detectorsFromGitleaksRules returned error: %v", err)
-	}
+func TestBetterleaksDetectorUsesSecretGroup(t *testing.T) {
+	loaded := betterleaksTestDetectors(t, `
+title = "test betterleaks config"
+
+[[rules]]
+id = "demo-secret"
+regex = '''token=([A-Z0-9]{6})'''
+secretGroup = 1
+`)
 
 	engine := anonymizer.NewService(loaded)
 	output, result := engine.Anonymize("token=ABC123\n")
@@ -344,81 +343,61 @@ func TestDetectorsFromGitleaksRulesUseSecretGroup(t *testing.T) {
 	}
 }
 
-func TestDetectorsFromGitleaksRulesSkipPathScopedAndRegexlessRules(t *testing.T) {
-	loaded, err := detectorsFromGitleaksRules([]gitleaksRule{
-		{ID: "path-only", Path: `(?i)\.pem$`, Regex: `foo`},
-		{ID: "no-regex"},
-	})
+func TestBetterleaksDetectorFindsDefaultSecret(t *testing.T) {
+	loaded, err := LoadDefaultGitleaksRules(context.Background())
 	if err != nil {
-		t.Fatalf("detectorsFromGitleaksRules returned error: %v", err)
-	}
-	if len(loaded) != 0 {
-		t.Fatalf("loaded %d detectors, want 0", len(loaded))
-	}
-}
-
-func TestLoadExternalRulesParsesGitleaksToml(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		_, _ = writer.Write([]byte(`
-title = "gitleaks config"
-
-[[rules]]
-id = "demo-secret"
-regex = 'token=([A-Z0-9]{6})'
-secretGroup = 1
-`))
-	}))
-	defer server.Close()
-
-	loaded, err := LoadExternalRules(context.Background(), server.Client(), server.URL)
-	if err != nil {
-		t.Fatalf("LoadExternalRules returned error: %v", err)
+		t.Fatalf("LoadDefaultGitleaksRules returned error: %v", err)
 	}
 
 	engine := anonymizer.NewService(loaded)
-	output, _ := engine.Anonymize("token=ABC123\n")
-	if got, want := output, "token=[SECRET_1]\n"; got != want {
+	githubPAT := "ghp_K1m9Qx7Za2Lp8Rn4Sv6Tu0Yw3Bc5De9FgHj8"
+	output, result := engine.Anonymize("token " + githubPAT)
+
+	if got, want := output, "token [SECRET_1]"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Stats[anonymizer.EntitySecret].Count, 1; got != want {
+		t.Fatalf("secret count = %d, want %d", got, want)
 	}
 }
 
-func TestLoadExternalRulesUsesDiskCacheBetweenRuns(t *testing.T) {
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requests++
-		_, _ = writer.Write([]byte(`
-title = "gitleaks config"
+func TestBetterleaksDetectorFindsMultiLineSecretSpan(t *testing.T) {
+	loaded := betterleaksTestDetectors(t, `
+title = "test betterleaks config"
 
 [[rules]]
 id = "demo-secret"
-regex = 'token=([A-Z0-9]{6})'
+regex = '''secret: ([A-Z0-9]{6})'''
 secretGroup = 1
-`))
-	}))
-	defer server.Close()
+`)
 
-	cacheDir := t.TempDir()
-	first, err := loadExternalRulesWithStats(context.Background(), server.Client(), server.URL, cacheDir, time.Hour)
-	if err != nil {
-		t.Fatalf("first loadExternalRulesWithStats returned error: %v", err)
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize("first line\nsecret: XYZ789\nlast line")
+
+	if got, want := output, "first line\nsecret: [SECRET_1]\nlast line"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
-	second, err := loadExternalRulesWithStats(context.Background(), server.Client(), server.URL, cacheDir, time.Hour)
+	if got, want := result.Findings[0].Start, len("first line\nsecret: "); got != want {
+		t.Fatalf("finding start = %d, want %d", got, want)
+	}
+	if got, want := result.Findings[0].End, len("first line\nsecret: XYZ789"); got != want {
+		t.Fatalf("finding end = %d, want %d", got, want)
+	}
+}
+
+func betterleaksTestDetectors(t *testing.T, content string) []anonymizer.Detector {
+	t.Helper()
+
+	config, err := blconfig.ParseTOMLString(content, "")
 	if err != nil {
-		t.Fatalf("second loadExternalRulesWithStats returned error: %v", err)
+		t.Fatalf("ParseTOMLString returned error: %v", err)
 	}
 
-	if requests != 1 {
-		t.Fatalf("server handled %d requests, want 1", requests)
+	loaded, err := detectorsFromBetterleaksConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("detectorsFromBetterleaksConfig returned error: %v", err)
 	}
-	if got, want := first.Metrics.CacheMisses, 1; got != want {
-		t.Fatalf("first cache misses = %d, want %d", got, want)
-	}
-	if got, want := second.Metrics.CacheHits, 1; got != want {
-		t.Fatalf("second cache hits = %d, want %d", got, want)
-	}
-	if len(first.Detectors) == 0 || len(second.Detectors) == 0 {
-		t.Fatalf("expected detectors from both loads, got %d and %d", len(first.Detectors), len(second.Detectors))
-	}
+	return loaded
 }
 
 func TestDetectorsFromPresidioSourceParsesLiteralPatterns(t *testing.T) {
@@ -646,14 +625,6 @@ class EmailRecognizer(PatternRecognizer):
 func TestServiceLoadsExternalDetectorsStrictly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
-		case "/gitleaks.toml":
-			_, _ = writer.Write([]byte(`
-title = "gitleaks config"
-
-[[rules]]
-id = "demo-secret"
-regex = 'gitleaks-secret'
-`))
 		case "/default_recognizers.yaml":
 			_, _ = writer.Write([]byte(`
 recognizers:
@@ -681,7 +652,6 @@ class EmailRecognizer(PatternRecognizer):
 
 	config := DefaultConfig()
 	config.EnableExtra = false
-	config.GitleaksURL = server.URL + "/gitleaks.toml"
 	config.PresidioURL = server.URL + "/default_recognizers.yaml"
 	config.PresidioBaseURL = server.URL
 	service := NewService(config)
@@ -691,7 +661,8 @@ class EmailRecognizer(PatternRecognizer):
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	output, stats := anonymizer.NewService(result.Detectors).Anonymize("gitleaks-secret foo@example.com")
+	githubPAT := "ghp_K1m9Qx7Za2Lp8Rn4Sv6Tu0Yw3Bc5De9FgHj8"
+	output, stats := anonymizer.NewService(result.Detectors).Anonymize(githubPAT + " foo@example.com")
 	if got, want := output, "[SECRET_1] [EMAIL_1]"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
@@ -713,13 +684,13 @@ func TestServiceReturnsExternalLoadError(t *testing.T) {
 	defer server.Close()
 
 	config := DefaultConfig()
-	config.GitleaksURL = server.URL
-	config.EnablePresidio = false
+	config.EnableGitleaks = false
+	config.PresidioURL = server.URL
 	service := NewService(config)
 
 	_, err := service.Load(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "load gitleaks detectors") {
-		t.Fatalf("error = %v, want gitleaks load error", err)
+	if err == nil || !strings.Contains(err.Error(), "load presidio detectors") {
+		t.Fatalf("error = %v, want presidio load error", err)
 	}
 }
 

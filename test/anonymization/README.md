@@ -3,7 +3,7 @@
 This directory contains a manual runner for testing anonymization on realistic
 prompts.
 
-The runner loads the same detectors as the proxy: built-in detectors, Gitleaks,
+The runner loads the same detectors as the proxy: built-in detectors, Betterleaks,
 and Presidio.
 
 ## Run The Tests
@@ -46,7 +46,7 @@ recall = matched / expected
 ```
 
 A `missing` can be a real miss, a wrong category, or a too-wide match. A common
-Gitleaks example: the corpus expects only the secret value, but the detector
+Betterleaks example: the corpus expects only the secret value, but the detector
 finds the whole `.env` line.
 
 ## Add A Corpus Case

@@ -142,20 +142,16 @@ func (s *Service) Load(ctx context.Context) (LoadResult, error) {
 	}
 
 	if s.config.EnableGitleaks {
-		sourceURL := strings.TrimSpace(s.config.GitleaksURL)
-		if sourceURL == "" {
-			sourceURL = DefaultGitleaksURL
-		}
 		timeout := s.config.GitleaksTimeout
 		if timeout <= 0 {
 			timeout = DefaultGitleaksTimeout
 		}
 
 		loadCtx, cancel := context.WithTimeout(ctx, timeout)
-		loadResult, err := LoadGitleaksRulesWithStats(loadCtx, sourceURL, timeout)
+		loadResult, err := LoadGitleaksRulesWithStats(loadCtx, "", timeout)
 		cancel()
 		if err != nil {
-			return LoadResult{}, fmt.Errorf("load gitleaks detectors: %w", err)
+			return LoadResult{}, fmt.Errorf("load betterleaks detectors: %w", err)
 		}
 		result.Detectors = append(result.Detectors, loadResult.Detectors...)
 		result.ExternalDetectors += len(loadResult.Detectors)

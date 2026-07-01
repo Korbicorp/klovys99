@@ -295,7 +295,7 @@ func printReport(writer io.Writer, corpusDir string, report Report, loadResult *
 	fmt.Fprintf(writer, "Files: %d\n", len(report.Files))
 	if loadResult != nil {
 		fmt.Fprintf(writer, "Detectors: builtin=%d external=%d total=%d\n", loadResult.BuiltinDetectors, loadResult.ExternalDetectors, len(loadResult.Detectors))
-		printExternalMetrics(writer, "Gitleaks", loadResult.Gitleaks)
+		printExternalMetrics(writer, "Betterleaks", loadResult.Gitleaks)
 		printExternalMetrics(writer, "Presidio", loadResult.Presidio)
 	}
 	fmt.Fprintf(writer, "\nTotals: expected=%d found=%d matched=%d missing=%d unexpected=%d precision=%.2f%% recall=%.2f%%\n",

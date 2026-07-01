@@ -13,8 +13,8 @@ stable pseudonym tokens before the request leaves the machine.
 
 - Local reverse proxy for Anthropic API requests.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
-- Dynamic detector loading from the official Gitleaks and Microsoft Presidio
-  rule sources.
+- Betterleaks-backed secret detection and dynamic Microsoft Presidio rule
+  loading.
 - Optional local LLM extraction through Ollama for contextual names, addresses,
   dates, and vehicle plates.
 - Stable pseudonym tokens for the lifetime of the proxy process.
@@ -25,7 +25,7 @@ stable pseudonym tokens before the request leaves the machine.
 ## Requirements
 
 - Go 1.25 or newer.
-- Network access on first startup to download the default Gitleaks and Presidio
+- Network access on first startup to download the default Presidio recognizers
   rule sources.
 - An Anthropic API key for upstream requests.
 - Ollama, only when `KLOVIS_LLM_ENABLED=true`.
@@ -175,15 +175,15 @@ Autostart only applies to local Ollama URLs such as `http://localhost:11434` or
 loopback IP addresses. Remote Ollama URLs are never started by Klovis.
 
 Deterministic detectors remain the baseline. LLM matches are added when
-available and have lower priority than deterministic regex, Gitleaks, and
+available and have lower priority than deterministic regex, Betterleaks, and
 Presidio matches. If the LLM fails during a request, Klovis logs the technical
 error and continues with deterministic anonymization.
 
 ## Detectors
 
-Klovis combines built-in detectors with external rules loaded at startup.
-External rule payloads are cached for 24 hours in the user cache directory under
-`klovis/external-rules`.
+Klovis combines built-in detectors, Betterleaks secret scanning, and external
+Presidio rules loaded at startup. External rule payloads are cached for 24 hours
+in the user cache directory under `klovis/external-rules`.
 
 | Category | Source | Priority | Description |
 | --- | --- | ---: | --- |
@@ -196,7 +196,7 @@ External rule payloads are cached for 24 hours in the user cache directory under
 | `PHONE` | Built-in | 700 | French and common international phone numbers. |
 | `BIRTH_DATE` | Built-in | 600 | Conservatively labelled birth dates. |
 | `BLOOD_TYPE` | Built-in | 600 | Contextual blood groups such as `Groupe sanguin O+`. |
-| `SECRET` | Gitleaks | 600 | Secrets loaded dynamically from the official Gitleaks config. |
+| `SECRET` | Betterleaks | 600 | Secrets detected by the Betterleaks library. |
 | `CRYPTO` | Presidio | 600 | Cryptocurrency wallet identifiers loaded from supported Presidio recognizers. |
 | `ADDRESS` | Built-in / LLM | 900 / 700 / 50 | French postal addresses, labelled addresses, and optional contextual LLM matches. |
 | `NAME` | Built-in | 900 | Contextual names following strong French or English cues and form labels. |
@@ -242,9 +242,10 @@ Klovis reduces the amount of sensitive data sent upstream, but it is not a
 formal data-loss-prevention guarantee. Review detector coverage for your own
 threat model before using it with production data.
 
-External Gitleaks and Presidio rules are loaded from their upstream repositories
-by default. Cached copies are reused for 24 hours and stale cache entries may be
-used as a fallback if a refresh fails.
+Betterleaks secret detection uses its embedded default config. External Presidio
+rules are loaded from the upstream repository by default. Cached copies are
+reused for 24 hours and stale cache entries may be used as a fallback if a
+refresh fails.
 
 ## Contributing
 

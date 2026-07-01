@@ -3,85 +3,61 @@ package detectors
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
-	"github.com/dlclark/regexp2"
-	"github.com/pelletier/go-toml/v2"
+	blconfig "github.com/betterleaks/betterleaks/config"
+	bldetect "github.com/betterleaks/betterleaks/detect"
+	blreport "github.com/betterleaks/betterleaks/report"
+	"github.com/betterleaks/betterleaks/sources"
 )
 
-const (
-	DefaultGitleaksURL     = "https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml"
-	DefaultGitleaksTimeout = 10 * time.Second
-)
+const DefaultGitleaksTimeout = 10 * time.Second
 
-type gitleaksConfig struct {
-	Rules []gitleaksRule `toml:"rules"`
-}
-
-type gitleaksRule struct {
-	ID          string `toml:"id"`
-	Regex       string `toml:"regex"`
-	Path        string `toml:"path"`
-	SecretGroup int    `toml:"secretGroup"`
+type betterleaksDetector struct {
+	detector *bldetect.Detector
+	mu       sync.Mutex
 }
 
 func LoadDefaultGitleaksRules(ctx context.Context) ([]anonymizer.Detector, error) {
-	return LoadGitleaksRules(ctx, DefaultGitleaksURL, DefaultGitleaksTimeout)
+	return LoadGitleaksRules(ctx, "", DefaultGitleaksTimeout)
 }
 
-func LoadGitleaksRules(ctx context.Context, sourceURL string, timeout time.Duration) ([]anonymizer.Detector, error) {
-	result, err := LoadGitleaksRulesWithStats(ctx, sourceURL, timeout)
+func LoadGitleaksRules(ctx context.Context, _ string, timeout time.Duration) ([]anonymizer.Detector, error) {
+	result, err := LoadGitleaksRulesWithStats(ctx, "", timeout)
 	if err != nil {
 		return nil, err
 	}
 	return result.Detectors, nil
 }
 
-func LoadGitleaksRulesWithStats(ctx context.Context, sourceURL string, timeout time.Duration) (ExternalRuleLoadResult, error) {
+func LoadGitleaksRulesWithStats(ctx context.Context, _ string, timeout time.Duration) (ExternalRuleLoadResult, error) {
+	totalStart := time.Now()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if timeout <= 0 {
 		timeout = DefaultGitleaksTimeout
 	}
-	client := &http.Client{Timeout: timeout}
-	return loadExternalRulesWithStats(ctx, client, sourceURL, defaultExternalRulesCacheDir(), DefaultExternalRulesCacheTTL)
-}
 
-func LoadExternalRules(ctx context.Context, client *http.Client, sourceURL string) ([]anonymizer.Detector, error) {
-	result, err := loadExternalRulesWithStats(ctx, client, sourceURL, "", 0)
-	if err != nil {
-		return nil, err
-	}
-	return result.Detectors, nil
-}
+	loadCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-func loadExternalRulesWithStats(ctx context.Context, client *http.Client, sourceURL, cacheDir string, cacheTTL time.Duration) (ExternalRuleLoadResult, error) {
-	totalStart := time.Now()
-	if client == nil {
-		client = &http.Client{Timeout: DefaultGitleaksTimeout}
-	}
-	if strings.TrimSpace(sourceURL) == "" {
-		sourceURL = DefaultGitleaksURL
-	}
-
-	var metrics ExternalLoadMetrics
-	payload, fetchMetrics, err := loadCachedRemoteBody(ctx, client, cacheDir, "gitleaks", sourceURL, cacheTTL)
-	if err != nil {
-		return ExternalRuleLoadResult{}, fmt.Errorf("download gitleaks rules: %w", err)
-	}
-	mergeCachedBodyMetrics(&metrics, fetchMetrics)
-
-	var config gitleaksConfig
 	parseStart := time.Now()
-	if err := toml.Unmarshal(payload, &config); err != nil {
-		return ExternalRuleLoadResult{}, fmt.Errorf("parse gitleaks rules: %w", err)
+	config, err := blconfig.Default()
+	if err != nil {
+		return ExternalRuleLoadResult{}, fmt.Errorf("load betterleaks default config: %w", err)
 	}
-	metrics.Parse = time.Since(parseStart)
-	metrics.Rules = len(config.Rules)
+
+	metrics := ExternalLoadMetrics{
+		Parse: time.Since(parseStart),
+		Rules: len(config.Rules),
+	}
 
 	compileStart := time.Now()
-	detectors, err := detectorsFromGitleaksRules(config.Rules)
+	detectors, err := detectorsFromBetterleaksConfig(loadCtx, config)
 	metrics.Compile = time.Since(compileStart)
 	if err != nil {
 		return ExternalRuleLoadResult{}, err
@@ -95,36 +71,142 @@ func loadExternalRulesWithStats(ctx context.Context, client *http.Client, source
 	}, nil
 }
 
-func detectorsFromGitleaksRules(rules []gitleaksRule) ([]anonymizer.Detector, error) {
-	detectors := make([]anonymizer.Detector, 0, len(rules))
-	for _, rule := range rules {
-		if strings.TrimSpace(rule.Regex) == "" {
+func detectorsFromBetterleaksConfig(ctx context.Context, config *blconfig.Config) ([]anonymizer.Detector, error) {
+	if config == nil {
+		return nil, fmt.Errorf("betterleaks config is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	detector := bldetect.NewDetectorContext(ctx, config, bldetect.ValidationOptions{})
+	if detector == nil {
+		return nil, fmt.Errorf("create betterleaks detector")
+	}
+
+	return []anonymizer.Detector{&betterleaksDetector{detector: detector}}, nil
+}
+
+func (d *betterleaksDetector) FindAll(text string) []anonymizer.Match {
+	if text == "" {
+		return nil
+	}
+
+	d.mu.Lock()
+	findings := d.detector.Detect(sources.Fragment{Raw: text})
+	d.mu.Unlock()
+
+	matches := make([]anonymizer.Match, 0, len(findings))
+	for _, finding := range findings {
+		start, end, ok := betterleaksFindingSpan(text, finding)
+		if !ok {
 			continue
 		}
-		// Klovis scans request text without file metadata, so path-scoped rules cannot
-		// be applied faithfully and are skipped to avoid context-free false positives.
-		if strings.TrimSpace(rule.Path) != "" {
-			continue
-		}
 
-		captureGroup := rule.SecretGroup
-		if captureGroup <= 0 {
-			captureGroup = 0
-		}
-
-		compiled, err := regexp2.Compile(rule.Regex, regexp2.RE2)
-		if err != nil {
-			return nil, fmt.Errorf("compile gitleaks rule %q: %w", rule.ID, err)
-		}
-
-		detectors = append(detectors, regexDetector{
-			entityType:       anonymizer.EntitySecret,
-			priority:         priorityMedium,
-			pattern:          compiled,
-			captureGroup:     captureGroup,
-			normalizerPolicy: normalizerPolicyFold,
+		matches = append(matches, anonymizer.Match{
+			Start:      start,
+			End:        end,
+			Type:       anonymizer.EntitySecret,
+			Priority:   priorityMedium,
+			Normalized: normalizeFold(text[start:end]),
 		})
 	}
 
-	return detectors, nil
+	return matches
+}
+
+func betterleaksFindingSpan(text string, finding blreport.Finding) (int, int, bool) {
+	secret := finding.Secret
+	if secret == "" {
+		return 0, 0, false
+	}
+
+	lineStarts := lineStartOffsets(text)
+	matchStart, ok := offsetFromLineColumn(lineStarts, finding.StartLine, finding.StartColumn)
+	if !ok && finding.StartLine > 0 {
+		matchStart, ok = offsetFromLineColumn(lineStarts, finding.StartLine-1, finding.StartColumn)
+	}
+	if !ok {
+		return fallbackSecretSpan(text, secret)
+	}
+
+	if finding.Match != "" {
+		if relative := strings.Index(finding.Match, secret); relative >= 0 {
+			start := matchStart + relative
+			end := start + len(secret)
+			if validSecretSpan(text, start, end, secret) {
+				return start, end, true
+			}
+		}
+	}
+
+	lineEnd := lineEndOffset(text, lineStarts, finding.StartLine)
+	if lineEnd < matchStart && finding.StartLine > 0 {
+		lineEnd = lineEndOffset(text, lineStarts, finding.StartLine-1)
+	}
+	if lineEnd >= matchStart {
+		if relative := strings.Index(text[matchStart:lineEnd], secret); relative >= 0 {
+			start := matchStart + relative
+			return start, start + len(secret), true
+		}
+	}
+
+	lineStart := lineStartOffset(lineStarts, finding.StartLine)
+	if lineStart < 0 && finding.StartLine > 0 {
+		lineStart = lineStartOffset(lineStarts, finding.StartLine-1)
+	}
+	if lineStart >= 0 && lineEnd >= lineStart {
+		if relative := strings.Index(text[lineStart:lineEnd], secret); relative >= 0 {
+			start := lineStart + relative
+			return start, start + len(secret), true
+		}
+	}
+
+	return fallbackSecretSpan(text, secret)
+}
+
+func lineStartOffsets(text string) []int {
+	offsets := []int{0}
+	for index := range text {
+		if text[index] == '\n' {
+			offsets = append(offsets, index+1)
+		}
+	}
+	return offsets
+}
+
+func offsetFromLineColumn(lineStarts []int, line, column int) (int, bool) {
+	if line < 0 || line >= len(lineStarts) || column <= 0 {
+		return 0, false
+	}
+	return lineStarts[line] + column - 1, true
+}
+
+func lineStartOffset(lineStarts []int, line int) int {
+	if line < 0 || line >= len(lineStarts) {
+		return -1
+	}
+	return lineStarts[line]
+}
+
+func lineEndOffset(text string, lineStarts []int, line int) int {
+	if line < 0 || line >= len(lineStarts) {
+		return -1
+	}
+	if line+1 < len(lineStarts) {
+		return lineStarts[line+1] - 1
+	}
+	return len(text)
+}
+
+func fallbackSecretSpan(text, secret string) (int, int, bool) {
+	start := strings.Index(text, secret)
+	if start < 0 {
+		return 0, 0, false
+	}
+	return start, start + len(secret), true
+}
+
+func validSecretSpan(text string, start, end int, secret string) bool {
+	return start >= 0 && end <= len(text) && start < end && text[start:end] == secret
 }

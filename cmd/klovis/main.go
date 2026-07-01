@@ -117,7 +117,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		closeLogFile(logFile)
 		return nil, err
 	}
-	logExternalLoadStats(config.Logger, "gitleaks", detectorResult.Gitleaks)
+	logExternalLoadStats(config.Logger, "betterleaks", detectorResult.Gitleaks)
 	logExternalLoadStats(config.Logger, "presidio", detectorResult.Presidio)
 	config.Logger.Info().Int("detectors", len(detectorResult.Detectors)).Msg("proxy detectors loaded")
 
