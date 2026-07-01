@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovis/internal/detectors"
 )
 
 type fakeAnonymizer struct {
@@ -42,6 +43,34 @@ func TestLoadCorpusReadsPromptsAndExpectedSidecars(t *testing.T) {
 	}
 	if got, want := cases[0].Expected[0].Type, anonymizer.EntityEmail; got != want {
 		t.Fatalf("expected type = %q, want %q", got, want)
+	}
+}
+
+func TestCorpusKeepsClaudeCodeFalsePositiveContextVisible(t *testing.T) {
+	cases, err := loadCorpus("corpus")
+	if err != nil {
+		t.Fatalf("loadCorpus returned error: %v", err)
+	}
+
+	var corpusCase CorpusCase
+	found := false
+	for _, candidate := range cases {
+		if candidate.Name == "en_claude_code_false_positive_context" {
+			corpusCase = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("en_claude_code_false_positive_context corpus case not found")
+	}
+
+	engine := anonymizer.NewService(detectors.Default(true))
+	_, result := engine.Anonymize(corpusCase.Prompt)
+	report := compareCase(corpusCase, result.Findings)
+
+	if report.Stats != (Stats{}) {
+		t.Fatalf("stats = %#v, want no expected or found entities", report.Stats)
 	}
 }
 

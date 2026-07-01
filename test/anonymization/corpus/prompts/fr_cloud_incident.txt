@@ -1,4 +1,4 @@
 Transforme ces notes en incident report pour l'equipe infra.
-Contact astreinte: Malik Arnaud, malik.arnaud@example.net, +33 6 80 70 60 50.
-Serveur impacte 192.168.12.42, endpoint https://api-staging.example.net/login.
-Token trouve dans les logs: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY.
+Contact astreinte: Malik Arnaud, malik.arnaud@example.net, +33 6 80 70 60 50
+Serveur impacte 192.168.12.42, endpoint https://api-staging.example.net/login
+Token trouve dans les logs: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY

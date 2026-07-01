@@ -1,7 +1,7 @@
 {
   "entities": [
     { "type": "NAME", "value": "Ethan Brooks" },
-    { "type": "BIRTH_DATE", "value": "1990-05-14" },
+    { "type": "DATE", "value": "1990-05-14" },
     { "type": "EMAIL", "value": "ethan.brooks@example.org" },
     { "type": "PHONE", "value": "00 44 20 12 34 56 78" },
     { "type": "BLOOD_TYPE", "value": "AB negative" },

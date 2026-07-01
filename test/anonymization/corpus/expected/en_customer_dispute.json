@@ -1,0 +1,7 @@
+{
+  "entities": [
+    { "type": "DATE", "value": "11-02-2025" },
+    { "type": "DATE", "value": "last October" },
+    { "type": "NAME", "value": "Martin" }
+  ]
+}

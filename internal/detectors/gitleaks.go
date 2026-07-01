@@ -109,7 +109,7 @@ func detectorsFromGitleaksRules(rules []gitleaksRule) ([]anonymizer.Detector, er
 
 		captureGroup := rule.SecretGroup
 		if captureGroup <= 0 {
-			captureGroup = 0
+			captureGroup = captureGroupFirstNonEmpty
 		}
 
 		compiled, err := regexp2.Compile(rule.Regex, regexp2.RE2)

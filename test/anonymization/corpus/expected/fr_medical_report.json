@@ -1,0 +1,7 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "Jean Dupont" },
+    { "type": "DATE", "value": "14/03/2025" },
+    { "type": "DATE", "value": "18 mars" }
+  ]
+}

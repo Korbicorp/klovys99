@@ -1,7 +1,7 @@
 {
   "entities": [
     { "type": "NAME", "value": "Antoine Mercier" },
-    { "type": "BIRTH_DATE", "value": "12/01/1988" },
+    { "type": "DATE", "value": "12/01/1988" },
     { "type": "ADDRESS", "value": "17 route de Vannes, 44000 Nantes" },
     { "type": "EMAIL", "value": "antoine.mercier@example.fr" },
     { "type": "REFERENCE_ID", "value": "ASSUR2026AM" },

@@ -1,6 +1,6 @@
 {
   "entities": [
-    { "type": "GENERIC_PASSWORD", "value": "Passw0rd!2026" },
+    { "type": "SECRET", "value": "Passw0rd!2026" },
     { "type": "IP", "value": "10.12.4.20" },
     { "type": "SECRET", "value": "sk_test_51NfakeStripeSecretValueABCDEFG1234567890" },
     { "type": "EMAIL", "value": "marie.devaux@example.dev" },

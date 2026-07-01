@@ -1,8 +1,8 @@
 {
   "entities": [
-    { "type": "GENERIC_PASSWORD", "value": "SuperSecret42!" },
+    { "type": "SECRET", "value": "SuperSecret42!" },
     { "type": "IP", "value": "172.20.10.8" },
-    { "type": "GENERIC_PASSWORD", "value": "redisPass2026" },
+    { "type": "SECRET", "value": "redisPass2026" },
     { "type": "IP", "value": "10.0.0.5" },
     { "type": "EMAIL", "value": "ops-platform@example.fr" },
     { "type": "REFERENCE_ID", "value": "DBCONF2026FR" }

@@ -22,6 +22,8 @@ type regexDetector struct {
 	// captureGroup selects a submatch as the sensitive value when labels are kept.
 	// Example: with "Prénom: Armand", group 0 is the full match and group 2 is
 	// only "Armand", which lets the anonymizer preserve the "Prénom:" label.
+	// captureGroupFirstNonEmpty mirrors Gitleaks' fallback behavior for rules
+	// without secretGroup: use the first non-empty capture before the full match.
 	captureGroup int
 	// spanPolicy trims or rejects a captured span after regex matching.
 	spanPolicy spanPolicy
@@ -46,6 +48,8 @@ const (
 )
 
 const (
+	captureGroupFirstNonEmpty = -1
+
 	priorityCritical = 1000
 	priorityHigh     = 900
 	priorityDefault  = 700
@@ -119,8 +123,7 @@ func Default(includeExtra bool) []anonymizer.Detector {
 		ibanDetector(),
 		creditCardDetector(),
 		macAddressDetector(),
-		uriPasswordDetector(),
-		genericPasswordDetector(),
+		uriSecretDetector(),
 		genericIDDetector(),
 		numericIDDetector(),
 		referenceIDDetector(),
@@ -295,8 +298,26 @@ func runeToByteOffsets(input string) []int {
 }
 
 func captureByteRange(match *regexp2.Match, captureGroup int, runeToByte []int) (int, int, bool) {
+	if captureGroup == captureGroupFirstNonEmpty {
+		groups := match.Groups()
+		for index := 1; index < len(groups); index++ {
+			if groups[index].Length > 0 {
+				return groupByteRange(&groups[index], runeToByte)
+			}
+		}
+		return groupByteRange(match.GroupByNumber(0), runeToByte)
+	}
+
 	group := match.GroupByNumber(captureGroup)
 	if group == nil || group.Length == 0 && captureGroup > 0 {
+		return 0, 0, false
+	}
+
+	return groupByteRange(group, runeToByte)
+}
+
+func groupByteRange(group *regexp2.Group, runeToByte []int) (int, int, bool) {
+	if group == nil {
 		return 0, 0, false
 	}
 
@@ -460,7 +481,7 @@ func FrenchAddressDetector() anonymizer.Detector {
 
 func birthDateDetector() anonymizer.Detector {
 	return regexDetector{
-		entityType:   anonymizer.EntityBirthDate,
+		entityType:   anonymizer.EntityDate,
 		priority:     priorityMedium,
 		captureGroup: 1,
 		spanPolicy:   spanPolicyTrimConservative,
@@ -537,26 +558,13 @@ func macAddressDetector() anonymizer.Detector {
 	}
 }
 
-func uriPasswordDetector() anonymizer.Detector {
+func uriSecretDetector() anonymizer.Detector {
 	return regexDetector{
-		entityType:   anonymizer.EntityGenericPassword,
+		entityType:   anonymizer.EntitySecret,
 		priority:     priorityDefault,
 		captureGroup: 1,
 		pattern: regexp2.MustCompile(
 			`(?i)\b[a-z][a-z0-9+.-]*://(?:[^:@\s/?#]+)?:([^@\s/?#]+)@`,
-			regexp2.RE2,
-		),
-		normalizerPolicy: normalizerPolicyFold,
-	}
-}
-
-func genericPasswordDetector() anonymizer.Detector {
-	return regexDetector{
-		entityType:   anonymizer.EntityGenericPassword,
-		priority:     priorityFallback,
-		captureGroup: 0,
-		pattern: regexp2.MustCompile(
-			`(?=[^\s]*[A-Za-z])(?=[^\s]*\d)(?=[^\s]*[!@#$%^&*_=+\-/\\])[^\s]+`,
 			regexp2.RE2,
 		),
 		normalizerPolicy: normalizerPolicyFold,

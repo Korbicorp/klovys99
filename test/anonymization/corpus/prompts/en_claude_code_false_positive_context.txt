@@ -1,0 +1,20 @@
+Claude Code request context:
+
+Endpoint references:
+- `/v1/messages`)
+- `/v1/messages`.
+- `/v1/models`
+- `/v1/models`.
+
+Markdown source links:
+- ([main.go:171](cmd/klovis/main.go#l171))
+- ([proxy.go:22](internal/proxy/proxy.go#l22)).
+- ([proxy.go:84](internal/proxy/proxy.go#l84))
+- [proxy.go:32](internal/proxy/proxy.go#l32)).
+- ([proxy.go:111-118](internal/proxy/proxy.go#l111-l118))
+- ([proxy.go:102-105](internal/proxy/proxy.go#l102-l105)).
+- ([proxy.go:89-92](internal/proxy/proxy.go#l89-l92))
+
+Other non-secret technical tokens:
+- HTTP status family: 4xx/5xx
+- Selected model: claude-sonnet-4-6

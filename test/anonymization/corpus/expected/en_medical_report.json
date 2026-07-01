@@ -1,0 +1,7 @@
+{
+  "entities": [
+    { "type": "NAME", "value": "John Doe" },
+    { "type": "DATE", "value": "03/14/2025" },
+    { "type": "DATE", "value": "March 18" }
+  ]
+}

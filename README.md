@@ -194,7 +194,7 @@ External rule payloads are cached for 24 hours in the user cache directory under
 | `CREDIT_CARD` | Built-in / Presidio | 900 / 600 | Credit card-like digit sequences. |
 | `MAC_ADDRESS` | Built-in / Presidio | 900 / 600 | MAC addresses with `:` or `-` separators. |
 | `PHONE` | Built-in | 700 | French and common international phone numbers. |
-| `BIRTH_DATE` | Built-in | 600 | Conservatively labelled birth dates. |
+| `DATE` | Built-in / Presidio / LLM | 600 / external / 50 | Conservatively labelled birth dates and supported contextual dates. |
 | `BLOOD_TYPE` | Built-in | 600 | Contextual blood groups such as `Groupe sanguin O+`. |
 | `SECRET` | Gitleaks | 600 | Secrets loaded dynamically from the official Gitleaks config. |
 | `CRYPTO` | Presidio | 600 | Cryptocurrency wallet identifiers loaded from supported Presidio recognizers. |

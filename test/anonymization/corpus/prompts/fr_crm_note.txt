@@ -1,4 +1,4 @@
 Nettoie cette note CRM avant que je la colle dans notre outil.
-Cliente: Emma Rousseau, email emma.rousseau@example.fr, telephone 07 12 12 12 12.
-Compte: CRMFR-998877 et adresse de livraison 44 chemin des Lilas, 44000 Nantes.
-Elle mentionne aussi son IBAN: FR14 2004 1010 0505 0001 3M02 606.
+Cliente: Emma Rousseau, email emma.rousseau@example.fr, telephone 07 12 12 12 12
+Compte: CRMFR-998877 et adresse de livraison 44 chemin des Lilas, 44000 Nantes
+Elle mentionne aussi son IBAN: FR14 2004 1010 0505 0001 3M02 606

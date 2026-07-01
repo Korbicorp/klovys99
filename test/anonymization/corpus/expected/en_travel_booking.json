@@ -1,0 +1,6 @@
+{
+  "entities": [
+    { "type": "DATE", "value": "09/08/2026" },
+    { "type": "NAME", "value": "Alice Roux" }
+  ]
+}

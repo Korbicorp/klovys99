@@ -49,7 +49,7 @@ func TestDefaultDetectorsAnonymizeCoreEntities(t *testing.T) {
 		"[FIRST_NAME_1]",
 		"[NAME_1]",
 		"[NAME_2]",
-		"[BIRTH_DATE_1]",
+		"[DATE_1]",
 		"[BLOOD_TYPE_1]",
 		"[ADDRESS_1]",
 	} {
@@ -115,22 +115,22 @@ func TestBirthDateDetectionRequiresBirthContext(t *testing.T) {
 	if got, want := output, "Il a rendez-vous le 14 mars 1988."; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if _, ok := result.Stats[anonymizer.EntityBirthDate]; ok {
-		t.Fatalf("birth date should not be counted without explicit context: %#v", result.Stats)
+	if _, ok := result.Stats[anonymizer.EntityDate]; ok {
+		t.Fatalf("date should not be counted without explicit birth context: %#v", result.Stats)
 	}
 }
 
 func TestBirthDateDetectorSupportsNumericAndTextualFormats(t *testing.T) {
 	output, result := anonymize(t, "Date de naissance: 12/01/1988\nNée le 3 février 1991", false)
 
-	if !strings.Contains(output, "Date de naissance: [BIRTH_DATE_1]") {
+	if !strings.Contains(output, "Date de naissance: [DATE_1]") {
 		t.Fatalf("numeric birth date was not anonymized: %s", output)
 	}
-	if !strings.Contains(output, "Née le [BIRTH_DATE_2]") {
+	if !strings.Contains(output, "Née le [DATE_2]") {
 		t.Fatalf("textual birth date was not anonymized: %s", output)
 	}
-	if got, want := result.Stats[anonymizer.EntityBirthDate].Count, 2; got != want {
-		t.Fatalf("birth date count = %d, want %d", got, want)
+	if got, want := result.Stats[anonymizer.EntityDate].Count, 2; got != want {
+		t.Fatalf("date count = %d, want %d", got, want)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestReferenceIDRequiresLettersAndDigits(t *testing.T) {
 	}
 }
 
-func TestURIPasswordDetectorSupportsAnyScheme(t *testing.T) {
+func TestURISecretDetectorSupportsAnyScheme(t *testing.T) {
 	input := strings.Join([]string{
 		`dsn := "mysql://app_user:SuperSecret42!@172.20.10.8:3306/app_prod"`,
 		`redisURL := "redis://:redisPass2026@10.0.0.5:6379/0"`,
@@ -252,47 +252,37 @@ func TestURIPasswordDetectorSupportsAnyScheme(t *testing.T) {
 	output, result := anonymize(t, input, true)
 
 	want := strings.Join([]string{
-		`dsn := "mysql://app_user:[GENERIC_PASSWORD_1]@[IP_1]:3306/app_prod"`,
-		`redisURL := "redis://:[GENERIC_PASSWORD_2]@[IP_2]:6379/0"`,
-		`elastic := "https://elastic:[GENERIC_PASSWORD_3]@[IP_3]:9200"`,
-		`replica := "postgresql+srv://svc:[GENERIC_PASSWORD_4]@db.example.com/app"`,
+		`dsn := "mysql://app_user:[SECRET_1]@[IP_1]:3306/app_prod"`,
+		`redisURL := "redis://:[SECRET_2]@[IP_2]:6379/0"`,
+		`elastic := "https://elastic:[SECRET_3]@[IP_3]:9200"`,
+		`replica := "postgresql+srv://svc:[SECRET_4]@db.example.com/app"`,
 	}, "\n")
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
-	if got, want := result.Stats[anonymizer.EntityGenericPassword].Count, 4; got != want {
-		t.Fatalf("generic password count = %d, want %d", got, want)
+	if got, want := result.Stats[anonymizer.EntitySecret].Count, 4; got != want {
+		t.Fatalf("secret count = %d, want %d", got, want)
 	}
 	if got, want := result.Stats[anonymizer.EntityIP].Count, 3; got != want {
 		t.Fatalf("ip count = %d, want %d", got, want)
 	}
 }
 
-func TestGenericPasswordDetectorRequiresLettersDigitsAndSpecials(t *testing.T) {
-	output, result := anonymize(t, "PASSWORD=dockerPassword2026! plain ABC12345 digits 12345678", true)
+func TestURISecretDetectorDoesNotCatchRoutesOrMarkdownLinks(t *testing.T) {
+	input := strings.Join([]string{
+		"Docs: https://docs.example.com/v2/reset-password?next=/home",
+		"Endpoint `/v1/messages` and `/v1/models`",
+		"See [proxy.go:89-92](internal/proxy/proxy.go#l89-l92)",
+		"Use claude-sonnet-4-6",
+	}, "\n")
 
-	if got, want := output, "[GENERIC_PASSWORD_1] plain [GENERIC_ID_1] digits [NUMERIC_ID_1]"; got != want {
+	output, result := anonymize(t, input, true)
+
+	if got, want := output, input; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if got, want := result.Stats[anonymizer.EntityGenericPassword].Count, 1; got != want {
-		t.Fatalf("generic password count = %d, want %d", got, want)
-	}
-	if got, want := result.Stats[anonymizer.EntityGenericID].Count, 1; got != want {
-		t.Fatalf("generic id count = %d, want %d", got, want)
-	}
-}
-
-func TestReferenceIDWinsOverGenericPassword(t *testing.T) {
-	output, result := anonymize(t, "Account: CRMEN-443322", true)
-
-	if got, want := output, "Account: [REFERENCE_ID_1]"; got != want {
-		t.Fatalf("output = %q, want %q", got, want)
-	}
-	if got, want := result.Stats[anonymizer.EntityReferenceID].Count, 1; got != want {
-		t.Fatalf("reference id count = %d, want %d", got, want)
-	}
-	if _, ok := result.Stats[anonymizer.EntityGenericPassword]; ok {
-		t.Fatalf("generic password should not win over reference id: %#v", result.Stats)
+	if _, ok := result.Stats[anonymizer.EntitySecret]; ok {
+		t.Fatalf("routes and markdown links should not be counted as secrets: %#v", result.Stats)
 	}
 }
 
@@ -341,6 +331,50 @@ func TestDetectorsFromGitleaksRulesUseSecretGroup(t *testing.T) {
 	}
 	if got, want := result.Stats[anonymizer.EntitySecret].Count, 1; got != want {
 		t.Fatalf("secret count = %d, want %d", got, want)
+	}
+}
+
+func TestDetectorsFromGitleaksRulesUseFirstCaptureWhenSecretGroupUnset(t *testing.T) {
+	loaded, err := detectorsFromGitleaksRules([]gitleaksRule{
+		{
+			ID:    "generic-secret",
+			Regex: `(?i)api[_-]?secret\s*=\s*["']?([a-z0-9-]{10,})["']?`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("detectorsFromGitleaksRules returned error: %v", err)
+	}
+
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize(`apiSecret = "payment-secret-2026-qwerty"`)
+
+	if got, want := output, `apiSecret = "[SECRET_1]"`; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Findings[0].Value, "payment-secret-2026-qwerty"; got != want {
+		t.Fatalf("secret value = %q, want %q", got, want)
+	}
+}
+
+func TestDetectorsFromGitleaksRulesFallBackToFullMatchWithoutCaptures(t *testing.T) {
+	loaded, err := detectorsFromGitleaksRules([]gitleaksRule{
+		{
+			ID:    "literal-secret",
+			Regex: `gitleaks-secret`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("detectorsFromGitleaksRules returned error: %v", err)
+	}
+
+	engine := anonymizer.NewService(loaded)
+	output, result := engine.Anonymize("token gitleaks-secret")
+
+	if got, want := output, "token [SECRET_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if got, want := result.Findings[0].Value, "gitleaks-secret"; got != want {
+		t.Fatalf("secret value = %q, want %q", got, want)
 	}
 }
 

@@ -1,7 +1,7 @@
 {
   "entities": [
     { "type": "NAME", "value": "William Harris" },
-    { "type": "BIRTH_DATE", "value": "2 juillet 1958" },
+    { "type": "DATE", "value": "2 juillet 1958" },
     { "type": "PHONE", "value": "05 61 23 45 67" },
     { "type": "EMAIL", "value": "william.harris@example.net" },
     { "type": "ADDRESS", "value": "10 allée des Tilleuls, 34000 Montpellier" }

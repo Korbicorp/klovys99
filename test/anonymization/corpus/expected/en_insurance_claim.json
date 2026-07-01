@@ -1,7 +1,7 @@
 {
   "entities": [
     { "type": "NAME", "value": "Lucas Green" },
-    { "type": "BIRTH_DATE", "value": "07/09/1985" },
+    { "type": "DATE", "value": "07/09/1985" },
     { "type": "ADDRESS", "value": "4 route de Lyon, 38000 Grenoble" },
     { "type": "EMAIL", "value": "lucas.green@example.com" },
     { "type": "REFERENCE_ID", "value": "CLAIM2026LG" },
