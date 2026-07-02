@@ -168,6 +168,58 @@ func TestProxyRoutesConfiguredPrefixesToDifferentUpstreams(t *testing.T) {
 	}
 }
 
+func TestProxyAnonymizesPrefixedAnthropicMessagesRequests(t *testing.T) {
+	var upstreamPath string
+	var upstreamBody string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamPath = request.URL.Path
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, upstream.URL),
+		RouteTargets: map[string]*url.URL{
+			AnthropicRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:     &logger,
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if upstreamPath != "/v1/messages" {
+		t.Fatalf("upstream path = %q, want /v1/messages", upstreamPath)
+	}
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want prefixed Anthropic prompt anonymized", upstreamBody)
+	}
+	if !strings.Contains(upstreamBody, "Email [EMAIL_1]") {
+		t.Fatalf("upstream body = %q, want email token", upstreamBody)
+	}
+	if !strings.Contains(logs.String(), `"EMAIL":1`) {
+		t.Fatalf("logs = %q, want anonymized stats", logs.String())
+	}
+}
+
 func TestSessionPromptAnonymizerLogsOnlyStats(t *testing.T) {
 	body := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before <session>Email: alice@example.com\nTel: 06 12 34 56 78</session> after","cache_control":{"type":"ephemeral"}}]}]}`)
 

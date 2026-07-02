@@ -127,12 +127,19 @@ func shouldAnonymizeRequest(request *http.Request) bool {
 	if request.Method != http.MethodPost {
 		return false
 	}
-	switch request.URL.Path {
+	switch anthropicRequestPath(request.URL.Path) {
 	case "/v1/messages", "/v1/messages/count_tokens":
 		return true
 	default:
 		return false
 	}
+}
+
+func anthropicRequestPath(path string) string {
+	if path == AnthropicRoutePrefix {
+		return "/"
+	}
+	return strings.TrimPrefix(path, AnthropicRoutePrefix)
 }
 
 func validateTarget(target *url.URL) error {
