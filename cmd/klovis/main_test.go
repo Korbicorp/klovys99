@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/proxy"
+	statlog "github.com/Korbicorp/klovis/internal/stats"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -183,6 +185,12 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	if !config.LLMAutoStart {
 		t.Fatal("LLMAutoStart = false, want true")
 	}
+	if config.StatsPath != statlog.DefaultPath {
+		t.Fatalf("StatsPath = %q, want default stats path", config.StatsPath)
+	}
+	if config.StatsMaxBytes != statlog.DefaultMaxBytes {
+		t.Fatalf("StatsMaxBytes = %d, want default stats max bytes", config.StatsMaxBytes)
+	}
 }
 
 func TestRuntimeLoggerDefaultsToStdoutWithoutProxyLog(t *testing.T) {
@@ -326,6 +334,7 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 		LLMModel:         "llama",
 		LLMTimeout:       5 * time.Second,
 		LLMMaxChunkBytes: 64,
+		StatsPath:        t.TempDir() + "/stats.jsonl",
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -358,6 +367,93 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 	}
 }
 
+// TestBuildApplicationServesStatsAPIBeforeProxy verifies that dashboard API routes are handled locally before proxy fallback.
+func TestBuildApplicationServesStatsAPIBeforeProxy(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamHits++
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:    mustParseURL(t, upstream.URL),
+		Logger:    ptrLogger(zerolog.Nop()),
+		Detectors: noExternalDetectorsConfig(),
+		StatsPath: t.TempDir() + "/stats.jsonl",
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	if err := app.statsRecorder.Record(statlog.Event{
+		Event:  statlog.EventRequestProcessed,
+		Counts: map[string]int{"EMAIL": 2},
+	}); err != nil {
+		t.Fatalf("record stats event: %v", err)
+	}
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/api/stats")
+	if err != nil {
+		t.Fatalf("call stats API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200", response.StatusCode)
+	}
+	var summary statlog.Summary
+	if err := json.NewDecoder(response.Body).Decode(&summary); err != nil {
+		t.Fatalf("decode stats response: %v", err)
+	}
+	if summary.TotalRequests != 1 || summary.AnonymizedRequests != 1 || len(summary.CountsByType) != 1 || summary.CountsByType[0].Count != 2 {
+		t.Fatalf("summary = %#v, want one anonymized EMAIL request", summary)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want stats API not proxied", upstreamHits)
+	}
+
+	missingAPIResponse, err := server.Client().Get(server.URL + "/api/unknown")
+	if err != nil {
+		t.Fatalf("call missing API route: %v", err)
+	}
+	defer missingAPIResponse.Body.Close()
+	if missingAPIResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing API status = %d, want 404", missingAPIResponse.StatusCode)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want missing API route not proxied", upstreamHits)
+	}
+
+	resetResponse, err := server.Client().Post(server.URL+"/api/stats/reset", "application/json", nil)
+	if err != nil {
+		t.Fatalf("call stats reset API: %v", err)
+	}
+	defer resetResponse.Body.Close()
+	if resetResponse.StatusCode != http.StatusOK {
+		t.Fatalf("reset status = %d, want 200", resetResponse.StatusCode)
+	}
+	summaryAfterReset, err := app.statsRecorder.Summary()
+	if err != nil {
+		t.Fatalf("summary after reset: %v", err)
+	}
+	if summaryAfterReset.TotalRequests != 0 {
+		t.Fatalf("summary after reset = %#v, want empty", summaryAfterReset)
+	}
+
+	proxyResponse, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy route: %v", err)
+	}
+	defer proxyResponse.Body.Close()
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits = %d, want proxy route forwarded once", upstreamHits)
+	}
+}
+
 func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
 	_, err := buildApplication(context.Background(), runtimeConfig{
 		Target:     mustParseURL(t, "https://api.anthropic.com"),
@@ -365,6 +461,7 @@ func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
 		Detectors:  noExternalDetectorsConfig(),
 		LLMEnabled: true,
 		LLMBaseURL: "localhost:11434",
+		StatsPath:  t.TempDir() + "/stats.jsonl",
 	})
 	if err == nil || !strings.Contains(err.Error(), "connect llm") {
 		t.Fatalf("error = %v, want llm startup error", err)

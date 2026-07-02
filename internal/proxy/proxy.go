@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
+	statlog "github.com/Korbicorp/klovis/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
@@ -36,8 +37,9 @@ var metadataKeys = map[string]struct{}{
 }
 
 type sessionPromptAnonymizer struct {
-	engine      TextAnonymizer
-	matchFinder MatchFinder
+	engine        TextAnonymizer
+	matchFinder   MatchFinder
+	statsRecorder StatsRecorder
 }
 
 type promptAnonymizationRun struct {
@@ -56,12 +58,17 @@ type MatchFinder interface {
 	FindMatches(ctx context.Context, input string) ([]anonymizer.Match, error)
 }
 
+type StatsRecorder interface {
+	Record(event statlog.Event) error
+}
+
 type Config struct {
-	Target      *url.URL
-	Logger      *zerolog.Logger
-	Transport   http.RoundTripper
-	Anonymizer  TextAnonymizer
-	MatchFinder MatchFinder
+	Target        *url.URL
+	Logger        *zerolog.Logger
+	Transport     http.RoundTripper
+	Anonymizer    TextAnonymizer
+	MatchFinder   MatchFinder
+	StatsRecorder StatsRecorder
 }
 
 func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
@@ -80,13 +87,14 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	}
 
 	logger := *config.Logger
-	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder)
+	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder, config.StatsRecorder)
 	proxy := httputil.NewSingleHostReverseProxy(config.Target)
 	proxy.Director = newDirector(config.Target, proxy.Director)
 	if config.Transport != nil {
 		proxy.Transport = config.Transport
 	}
 	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
+		recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventProxyError})
 		logger.Error().Err(err).Msg("proxy error")
 		http.Error(writer, err.Error(), http.StatusBadGateway)
 	}
@@ -94,12 +102,15 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	return func(ctx *gin.Context) {
 		requestBody, err := readBody(ctx.Request.Body)
 		if err != nil {
+			recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
 			logger.Error().Err(err).Msg("read request body")
 			ctx.String(http.StatusBadRequest, err.Error())
 			return
 		}
 
-		anonymizedBody := promptAnonymizer.anonymize(ctx.Request.Context(), logger, string(requestBody))
+		outcome := promptAnonymizer.anonymizeWithStats(ctx.Request.Context(), logger, string(requestBody))
+		anonymizedBody := outcome.body
+		recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.stats))
 		requestBody = []byte(anonymizedBody)
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
@@ -140,29 +151,43 @@ func logTrafficRequest(logger zerolog.Logger, body string) {
 		Msg("traffic body")
 }
 
-func newSessionPromptAnonymizer(engine TextAnonymizer, matchFinder MatchFinder) *sessionPromptAnonymizer {
+func newSessionPromptAnonymizer(engine TextAnonymizer, matchFinder MatchFinder, statsRecorders ...StatsRecorder) *sessionPromptAnonymizer {
+	var statsRecorder StatsRecorder
+	if len(statsRecorders) > 0 {
+		statsRecorder = statsRecorders[0]
+	}
 	return &sessionPromptAnonymizer{
-		engine:      engine,
-		matchFinder: matchFinder,
+		engine:        engine,
+		matchFinder:   matchFinder,
+		statsRecorder: statsRecorder,
 	}
 }
 
 func (a *sessionPromptAnonymizer) anonymize(ctx context.Context, logger zerolog.Logger, body string) string {
+	return a.anonymizeWithStats(ctx, logger, body).body
+}
+
+type anonymizationOutcome struct {
+	body  string
+	stats map[anonymizer.EntityType]int
+}
+
+func (a *sessionPromptAnonymizer) anonymizeWithStats(ctx context.Context, logger zerolog.Logger, body string) anonymizationOutcome {
 	var payload any
 	decoder := json.NewDecoder(strings.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		return body
+		return anonymizationOutcome{body: body}
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return body
+		return anonymizationOutcome{body: body}
 	}
 
 	run := a.newRun(ctx, logger)
 	anonymized, changed := run.anonymizeRequestValue(payload, anonymizationContext{})
 	if !changed {
-		return body
+		return anonymizationOutcome{body: body, stats: run.stats}
 	}
 	logAnonymizedStats(logger, run.stats)
 
@@ -170,9 +195,12 @@ func (a *sessionPromptAnonymizer) anonymize(ctx context.Context, logger zerolog.
 	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(anonymized); err != nil {
-		return body
+		return anonymizationOutcome{body: body}
 	}
-	return strings.TrimSuffix(output.String(), "\n")
+	return anonymizationOutcome{
+		body:  strings.TrimSuffix(output.String(), "\n"),
+		stats: run.stats,
+	}
 }
 
 func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Logger) *promptAnonymizationRun {
@@ -322,6 +350,7 @@ func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer
 	if r.anonymizer.matchFinder != nil {
 		matches, err := r.anonymizer.matchFinder.FindMatches(r.ctx, value)
 		if err != nil {
+			recordStatsEvent(r.logger, r.anonymizer.statsRecorder, statlog.Event{Event: statlog.EventLLMError})
 			r.logger.Error().Err(err).Msg("llm anonymization failed")
 		} else {
 			llmMatches = matches
@@ -354,4 +383,31 @@ func sortedEntityTypes(stats map[anonymizer.EntityType]int) []anonymizer.EntityT
 		return entityTypes[i] < entityTypes[j]
 	})
 	return entityTypes
+}
+
+func requestProcessedEvent(counts map[anonymizer.EntityType]int) statlog.Event {
+	stringCounts := make(map[string]int, len(counts))
+	total := 0
+	for entityType, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		stringCounts[string(entityType)] += count
+		total += count
+	}
+	return statlog.Event{
+		Event:             statlog.EventRequestProcessed,
+		Anonymized:        total > 0,
+		TotalReplacements: total,
+		Counts:            stringCounts,
+	}
+}
+
+func recordStatsEvent(logger zerolog.Logger, recorder StatsRecorder, event statlog.Event) {
+	if recorder == nil {
+		return
+	}
+	if err := recorder.Record(event); err != nil {
+		logger.Error().Err(err).Msg("stats record failed")
+	}
 }

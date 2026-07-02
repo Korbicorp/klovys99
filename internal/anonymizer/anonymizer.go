@@ -55,7 +55,9 @@ func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, 
 		return matches[i].Start < matches[j].Start
 	})
 
-	log.Info().Interface("pii", matches).Msg("Secret and PII found")
+	if len(matches) > 0 {
+		log.Debug().Interface("pii", matches).Msg("Secret and PII found")
+	}
 
 	result := Result{Stats: make(map[EntityType]EntityStats)}
 

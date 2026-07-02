@@ -14,6 +14,7 @@ import (
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/llm"
 	"github.com/Korbicorp/klovis/internal/proxy"
+	statlog "github.com/Korbicorp/klovis/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -40,6 +41,8 @@ const (
 	defaultLLMMaxChunkBytes = llm.DefaultMaxChunkBytes
 	defaultLLMBaseUrl       = llm.DefaultBaseURL
 	defaultLLMModel         = llm.DefaultModel
+	defaultStatsPath        = statlog.DefaultPath
+	defaultStatsMaxBytes    = statlog.DefaultMaxBytes
 )
 
 func main() {
@@ -65,14 +68,17 @@ type runtimeConfig struct {
 	LLMTimeout       time.Duration
 	LLMMaxChunkBytes int
 	LLMAutoStart     bool
+	StatsPath        string
+	StatsMaxBytes    int64
 }
 
 type application struct {
-	addr       string
-	handler    http.Handler
-	logger     *zerolog.Logger
-	logFile    *os.File
-	llmService *llm.Service
+	addr          string
+	handler       http.Handler
+	logger        *zerolog.Logger
+	logFile       *os.File
+	llmService    *llm.Service
+	statsRecorder *statlog.Recorder
 }
 
 func run(ctx context.Context, config runtimeConfig) error {
@@ -111,6 +117,23 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		logFile = openedLogFile
 	}
 
+	statsPath := strings.TrimSpace(config.StatsPath)
+	if statsPath == "" {
+		statsPath = defaultStatsPath
+	}
+	statsMaxBytes := config.StatsMaxBytes
+	if statsMaxBytes <= 0 {
+		statsMaxBytes = defaultStatsMaxBytes
+	}
+	statsRecorder, err := statlog.NewRecorder(statlog.Config{
+		Path:     statsPath,
+		MaxBytes: statsMaxBytes,
+	})
+	if err != nil {
+		closeLogFile(logFile)
+		return nil, err
+	}
+
 	detectorService := detectors.NewService(config.Detectors)
 	detectorResult, err := detectorService.Load(ctx)
 	if err != nil {
@@ -142,10 +165,11 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	}
 
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
-		Target:      config.Target,
-		Logger:      config.Logger,
-		Anonymizer:  anonymizer.NewService(detectorResult.Detectors),
-		MatchFinder: matchFinder,
+		Target:        config.Target,
+		Logger:        config.Logger,
+		Anonymizer:    anonymizer.NewService(detectorResult.Detectors),
+		MatchFinder:   matchFinder,
+		StatsRecorder: statsRecorder,
 	})
 	if err != nil {
 		if llmService != nil {
@@ -155,20 +179,50 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler)
+	handler := newHTTPHandler(proxyHandler, statsRecorder)
 	return &application{
-		addr:       config.Addr,
-		handler:    handler,
-		logger:     config.Logger,
-		logFile:    logFile,
-		llmService: llmService,
+		addr:          config.Addr,
+		handler:       handler,
+		logger:        config.Logger,
+		logFile:       logFile,
+		llmService:    llmService,
+		statsRecorder: statsRecorder,
 	}, nil
 }
 
-func newHTTPHandler(proxyHandler gin.HandlerFunc) http.Handler {
+type statsStore interface {
+	Summary() (statlog.Summary, error)
+	Reset() error
+}
+
+func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	router.Any("/*proxyPath", proxyHandler)
+	if statsStore != nil {
+		router.GET("/api/stats", func(ctx *gin.Context) {
+			summary, err := statsStore.Summary()
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, summary)
+		})
+		router.POST("/api/stats/reset", func(ctx *gin.Context) {
+			if err := statsStore.Reset(); err != nil {
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, gin.H{"reset": true})
+		})
+	}
+	router.NoRoute(func(ctx *gin.Context) {
+		path := ctx.Request.URL.Path
+		if path == "/api" || strings.HasPrefix(path, "/api/") {
+			ctx.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		proxyHandler(ctx)
+	})
 	return router
 }
 
@@ -255,6 +309,8 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		LLMTimeout:       llmTimeout,
 		LLMMaxChunkBytes: llmMaxChunkBytes,
 		LLMAutoStart:     llmAutoStart,
+		StatsPath:        defaultStatsPath,
+		StatsMaxBytes:    defaultStatsMaxBytes,
 	}, nil
 }
 

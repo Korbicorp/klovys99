@@ -2,3 +2,5 @@
 output.txt
 proxy.log
 .env
+anonymization_stats.jsonl
+cmd/klovis/__debug_bin*
