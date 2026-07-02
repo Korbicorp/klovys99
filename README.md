@@ -1,17 +1,20 @@
-# Klovis
+# klovys99
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Klovis is a local Anthropic reverse proxy that anonymizes sensitive prompt data
-before forwarding requests to the Anthropic API.
+klovys99 is a local reverse proxy that anonymizes sensitive prompt data before
+forwarding requests to Anthropic or OpenAI APIs.
 
-It is designed to sit between an Anthropic-compatible client and
-`https://api.anthropic.com`, replacing detected personal or sensitive values with
-stable pseudonym tokens before the request leaves the machine.
+It is designed to sit between coding clients such as Claude Code or Codex and
+their upstream API, replacing detected personal or sensitive values with stable
+pseudonym tokens before the request leaves the machine.
 
 ## Features
 
-- Local reverse proxy for Anthropic API requests.
+- Local reverse proxy for Anthropic and OpenAI-compatible JSON requests.
+- `npm install` workflow that builds the Go binary locally and exposes a
+  `klovis` command.
+- Client configuration helpers for Codex and Claude Code.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
   rule sources.
@@ -24,15 +27,19 @@ stable pseudonym tokens before the request leaves the machine.
 
 ## Requirements
 
+- Node.js 18 or newer.
 - Go 1.25 or newer.
 - Network access on first startup to download the default Gitleaks and Presidio
   rule sources.
-- An Anthropic API key for upstream requests.
+- An Anthropic API key, Claude subscription, or OpenAI API key depending on the
+  client you route through Klovis.
 - Ollama, only when `KLOVIS_LLM_ENABLED=true`.
 
-Check your Go installation:
+Check your local tooling:
 
 ```sh
+node -v
+npm -v
 go version
 ```
 
@@ -45,36 +52,97 @@ ollama pull mistral
 
 ## Installation
 
-Install from source:
+From the repository root:
 
 ```sh
-git clone https://github.com/Korbicorp/klovis.git
-cd klovis
-go build -o klovis ./cmd/klovis
+npm install
 ```
 
-Or run it directly without building a binary:
+`npm install` runs a `postinstall` step that builds the Go proxy into `dist/`
+and exposes the CLI entrypoint `klovis`.
+
+If you want the install step to also update your client configuration
+immediately:
 
 ```sh
-go run ./cmd/klovis
+KLOVIS_CLIENT=claude npm install
 ```
+
+Supported values are `codex`, `claude`, and `both`.
 
 ## Quick Start
 
-Start the proxy:
+Configure one or both clients to point to Klovis:
 
 ```sh
-go run ./cmd/klovis
+npx klovis configure codex
+npx klovis configure claude
 ```
 
-By default, Klovis listens on `http://localhost:8080` and forwards requests to
-`https://api.anthropic.com`.
-
-Send Anthropic requests to the local proxy while keeping the usual Anthropic
-headers:
+Or configure both at once:
 
 ```sh
-curl http://localhost:8080/v1/messages \
+npx klovis configure both
+```
+
+Then start the proxy:
+
+```sh
+npx klovis start
+```
+
+By default, Klovis listens on `http://127.0.0.1:8080` and exposes these local
+routes:
+
+- `http://127.0.0.1:8080/anthropic` for Claude Code and other Anthropic clients
+- `http://127.0.0.1:8080/openai/v1` for Codex and other OpenAI-compatible
+  clients
+
+The historical unprefixed route still exists and forwards to
+`KLOVIS_TARGET_URL`, which defaults to `https://api.anthropic.com`.
+
+## Client Configuration
+
+### Codex
+
+```sh
+npx klovis configure codex
+```
+
+This updates `~/.codex/config.toml` and sets:
+
+```toml
+openai_base_url = "http://127.0.0.1:8080/openai/v1"
+```
+
+### Claude Code
+
+```sh
+npx klovis configure claude
+```
+
+This updates `~/.claude/settings.json` and sets:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080/anthropic"
+  }
+}
+```
+
+If you want another listen URL written into both clients, pass `--base-url`:
+
+```sh
+npx klovis configure both --base-url http://127.0.0.1:9090
+```
+
+## Quick API Checks
+
+Anthropic-style request through Klovis:
+
+```sh
+curl http://127.0.0.1:8080/anthropic/v1/messages \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
@@ -90,24 +158,36 @@ curl http://localhost:8080/v1/messages \
   }'
 ```
 
-The upstream Anthropic API receives the same request shape, with sensitive values
+OpenAI Responses-style request through Klovis:
+
+```sh
+curl http://127.0.0.1:8080/openai/v1/responses \
+  -H "authorization: Bearer $OPENAI_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "gpt-5",
+    "input": "Email Alice at alice@example.com"
+  }'
+```
+
+Upstream providers receive the same request shape, with sensitive values
 replaced by pseudonym tokens such as `[EMAIL_1]`.
 
 ## How It Works
 
-Klovis reads each incoming request body, anonymizes supported JSON prompt
-content, then forwards the modified request to Anthropic.
+Klovis reads each incoming JSON request body, anonymizes supported prompt
+content, then forwards the modified request to the configured upstream.
 
 The proxy anonymizes:
 
 - every `<session>...</session>` block found anywhere in a JSON request body;
-- text content in prompts, system messages, `<system-reminder>` blocks, text file
-  context, and tool results;
+- text content in prompts, system messages, `<system-reminder>` blocks, text
+  file context, and tool results;
 - text document sources where `source.type` is `text`.
 
 Structural metadata such as model names, roles, content block types, tool IDs,
 tool names, media types, cache-control values, and base64 document data is left
-unchanged so the Anthropic request shape remains valid.
+unchanged so the upstream request shape remains valid.
 
 For a single proxy process, repeated values are mapped to stable tokens. For
 example, the same email address is replaced by the same `[EMAIL_N]` token across
@@ -118,10 +198,14 @@ are equal, the longest match wins.
 
 ## Configuration
 
-Klovis is configured with environment variables.
+Klovis runtime is configured with environment variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `KLOVIS_ADDR` | `127.0.0.1:8080` | Listen address for the local proxy. |
+| `KLOVIS_TARGET_URL` | `https://api.anthropic.com` | Upstream used by legacy unprefixed routes such as `/v1/messages`. |
+| `KLOVIS_ANTHROPIC_TARGET_URL` | `https://api.anthropic.com` | Upstream used by `/anthropic/...` routes. |
+| `KLOVIS_OPENAI_TARGET_URL` | `https://api.openai.com` | Upstream used by `/openai/...` routes. |
 | `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic body logging when set to `true`. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
 | `KLOVIS_LLM_ENABLED` | `false` | Enables optional local LLM extraction through Ollama. |
@@ -131,33 +215,42 @@ Klovis is configured with environment variables.
 | `KLOVIS_LLM_MAX_CHARS` | `1000` | Maximum input bytes sent to the LLM per chunk. |
 | `KLOVIS_LLM_AUTOSTART` | `false` | Starts `ollama serve` automatically when the Ollama URL is local and not already reachable. |
 
+The npm wrapper also honors:
+
+| Variable | Description |
+| --- | --- |
+| `KLOVIS_CLIENT` | Client to configure during `npm install`: `codex`, `claude`, or `both`. |
+| `KLOVIS_BASE_URL` | Base URL written by `klovis configure` or `npm install` auto-configuration. |
+| `KLOVIS_SKIP_BUILD` | Skips the Go build during `postinstall` when set to `true`. |
+| `KLOVIS_SKIP_CONFIGURE` | Skips client configuration during `postinstall` when set to `true`. |
+
 Boolean variables accept only `true` or `false`.
 
-### Logs
+## Logs
 
 Klovis writes structured application logs to stdout by default. To write logs to
 `proxy.log` instead, enable file logging:
 
 ```sh
-KLOVIS_LOG_TO_FILE=true go run ./cmd/klovis
+KLOVIS_LOG_TO_FILE=true npx klovis start
 ```
 
-By default, Klovis does not write traffic bodies to disk. To also inspect the
-final request body sent upstream after anonymization, enable debug logging:
+To also inspect the final request body sent upstream after anonymization, enable
+debug logging:
 
 ```sh
-KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true go run ./cmd/klovis
+KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true npx klovis start
 ```
 
 Use debug mode carefully, because it records the anonymized upstream request body
 in whichever log destination is configured.
 
-### Optional LLM Extraction
+## Optional LLM Extraction
 
 LLM extraction is disabled by default. Enable it with:
 
 ```sh
-KLOVIS_LLM_ENABLED=true go run ./cmd/klovis
+KLOVIS_LLM_ENABLED=true npx klovis start
 ```
 
 When enabled, Klovis checks the Ollama connection during startup and runs a small
@@ -168,7 +261,7 @@ By default, Klovis does not start Ollama for you. Start Ollama separately before
 enabling LLM extraction, or opt in to local autostart:
 
 ```sh
-KLOVIS_LLM_ENABLED=true KLOVIS_LLM_AUTOSTART=true go run ./cmd/klovis
+KLOVIS_LLM_ENABLED=true KLOVIS_LLM_AUTOSTART=true npx klovis start
 ```
 
 Autostart only applies to local Ollama URLs such as `http://localhost:11434` or
@@ -208,23 +301,36 @@ External rule payloads are cached for 24 hours in the user cache directory under
 | `DATE` | LLM / Presidio | 50 / 600 | Dates tied to identity, family, documents, health, work, or events. |
 | `VEHICLE_PLATE` | LLM | 50 | Vehicle registration plates found by the local model. |
 
+## Claude Code Notes
+
+When Claude Code uses a non-first-party `ANTHROPIC_BASE_URL`, some Claude
+features behave differently upstream. In practice:
+
+- Remote Control is disabled by Claude Code when the base URL does not point to
+  `api.anthropic.com`.
+- Tool search behavior changes when routing through a proxy. If you need
+  deferred tool references, set `ENABLE_TOOL_SEARCH=true` in your Claude
+  environment because Klovis forwards `tool_reference` blocks unchanged.
+
 ## Development
 
-Clone the repository and install dependencies:
+Clone the repository and install both Node and Go dependencies:
 
 ```sh
 git clone https://github.com/Korbicorp/klovis.git
 cd klovis
+npm install
 go mod download
 ```
 
-Run the test suite:
+Run the test suites:
 
 ```sh
 go test ./...
+node --test npm/test/*.test.js
 ```
 
-Run the proxy locally:
+Run the proxy locally without npm:
 
 ```sh
 go run ./cmd/klovis
@@ -255,9 +361,6 @@ Useful checks before opening a pull request:
 
 ```sh
 go test ./...
+node --test npm/test/*.test.js
 gofmt -w ./cmd ./internal
 ```
-
-## License
-
-Klovis is released under the [MIT License](LICENSE).

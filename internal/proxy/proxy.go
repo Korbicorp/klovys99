@@ -18,8 +18,13 @@ import (
 )
 
 const (
-	DefaultLogPath      = "proxy.log"
-	DefaultAnthropicURL = "https://api.anthropic.com"
+	DefaultLogPath       = "proxy.log"
+	DefaultAnthropicURL  = "https://api.anthropic.com"
+	DefaultOpenAIURL     = "https://api.openai.com"
+	AnthropicRoutePrefix = "/anthropic"
+	OpenAIRoutePrefix    = "/openai"
+	sessionOpenTag       = "<session>"
+	sessionCloseTag      = "</session>"
 )
 
 var metadataKeys = map[string]struct{}{
@@ -56,19 +61,28 @@ type MatchFinder interface {
 }
 
 type Config struct {
-	Target      *url.URL
-	Logger      *zerolog.Logger
-	Transport   http.RoundTripper
-	Anonymizer  TextAnonymizer
-	MatchFinder MatchFinder
+	Target       *url.URL
+	RouteTargets map[string]*url.URL
+	Logger       *zerolog.Logger
+	Transport    http.RoundTripper
+	Anonymizer   TextAnonymizer
+	MatchFinder  MatchFinder
 }
 
 func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	if config.Target == nil {
 		return nil, fmt.Errorf("proxy target is required")
 	}
-	if config.Target.Scheme == "" || config.Target.Host == "" {
-		return nil, fmt.Errorf("proxy target must include scheme and host")
+	if err := validateTarget(config.Target); err != nil {
+		return nil, err
+	}
+	for prefix, target := range config.RouteTargets {
+		if !strings.HasPrefix(prefix, "/") {
+			return nil, fmt.Errorf("proxy route prefix %q must start with /", prefix)
+		}
+		if err := validateTarget(target); err != nil {
+			return nil, fmt.Errorf("proxy route %q: %w", prefix, err)
+		}
 	}
 	if config.Logger == nil {
 		logger := zerolog.Nop()
@@ -81,7 +95,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	logger := *config.Logger
 	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder)
 	proxy := httputil.NewSingleHostReverseProxy(config.Target)
-	proxy.Director = newDirector(config.Target, proxy.Director)
+	proxy.Director = newDirector(config.Target, config.RouteTargets)
 	if config.Transport != nil {
 		proxy.Transport = config.Transport
 	}
@@ -120,13 +134,77 @@ func shouldAnonymizeRequest(request *http.Request) bool {
 	}
 }
 
-func newDirector(target *url.URL, defaultDirector func(*http.Request)) func(*http.Request) {
+func validateTarget(target *url.URL) error {
+	if target == nil {
+		return fmt.Errorf("proxy target is required")
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return fmt.Errorf("proxy target must include scheme and host")
+	}
+	return nil
+}
+
+func newDirector(defaultTarget *url.URL, routeTargets map[string]*url.URL) func(*http.Request) {
+	routes := compileTargetRoutes(routeTargets)
 	return func(request *http.Request) {
-		defaultDirector(request)
+		target, requestPath := resolveTarget(request.URL.Path, defaultTarget, routes)
+		request.URL.Path = joinURLPath(target.Path, requestPath)
 		request.Host = target.Host
 		request.URL.Host = target.Host
 		request.URL.Scheme = target.Scheme
 	}
+}
+
+type targetRoute struct {
+	prefix string
+	target *url.URL
+}
+
+func compileTargetRoutes(routeTargets map[string]*url.URL) []targetRoute {
+	if len(routeTargets) == 0 {
+		return nil
+	}
+
+	routes := make([]targetRoute, 0, len(routeTargets))
+	for prefix, target := range routeTargets {
+		routes = append(routes, targetRoute{
+			prefix: strings.TrimRight(prefix, "/"),
+			target: target,
+		})
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		return len(routes[i].prefix) > len(routes[j].prefix)
+	})
+	return routes
+}
+
+func resolveTarget(requestPath string, defaultTarget *url.URL, routes []targetRoute) (*url.URL, string) {
+	for _, route := range routes {
+		if route.prefix == "" {
+			continue
+		}
+		if requestPath == route.prefix {
+			return route.target, "/"
+		}
+		if strings.HasPrefix(requestPath, route.prefix+"/") {
+			return route.target, strings.TrimPrefix(requestPath, route.prefix)
+		}
+	}
+	return defaultTarget, requestPath
+}
+
+func joinURLPath(basePath, requestPath string) string {
+	basePath = strings.TrimRight(basePath, "/")
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+	}
+	if basePath == "" {
+		return requestPath
+	}
+	return basePath + requestPath
 }
 
 func readBody(body io.ReadCloser) ([]byte, error) {

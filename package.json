@@ -1,0 +1,13 @@
+{
+  "name": "klovis",
+  "version": "0.1.0",
+  "description": "Local prompt anonymizing proxy for Codex and Claude Code",
+  "license": "MIT",
+  "bin": {
+    "klovis": "npm/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node npm/postinstall.js",
+    "test:node": "node --test npm/test/*.test.js"
+  }
+}

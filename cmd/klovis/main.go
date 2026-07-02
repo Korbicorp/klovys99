@@ -20,18 +20,22 @@ import (
 )
 
 const (
-	proxyDebugEnv   = "KLOVIS_PROXY_DEBUG"
-	logToFileEnv    = "KLOVIS_LOG_TO_FILE"
-	llmEnabledEnv   = "KLOVIS_LLM_ENABLED"
-	llmURLEnv       = "KLOVIS_LLM_URL"
-	llmModelEnv     = "KLOVIS_LLM_MODEL"
-	llmTimeoutEnv   = "KLOVIS_LLM_TIMEOUT"
-	llmMaxCharsEnv  = "KLOVIS_LLM_MAX_CHARS"
-	llmAutoStartEnv = "KLOVIS_LLM_AUTOSTART"
+	proxyAddrEnv       = "KLOVIS_ADDR"
+	targetEnv          = "KLOVIS_TARGET_URL"
+	anthropicTargetEnv = "KLOVIS_ANTHROPIC_TARGET_URL"
+	openaiTargetEnv    = "KLOVIS_OPENAI_TARGET_URL"
+	proxyDebugEnv      = "KLOVIS_PROXY_DEBUG"
+	logToFileEnv       = "KLOVIS_LOG_TO_FILE"
+	llmEnabledEnv      = "KLOVIS_LLM_ENABLED"
+	llmURLEnv          = "KLOVIS_LLM_URL"
+	llmModelEnv        = "KLOVIS_LLM_MODEL"
+	llmTimeoutEnv      = "KLOVIS_LLM_TIMEOUT"
+	llmMaxCharsEnv     = "KLOVIS_LLM_MAX_CHARS"
+	llmAutoStartEnv    = "KLOVIS_LLM_AUTOSTART"
 )
 
 const (
-	defaultProxyAdr         = ":8080"
+	defaultProxyAdr         = "127.0.0.1:8080"
 	defaultLLMEnable        = false
 	defaultLLMAutoStart     = false
 	defaultDebug            = false
@@ -48,13 +52,15 @@ func main() {
 		log.Fatal().Err(err).Msg("fail to parse runtime configuration")
 	}
 	if err := run(context.Background(), config); err != nil {
-		log.Fatal().Err(err).Msg("fail to start Anthropic proxy")
+		log.Fatal().Err(err).Msg("fail to start llm proxy")
 	}
 }
 
 type runtimeConfig struct {
 	Addr             string
 	Target           *url.URL
+	AnthropicTarget  *url.URL
+	OpenAITarget     *url.URL
 	Logger           *zerolog.Logger
 	DebugTrafficLog  bool
 	LogToFile        bool
@@ -82,7 +88,14 @@ func run(ctx context.Context, config runtimeConfig) error {
 	}
 	defer app.Close()
 
-	app.logger.Info().Msg("proxy starting")
+	defaultTarget := proxy.DefaultAnthropicURL
+	if config.Target != nil {
+		defaultTarget = config.Target.String()
+	}
+	app.logger.Info().
+		Str("addr", app.addr).
+		Str("default_target", defaultTarget).
+		Msg("proxy starting")
 	return http.ListenAndServe(app.addr, app.handler)
 }
 
@@ -99,6 +112,20 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 			return nil, fmt.Errorf("parse anthropic URL: %w", err)
 		}
 		config.Target = target
+	}
+	if config.AnthropicTarget == nil {
+		target, err := url.Parse(proxy.DefaultAnthropicURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse anthropic URL: %w", err)
+		}
+		config.AnthropicTarget = target
+	}
+	if config.OpenAITarget == nil {
+		target, err := url.Parse(proxy.DefaultOpenAIURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse openai URL: %w", err)
+		}
+		config.OpenAITarget = target
 	}
 	var logFile *os.File
 	if config.Logger == nil {
@@ -142,7 +169,11 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	}
 
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
-		Target:      config.Target,
+		Target: config.Target,
+		RouteTargets: map[string]*url.URL{
+			proxy.AnthropicRoutePrefix: config.AnthropicTarget,
+			proxy.OpenAIRoutePrefix:    config.OpenAITarget,
+		},
 		Logger:      config.Logger,
 		Anonymizer:  anonymizer.NewService(detectorResult.Detectors),
 		MatchFinder: matchFinder,
@@ -214,9 +245,17 @@ func llmConfigFromRuntime(config runtimeConfig) llm.Config {
 }
 
 func runtimeConfigFromEnv() (runtimeConfig, error) {
-	target, err := url.Parse(proxy.DefaultAnthropicURL)
+	target, err := envURLWithDefault(targetEnv, proxy.DefaultAnthropicURL)
 	if err != nil {
-		return runtimeConfig{}, fmt.Errorf("parse DefaultAnthropicURL: %w", err)
+		return runtimeConfig{}, err
+	}
+	anthropicTarget, err := envURLWithDefault(anthropicTargetEnv, proxy.DefaultAnthropicURL)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	openaiTarget, err := envURLWithDefault(openaiTargetEnv, proxy.DefaultOpenAIURL)
+	if err != nil {
+		return runtimeConfig{}, err
 	}
 	debugTrafficLog, err := envBoolWithDefault(proxyDebugEnv, defaultDebug)
 	if err != nil {
@@ -244,8 +283,10 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	}
 
 	return runtimeConfig{
-		Addr:             defaultProxyAdr,
+		Addr:             envStringWithDefault(proxyAddrEnv, defaultProxyAdr),
 		Target:           target,
+		AnthropicTarget:  anthropicTarget,
+		OpenAITarget:     openaiTarget,
 		DebugTrafficLog:  debugTrafficLog,
 		LogToFile:        logToFile,
 		Detectors:        detectors.DefaultConfig(),
@@ -256,6 +297,18 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		LLMMaxChunkBytes: llmMaxChunkBytes,
 		LLMAutoStart:     llmAutoStart,
 	}, nil
+}
+
+func envURLWithDefault(name, def string) (*url.URL, error) {
+	value := envStringWithDefault(name, def)
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("parse %s: value must include scheme and host", name)
+	}
+	return parsed, nil
 }
 
 func runtimeLogger(debugTraffic, logToFile bool) (zerolog.Logger, *os.File, error) {
