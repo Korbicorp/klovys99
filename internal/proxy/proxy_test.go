@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	"github.com/Korbicorp/klovis/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/detectors"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
@@ -113,6 +113,58 @@ func TestProxyForwardsRequestAndResponse(t *testing.T) {
 	logOutput := logs.String()
 	if logOutput != "" {
 		t.Fatalf("logs = %q, want no logs without session prompt", logOutput)
+	}
+}
+
+func TestProxyRoutesConfiguredPrefixesToDifferentUpstreams(t *testing.T) {
+	var anthropicPath string
+	var openAIPath string
+
+	anthropicUpstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		anthropicPath = request.URL.Path
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer anthropicUpstream.Close()
+
+	openAIUpstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		openAIPath = request.URL.Path
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer openAIUpstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, anthropicUpstream.URL),
+		RouteTargets: map[string]*url.URL{
+			AnthropicRoutePrefix: mustParseURL(t, anthropicUpstream.URL),
+			OpenAIRoutePrefix:    mustParseURL(t, openAIUpstream.URL),
+		},
+		Logger:     ptrLogger(zerolog.Nop()),
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	anthropicResponse, err := http.Post(server.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatalf("call anthropic route: %v", err)
+	}
+	anthropicResponse.Body.Close()
+
+	openAIResponse, err := http.Post(server.URL+"/openai/v1/responses", "application/json", strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("call openai route: %v", err)
+	}
+	openAIResponse.Body.Close()
+
+	if anthropicPath != "/v1/messages" {
+		t.Fatalf("anthropic path = %q, want /v1/messages", anthropicPath)
+	}
+	if openAIPath != "/v1/responses" {
+		t.Fatalf("openai path = %q, want /v1/responses", openAIPath)
 	}
 }
 
@@ -690,6 +742,10 @@ func newTestRouter(handler gin.HandlerFunc) http.Handler {
 
 func newTestAnonymizer() *anonymizer.Service {
 	return anonymizer.NewService(detectors.Default(true))
+}
+
+func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
+	return &logger
 }
 
 func mustParseURL(t *testing.T, value string) *url.URL {
