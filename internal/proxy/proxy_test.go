@@ -466,11 +466,17 @@ func TestProxyForwardsAnonymizedSessionPrompts(t *testing.T) {
 	}
 
 	logOutput := logs.String()
-	if strings.Contains(logOutput, "alice@example.com") || strings.Contains(logOutput, "FR76 3000 6000 0112 3456 7890 189") {
-		t.Fatalf("logs = %q, want final anonymized request only", logOutput)
+	if !strings.Contains(logOutput, `"stage":"before_anonymization"`) {
+		t.Fatalf("logs = %q, want pre-anonymization request body", logOutput)
+	}
+	if !strings.Contains(logOutput, "alice@example.com") || !strings.Contains(logOutput, "FR76 3000 6000 0112 3456 7890 189") {
+		t.Fatalf("logs = %q, want original request values before anonymization", logOutput)
+	}
+	if !strings.Contains(logOutput, `"stage":"after_anonymization"`) {
+		t.Fatalf("logs = %q, want post-anonymization request body", logOutput)
 	}
 	if !strings.Contains(logOutput, `<session>Email: [EMAIL_1]</session>`) || !strings.Contains(logOutput, `IBAN [IBAN_1]`) {
-		t.Fatalf("logs = %q, want final request body", logOutput)
+		t.Fatalf("logs = %q, want anonymized request body after anonymization", logOutput)
 	}
 	if strings.Contains(logOutput, `"direction":"response"`) || strings.Contains(logOutput, "visible response") {
 		t.Fatalf("logs = %q, want no response traffic log", logOutput)
@@ -478,7 +484,7 @@ func TestProxyForwardsAnonymizedSessionPrompts(t *testing.T) {
 	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"IBAN":1`) {
 		t.Fatalf("logs = %q, want anonymized stats", logOutput)
 	}
-	for _, unexpected := range []string{"request.", "response.", "upstream.", "alice@example.com", "FR76 3000 6000 0112 3456 7890 189", "prompt_original", "prompt_anonymized"} {
+	for _, unexpected := range []string{"request.", "response.", "upstream.", "prompt_original", "prompt_anonymized"} {
 		if strings.Contains(logOutput, unexpected) {
 			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
 		}

@@ -268,15 +268,15 @@ Klovys99 writes structured application logs to stdout by default. To write logs 
 KLOVIS_LOG_TO_FILE=true npx klovys99 start
 ```
 
-To also inspect the final request body sent upstream after anonymization, enable
-debug logging:
+To inspect request bodies before and after anonymization, enable debug logging:
 
 ```sh
 KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true npx klovys99 start
 ```
 
-Use debug mode carefully, because it records the anonymized upstream request body
-in whichever log destination is configured.
+Use debug mode carefully, because it records both the original incoming request
+body and the anonymized upstream request body in whichever log destination is
+configured.
 
 ## Optional LLM Extraction
 

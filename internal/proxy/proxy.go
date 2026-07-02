@@ -112,12 +112,13 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			return
 		}
 
+		logTrafficRequest(logger, "before_anonymization", string(requestBody))
 		if shouldAnonymizeRequest(ctx.Request) {
 			requestBody = []byte(promptAnonymizer.anonymize(ctx.Request.Context(), logger, string(requestBody)))
 		}
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
-		logTrafficRequest(logger, string(requestBody))
+		logTrafficRequest(logger, "after_anonymization", string(requestBody))
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
 }
@@ -223,9 +224,10 @@ func readBody(body io.ReadCloser) ([]byte, error) {
 	return content, nil
 }
 
-func logTrafficRequest(logger zerolog.Logger, body string) {
+func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
 	logger.Debug().
 		Str("direction", "request").
+		Str("stage", stage).
 		Str("body", body).
 		Msg("traffic body")
 }
@@ -342,6 +344,13 @@ func (r *promptAnonymizationRun) childContext(key string, parent map[string]any,
 	}
 
 	if key == "text" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
+	}
+
+	if key == "thinking" && stringMapValue(parent, "type") == "thinking" && context.conversationContent {
 		return anonymizationContext{
 			conversationContent: true,
 			textValue:           true,
