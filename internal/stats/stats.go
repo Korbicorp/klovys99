@@ -15,8 +15,10 @@ import (
 const (
 	// DefaultPath is the local JSONL file used by the dashboard stats backend.
 	DefaultPath = "anonymization_stats.jsonl"
-	// DefaultMaxBytes is the maximum stats file size before it is truncated.
+	// DefaultMaxBytes is the maximum stats file size before it is rotated.
 	DefaultMaxBytes = 10 * 1024 * 1024
+	// DefaultMaxArchiveFiles is the number of rotated stats files kept beside the active file.
+	DefaultMaxArchiveFiles = 3
 	// DefaultBucketDuration controls the timeline aggregation granularity.
 	DefaultBucketDuration = time.Hour
 
@@ -32,9 +34,10 @@ const (
 
 // Config controls the JSONL stats file path, rotation size, and optional clock.
 type Config struct {
-	Path     string
-	MaxBytes int64
-	Now      func() time.Time
+	Path            string
+	MaxBytes        int64
+	MaxArchiveFiles int
+	Now             func() time.Time
 }
 
 // Event is the raw append-only record written as one JSON object per JSONL line.
@@ -48,10 +51,11 @@ type Event struct {
 
 // Recorder owns the stats file and serializes reads, writes, reset, and rotation.
 type Recorder struct {
-	path     string
-	maxBytes int64
-	now      func() time.Time
-	mu       sync.Mutex
+	path            string
+	maxBytes        int64
+	maxArchiveFiles int
+	now             func() time.Time
+	mu              sync.Mutex
 }
 
 // Summary is the dashboard-ready aggregate returned by GET /api/stats.
@@ -84,6 +88,7 @@ type TimelineBucket struct {
 	Counts             map[string]int `json:"counts"`
 }
 
+// NewRecorder creates a stats recorder with defaults filled in and ensures the active stats file exists.
 func NewRecorder(config Config) (*Recorder, error) {
 	path := strings.TrimSpace(config.Path)
 	if path == "" {
@@ -93,15 +98,20 @@ func NewRecorder(config Config) (*Recorder, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxBytes
 	}
+	maxArchiveFiles := config.MaxArchiveFiles
+	if maxArchiveFiles <= 0 {
+		maxArchiveFiles = DefaultMaxArchiveFiles
+	}
 	now := config.Now
 	if now == nil {
 		now = time.Now
 	}
 
 	recorder := &Recorder{
-		path:     path,
-		maxBytes: maxBytes,
-		now:      now,
+		path:            path,
+		maxBytes:        maxBytes,
+		maxArchiveFiles: maxArchiveFiles,
+		now:             now,
 	}
 	if err := recorder.ensureFile(); err != nil {
 		return nil, err
@@ -109,6 +119,7 @@ func NewRecorder(config Config) (*Recorder, error) {
 	return recorder, nil
 }
 
+// Record normalizes one stats event, rotates the stats files if needed, and appends the event as JSONL.
 func (r *Recorder) Record(event Event) error {
 	if r == nil {
 		return nil
@@ -155,10 +166,12 @@ func (r *Recorder) Record(event Event) error {
 	return nil
 }
 
+// Summary returns dashboard-ready aggregates using the default timeline bucket duration.
 func (r *Recorder) Summary() (Summary, error) {
 	return r.SummaryWithBucket(DefaultBucketDuration)
 }
 
+// SummaryWithBucket reads all persisted events and aggregates them into the requested time windows.
 func (r *Recorder) SummaryWithBucket(bucketDuration time.Duration) (Summary, error) {
 	if r == nil {
 		return Summary{}, nil
@@ -177,6 +190,7 @@ func (r *Recorder) SummaryWithBucket(bucketDuration time.Duration) (Summary, err
 	return aggregate(events, bucketDuration), nil
 }
 
+// Events returns the raw persisted stats events from rotated files and the active file.
 func (r *Recorder) Events() ([]Event, error) {
 	if r == nil {
 		return nil, nil
@@ -187,6 +201,7 @@ func (r *Recorder) Events() ([]Event, error) {
 	return r.readEventsLocked()
 }
 
+// Reset clears the active stats file and removes all rotated stats files.
 func (r *Recorder) Reset() error {
 	if r == nil {
 		return nil
@@ -197,18 +212,26 @@ func (r *Recorder) Reset() error {
 	if err := r.ensureParentDirLocked(); err != nil {
 		return err
 	}
+	for _, path := range r.archivePathsLocked() {
+		if err := removeIfExists(path); err != nil {
+			return fmt.Errorf("reset rotated stats file: %w", err)
+		}
+	}
 	if err := os.WriteFile(r.path, nil, 0o600); err != nil {
 		return fmt.Errorf("reset stats file: %w", err)
 	}
 	return nil
 }
 
+// ensureFile serializes creation of the active stats file.
 func (r *Recorder) ensureFile() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.ensureFileLocked()
 }
 
+// ensureFileLocked creates the parent directory and active file if they do not already exist.
+// The caller must hold r.mu.
 func (r *Recorder) ensureFileLocked() error {
 	if err := r.ensureParentDirLocked(); err != nil {
 		return err
@@ -220,6 +243,8 @@ func (r *Recorder) ensureFileLocked() error {
 	return file.Close()
 }
 
+// ensureParentDirLocked creates the directory that will contain the stats files.
+// The caller must hold r.mu.
 func (r *Recorder) ensureParentDirLocked() error {
 	dir := filepath.Dir(r.path)
 	if dir == "." || dir == "" {
@@ -231,6 +256,8 @@ func (r *Recorder) ensureParentDirLocked() error {
 	return nil
 }
 
+// rotateIfNeededLocked rotates files before the next append would make the active file exceed its size limit.
+// The caller must hold r.mu.
 func (r *Recorder) rotateIfNeededLocked(nextBytes int64) error {
 	if r.maxBytes <= 0 {
 		return nil
@@ -245,19 +272,89 @@ func (r *Recorder) rotateIfNeededLocked(nextBytes int64) error {
 	if info.Size()+nextBytes <= r.maxBytes {
 		return nil
 	}
-	if err := os.WriteFile(r.path, nil, 0o600); err != nil {
-		return fmt.Errorf("rotate stats file: %w", err)
+	if err := r.rotateFilesLocked(); err != nil {
+		return fmt.Errorf("rotate stats files: %w", err)
 	}
 	return nil
 }
 
+// readEventsLocked reads rotated files and the active file in chronological archive order.
+// The caller must hold r.mu.
 func (r *Recorder) readEventsLocked() ([]Event, error) {
-	file, err := os.Open(r.path)
+	var events []Event
+	for _, path := range r.readPathsLocked() {
+		fileEvents, err := readEventsFile(path)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, fileEvents...)
+	}
+	return events, nil
+}
+
+// rotateFilesLocked shifts archives forward and moves the active file into the first archive slot.
+// The caller must hold r.mu.
+func (r *Recorder) rotateFilesLocked() error {
+	if r.maxArchiveFiles <= 0 {
+		if err := os.WriteFile(r.path, nil, 0o600); err != nil {
+			return fmt.Errorf("truncate active stats file: %w", err)
+		}
+		return nil
+	}
+
+	if err := removeIfExists(r.archivePathLocked(r.maxArchiveFiles)); err != nil {
+		return err
+	}
+	for index := r.maxArchiveFiles - 1; index >= 1; index-- {
+		source := r.archivePathLocked(index)
+		target := r.archivePathLocked(index + 1)
+		if err := renameIfExists(source, target); err != nil {
+			return err
+		}
+	}
+	if err := renameIfExists(r.path, r.archivePathLocked(1)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// readPathsLocked returns the file read order: oldest archive first, then the active file.
+// The caller must hold r.mu.
+func (r *Recorder) readPathsLocked() []string {
+	paths := make([]string, 0, r.maxArchiveFiles+1)
+	for index := r.maxArchiveFiles; index >= 1; index-- {
+		paths = append(paths, r.archivePathLocked(index))
+	}
+	paths = append(paths, r.path)
+	return paths
+}
+
+// archivePathsLocked returns all archive paths in reset order, starting from the newest archive.
+// The caller must hold r.mu.
+func (r *Recorder) archivePathsLocked() []string {
+	paths := make([]string, 0, r.maxArchiveFiles)
+	for index := 1; index <= r.maxArchiveFiles; index++ {
+		paths = append(paths, r.archivePathLocked(index))
+	}
+	return paths
+}
+
+// archivePathLocked builds the numbered archive path while preserving the active file extension.
+// The caller must hold r.mu.
+func (r *Recorder) archivePathLocked(index int) string {
+	extension := filepath.Ext(r.path)
+	base := strings.TrimSuffix(r.path, extension)
+	return fmt.Sprintf("%s.%d%s", base, index, extension)
+}
+
+// readEventsFile parses one JSONL stats file into events and ignores missing files.
+func readEventsFile(path string) ([]Event, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("open stats file: %w", err)
+		return nil, fmt.Errorf("open stats file %q: %w", path, err)
 	}
 	defer file.Close()
 
@@ -273,17 +370,40 @@ func (r *Recorder) readEventsLocked() ([]Event, error) {
 		}
 		var event Event
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			return nil, fmt.Errorf("parse stats event line %d: %w", lineNumber, err)
+			return nil, fmt.Errorf("parse stats event %s line %d: %w", path, lineNumber, err)
 		}
 		event.Counts = cleanCounts(event.Counts)
 		events = append(events, event)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read stats file: %w", err)
+		return nil, fmt.Errorf("read stats file %q: %w", path, err)
 	}
 	return events, nil
 }
 
+// removeIfExists removes a file and treats an already-missing file as success.
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// renameIfExists renames a file only when the source exists.
+func renameIfExists(source, target string) error {
+	if _, err := os.Stat(source); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := os.Rename(source, target); err != nil {
+		return err
+	}
+	return nil
+}
+
+// aggregate converts raw events into total counters, sorted type counts, and timeline buckets.
 func aggregate(events []Event, bucketDuration time.Duration) Summary {
 	summary := Summary{}
 	countsByType := make(map[string]int)
@@ -331,6 +451,7 @@ func aggregate(events []Event, bucketDuration time.Duration) Summary {
 	return summary
 }
 
+// addCounts merges positive entity counts into an aggregate map.
 func addCounts(target map[string]int, source map[string]int) {
 	for entityType, count := range source {
 		if count <= 0 {
@@ -340,6 +461,7 @@ func addCounts(target map[string]int, source map[string]int) {
 	}
 }
 
+// cleanCounts trims entity names, removes invalid counts, and merges duplicate entity types.
 func cleanCounts(counts map[string]int) map[string]int {
 	cleaned := make(map[string]int)
 	for entityType, count := range counts {
@@ -352,6 +474,7 @@ func cleanCounts(counts map[string]int) map[string]int {
 	return cleaned
 }
 
+// totalCounts sums the positive replacement counts in an entity-count map.
 func totalCounts(counts map[string]int) int {
 	total := 0
 	for _, count := range counts {
@@ -362,6 +485,7 @@ func totalCounts(counts map[string]int) int {
 	return total
 }
 
+// sortedTypeCounts returns entity counts sorted by descending count and then by type name.
 func sortedTypeCounts(counts map[string]int) []TypeCount {
 	result := make([]TypeCount, 0, len(counts))
 	for entityType, count := range counts {
@@ -376,6 +500,7 @@ func sortedTypeCounts(counts map[string]int) []TypeCount {
 	return result
 }
 
+// sortedTimelineBuckets returns timeline buckets ordered from oldest to newest.
 func sortedTimelineBuckets(buckets map[time.Time]*TimelineBucket) []TimelineBucket {
 	result := make([]TimelineBucket, 0, len(buckets))
 	for _, bucket := range buckets {
