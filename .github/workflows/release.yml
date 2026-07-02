@@ -86,7 +86,8 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version=$(node -p "require('./package.json').version")
+            base_version=$(node -p "require('./package.json').version")
+            version="${base_version}-main.${GITHUB_RUN_NUMBER}"
           fi
           mkdir -p dist
           asset_name="klovys99_${version}_${GOOS}_${GOARCH}${{ matrix.extension }}"
@@ -101,7 +102,7 @@ jobs:
 
   release:
     needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -117,11 +118,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+            if gh release view "$release_tag" >/dev/null 2>&1; then
+              gh release upload "$release_tag" dist/* --clobber
+            else
+              gh release create "$release_tag" dist/* --verify-tag --generate-notes
+            fi
+          else
+            base_version=$(node -p "require('./package.json').version")
+            release_tag="v${base_version}-main.${GITHUB_RUN_NUMBER}"
+            gh release create "$release_tag" dist/* --target "$GITHUB_SHA" --generate-notes --prerelease
+          fi
 
   npm-publish:
     needs: release
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     env:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -139,4 +151,17 @@ jobs:
         if: ${{ env.NPM_TOKEN != '' }}
         env:
           NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            base_version=$(node -p "require('./package.json').version")
+            package_version="${base_version}-main.${GITHUB_RUN_NUMBER}"
+            npm version --no-git-tag-version "$package_version"
+            npm publish --access public --tag main
+          else
+            package_version=$(node -p "require('./package.json').version")
+            if npm view "klovys99@${package_version}" version >/dev/null 2>&1; then
+              echo "npm version ${package_version} is already published, skipping publish"
+              exit 0
+            fi
+            npm publish --access public
+          fi
