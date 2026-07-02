@@ -59,7 +59,14 @@ npm install
 ```
 
 `npm install` runs a `postinstall` step that builds the Go proxy into `dist/`
-and exposes the CLI entrypoint `klovys99`.
+and exposes the CLI entrypoints `klovys99` and `klovis`. `klovys99` is the
+preferred name and `klovis` remains available for compatibility.
+
+For local execution from an unpublished checkout, use:
+
+```sh
+npm run cli -- configure claude
+```
 
 If you want the install step to also update your client configuration
 immediately:
@@ -77,6 +84,18 @@ Configure one or both clients to point to Klovys99:
 ```sh
 npx klovys99 configure codex
 npx klovys99 configure claude
+```
+
+The historical command name still works:
+
+```sh
+npx klovis configure claude
+```
+
+From a local checkout that is not published to npm, prefer:
+
+```sh
+npm run cli -- configure claude
 ```
 
 Or configure both at once:
