@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )

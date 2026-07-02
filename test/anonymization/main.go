@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	"github.com/Korbicorp/klovis/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/detectors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )

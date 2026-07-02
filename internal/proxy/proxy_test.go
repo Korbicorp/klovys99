@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	"github.com/Korbicorp/klovis/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/detectors"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )

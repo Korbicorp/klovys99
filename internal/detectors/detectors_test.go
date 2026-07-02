@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/dlclark/regexp2"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"

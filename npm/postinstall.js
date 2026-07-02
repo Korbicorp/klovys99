@@ -10,7 +10,7 @@ const packageRoot = path.resolve(__dirname, "..");
 
 function main() {
   if (process.env.KLOVIS_SKIP_BUILD === "true") {
-    process.stdout.write("Skipping Klovis Go build because KLOVIS_SKIP_BUILD=true\n");
+    process.stdout.write("Skipping Klovys99 Go build because KLOVIS_SKIP_BUILD=true\n");
     return;
   }
 
@@ -31,11 +31,11 @@ function main() {
 }
 
 function buildBinary() {
-  const binaryName = process.platform === "win32" ? "klovis.exe" : "klovis";
+  const binaryName = process.platform === "win32" ? "klovys99.exe" : "klovys99";
   const binaryPath = path.join(packageRoot, "dist", binaryName);
   fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
 
-  const result = spawnSync("go", ["build", "-o", binaryPath, "./cmd/klovis"], {
+  const result = spawnSync("go", ["build", "-o", binaryPath, "./cmd/klovys99"], {
     cwd: packageRoot,
     stdio: "inherit",
     env: process.env,

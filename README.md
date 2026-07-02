@@ -13,7 +13,7 @@ pseudonym tokens before the request leaves the machine.
 
 - Local reverse proxy for Anthropic and OpenAI-compatible JSON requests.
 - `npm install` workflow that builds the Go binary locally and exposes a
-  `klovis` command.
+  `klovys99` command.
 - Client configuration helpers for Codex and Claude Code.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
@@ -32,7 +32,7 @@ pseudonym tokens before the request leaves the machine.
 - Network access on first startup to download the default Gitleaks and Presidio
   rule sources.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
-  client you route through Klovis.
+  client you route through Klovys99.
 - Ollama, only when `KLOVIS_LLM_ENABLED=true`.
 
 Check your local tooling:
@@ -59,7 +59,7 @@ npm install
 ```
 
 `npm install` runs a `postinstall` step that builds the Go proxy into `dist/`
-and exposes the CLI entrypoint `klovis`.
+and exposes the CLI entrypoint `klovys99`.
 
 If you want the install step to also update your client configuration
 immediately:
@@ -72,26 +72,26 @@ Supported values are `codex`, `claude`, and `both`.
 
 ## Quick Start
 
-Configure one or both clients to point to Klovis:
+Configure one or both clients to point to Klovys99:
 
 ```sh
-npx klovis configure codex
-npx klovis configure claude
+npx klovys99 configure codex
+npx klovys99 configure claude
 ```
 
 Or configure both at once:
 
 ```sh
-npx klovis configure both
+npx klovys99 configure both
 ```
 
 Then start the proxy:
 
 ```sh
-npx klovis start
+npx klovys99 start
 ```
 
-By default, Klovis listens on `http://127.0.0.1:8080` and exposes these local
+By default, Klovys99 listens on `http://127.0.0.1:8080` and exposes these local
 routes:
 
 - `http://127.0.0.1:8080/anthropic` for Claude Code and other Anthropic clients
@@ -106,7 +106,7 @@ The historical unprefixed route still exists and forwards to
 ### Codex
 
 ```sh
-npx klovis configure codex
+npx klovys99 configure codex
 ```
 
 This updates `~/.codex/config.toml` and sets:
@@ -118,7 +118,7 @@ openai_base_url = "http://127.0.0.1:8080/openai/v1"
 ### Claude Code
 
 ```sh
-npx klovis configure claude
+npx klovys99 configure claude
 ```
 
 This updates `~/.claude/settings.json` and sets:
@@ -134,12 +134,12 @@ This updates `~/.claude/settings.json` and sets:
 If you want another listen URL written into both clients, pass `--base-url`:
 
 ```sh
-npx klovis configure both --base-url http://127.0.0.1:9090
+npx klovys99 configure both --base-url http://127.0.0.1:9090
 ```
 
 ## Quick API Checks
 
-Anthropic-style request through Klovis:
+Anthropic-style request through Klovys99:
 
 ```sh
 curl http://127.0.0.1:8080/anthropic/v1/messages \
@@ -158,7 +158,7 @@ curl http://127.0.0.1:8080/anthropic/v1/messages \
   }'
 ```
 
-OpenAI Responses-style request through Klovis:
+OpenAI Responses-style request through Klovys99:
 
 ```sh
 curl http://127.0.0.1:8080/openai/v1/responses \
@@ -175,7 +175,7 @@ replaced by pseudonym tokens such as `[EMAIL_1]`.
 
 ## How It Works
 
-Klovis reads each incoming JSON request body, anonymizes supported prompt
+Klovys99 reads each incoming JSON request body, anonymizes supported prompt
 content, then forwards the modified request to the configured upstream.
 
 The proxy anonymizes:
@@ -198,7 +198,7 @@ are equal, the longest match wins.
 
 ## Configuration
 
-Klovis runtime is configured with environment variables.
+Klovys99 runtime is configured with environment variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -220,7 +220,7 @@ The npm wrapper also honors:
 | Variable | Description |
 | --- | --- |
 | `KLOVIS_CLIENT` | Client to configure during `npm install`: `codex`, `claude`, or `both`. |
-| `KLOVIS_BASE_URL` | Base URL written by `klovis configure` or `npm install` auto-configuration. |
+| `KLOVIS_BASE_URL` | Base URL written by `klovys99 configure` or `npm install` auto-configuration. |
 | `KLOVIS_SKIP_BUILD` | Skips the Go build during `postinstall` when set to `true`. |
 | `KLOVIS_SKIP_CONFIGURE` | Skips client configuration during `postinstall` when set to `true`. |
 
@@ -228,18 +228,18 @@ Boolean variables accept only `true` or `false`.
 
 ## Logs
 
-Klovis writes structured application logs to stdout by default. To write logs to
+Klovys99 writes structured application logs to stdout by default. To write logs to
 `proxy.log` instead, enable file logging:
 
 ```sh
-KLOVIS_LOG_TO_FILE=true npx klovis start
+KLOVIS_LOG_TO_FILE=true npx klovys99 start
 ```
 
 To also inspect the final request body sent upstream after anonymization, enable
 debug logging:
 
 ```sh
-KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true npx klovis start
+KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true npx klovys99 start
 ```
 
 Use debug mode carefully, because it records the anonymized upstream request body
@@ -250,33 +250,33 @@ in whichever log destination is configured.
 LLM extraction is disabled by default. Enable it with:
 
 ```sh
-KLOVIS_LLM_ENABLED=true npx klovis start
+KLOVIS_LLM_ENABLED=true npx klovys99 start
 ```
 
-When enabled, Klovis checks the Ollama connection during startup and runs a small
+When enabled, Klovys99 checks the Ollama connection during startup and runs a small
 extraction probe before accepting traffic. If startup verification fails, the
 proxy exits.
 
-By default, Klovis does not start Ollama for you. Start Ollama separately before
+By default, Klovys99 does not start Ollama for you. Start Ollama separately before
 enabling LLM extraction, or opt in to local autostart:
 
 ```sh
-KLOVIS_LLM_ENABLED=true KLOVIS_LLM_AUTOSTART=true npx klovis start
+KLOVIS_LLM_ENABLED=true KLOVIS_LLM_AUTOSTART=true npx klovys99 start
 ```
 
 Autostart only applies to local Ollama URLs such as `http://localhost:11434` or
-loopback IP addresses. Remote Ollama URLs are never started by Klovis.
+loopback IP addresses. Remote Ollama URLs are never started by Klovys99.
 
 Deterministic detectors remain the baseline. LLM matches are added when
 available and have lower priority than deterministic regex, Gitleaks, and
-Presidio matches. If the LLM fails during a request, Klovis logs the technical
+Presidio matches. If the LLM fails during a request, Klovys99 logs the technical
 error and continues with deterministic anonymization.
 
 ## Detectors
 
-Klovis combines built-in detectors with external rules loaded at startup.
+Klovys99 combines built-in detectors with external rules loaded at startup.
 External rule payloads are cached for 24 hours in the user cache directory under
-`klovis/external-rules`.
+`klovys99/external-rules`.
 
 | Category | Source | Priority | Description |
 | --- | --- | ---: | --- |
@@ -310,15 +310,15 @@ features behave differently upstream. In practice:
   `api.anthropic.com`.
 - Tool search behavior changes when routing through a proxy. If you need
   deferred tool references, set `ENABLE_TOOL_SEARCH=true` in your Claude
-  environment because Klovis forwards `tool_reference` blocks unchanged.
+  environment because Klovys99 forwards `tool_reference` blocks unchanged.
 
 ## Development
 
 Clone the repository and install both Node and Go dependencies:
 
 ```sh
-git clone https://github.com/Korbicorp/klovis.git
-cd klovis
+git clone https://github.com/Korbicorp/klovys99.git
+cd klovys99
 npm install
 go mod download
 ```
@@ -333,7 +333,7 @@ node --test npm/test/*.test.js
 Run the proxy locally without npm:
 
 ```sh
-go run ./cmd/klovis
+go run ./cmd/klovys99
 ```
 
 Format Go code before submitting changes:
@@ -344,7 +344,7 @@ gofmt -w ./cmd ./internal
 
 ## Security Notes
 
-Klovis reduces the amount of sensitive data sent upstream, but it is not a
+Klovys99 reduces the amount of sensitive data sent upstream, but it is not a
 formal data-loss-prevention guarantee. Review detector coverage for your own
 threat model before using it with production data.
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/detectors"
-	"github.com/Korbicorp/klovis/internal/proxy"
+	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/proxy"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )

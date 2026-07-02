@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/dlclark/regexp2"
 	"gopkg.in/yaml.v3"
 )

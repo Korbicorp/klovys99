@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 )
 
 const DefaultExternalRulesCacheTTL = 24 * time.Hour
@@ -63,7 +63,7 @@ func defaultExternalRulesCacheDir() string {
 	if err != nil || cacheRoot == "" {
 		return ""
 	}
-	return filepath.Join(cacheRoot, "klovis", "external-rules")
+	return filepath.Join(cacheRoot, "klovys99", "external-rules")
 }
 
 // loadCachedRemoteBody loads a remote rule file with a disk-cache layer.

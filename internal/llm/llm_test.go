@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 )
 
 type fakeExtractor struct {

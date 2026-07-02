@@ -1,4 +1,4 @@
-module github.com/Korbicorp/klovis
+module github.com/Korbicorp/klovys99
 
 go 1.25.0
 

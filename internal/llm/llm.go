@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	ollamaclient "github.com/Korbicorp/klovis/internal/ollama/client"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	ollamaclient "github.com/Korbicorp/klovys99/internal/ollama/client"
 	"github.com/rs/zerolog/log"
 )
 

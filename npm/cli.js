@@ -93,24 +93,24 @@ function runBinary(args) {
 }
 
 function resolveBinaryPath() {
-  const binaryName = process.platform === "win32" ? "klovis.exe" : "klovis";
+  const binaryName = process.platform === "win32" ? "klovys99.exe" : "klovys99";
   const binaryPath = path.join(packageRoot, "dist", binaryName);
   if (!fs.existsSync(binaryPath)) {
     throw new Error(
-      `missing compiled binary at ${binaryPath}. Run npm install again or build with go build -o dist/${binaryName} ./cmd/klovis.`,
+      `missing compiled binary at ${binaryPath}. Run npm install again or build with go build -o dist/${binaryName} ./cmd/klovys99.`,
     );
   }
   return binaryPath;
 }
 
 function printHelp() {
-  process.stdout.write(`Klovis
+  process.stdout.write(`Klovys99
 
 Usage:
-  klovis start
-  klovis configure codex [--base-url http://127.0.0.1:8080]
-  klovis configure claude [--base-url http://127.0.0.1:8080]
-  klovis configure both [--base-url http://127.0.0.1:8080]
+  klovys99 start
+  klovys99 configure codex [--base-url http://127.0.0.1:8080]
+  klovys99 configure claude [--base-url http://127.0.0.1:8080]
+  klovys99 configure both [--base-url http://127.0.0.1:8080]
 `);
 }
 
