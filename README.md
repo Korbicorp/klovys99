@@ -12,8 +12,8 @@ pseudonym tokens before the request leaves the machine.
 ## Features
 
 - Local reverse proxy for Anthropic and OpenAI-compatible JSON requests.
-- `npm install` workflow that builds the Go binary locally and exposes a
-  `klovys99` command.
+- `npm install` workflow that downloads a prebuilt binary for the current OS
+  and architecture and exposes a `klovys99` command.
 - Client configuration helpers for Codex and Claude Code.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
@@ -28,12 +28,14 @@ pseudonym tokens before the request leaves the machine.
 ## Requirements
 
 - Node.js 18 or newer.
-- Go 1.25 or newer.
 - Network access on first startup to download the default Gitleaks and Presidio
   rule sources.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
   client you route through Klovys99.
 - Ollama, only when `KLOVIS_LLM_ENABLED=true`.
+
+Go 1.25 or newer is only required if you work from a source checkout or build
+release binaries yourself.
 
 Check your local tooling:
 
@@ -58,13 +60,24 @@ From the repository root:
 npm install
 ```
 
-`npm install` runs a `postinstall` step that builds the Go proxy into `dist/`
-and exposes the CLI entrypoints `klovys99` and `klovis`. `klovys99` is the
-preferred name and `klovis` remains available for compatibility.
+`npm install klovys99` runs a `postinstall` step that downloads the matching
+binary from the GitHub release for the package version into `dist/` and exposes
+the CLI entrypoints `klovys99` and `klovis`. `klovys99` is the preferred name
+and `klovis` remains available for compatibility.
+
+Supported prebuilt targets:
+
+- macOS `arm64`
+- macOS `x64`
+- Linux `arm64`
+- Linux `x64`
+- Windows `arm64`
+- Windows `x64`
 
 For local execution from an unpublished checkout, use:
 
 ```sh
+npm install
 npm run cli -- configure claude
 ```
 
@@ -240,7 +253,8 @@ The npm wrapper also honors:
 | --- | --- |
 | `KLOVIS_CLIENT` | Client to configure during `npm install`: `codex`, `claude`, or `both`. |
 | `KLOVIS_BASE_URL` | Base URL written by `klovys99 configure` or `npm install` auto-configuration. |
-| `KLOVIS_SKIP_BUILD` | Skips the Go build during `postinstall` when set to `true`. |
+| `KLOVIS_SKIP_DOWNLOAD` | Skips the prebuilt binary download during `postinstall` when set to `true`. |
+| `KLOVIS_SKIP_BUILD` | Skips the local Go build fallback during `postinstall` when set to `true`. |
 | `KLOVIS_SKIP_CONFIGURE` | Skips client configuration during `postinstall` when set to `true`. |
 
 Boolean variables accept only `true` or `false`.
@@ -341,6 +355,10 @@ cd klovys99
 npm install
 go mod download
 ```
+
+Tagged releases build one binary per supported OS and architecture in GitHub
+Actions. If `NPM_TOKEN` is configured in repository secrets, the same tag
+workflow also publishes the npm package after uploading the release assets.
 
 Run the test suites:
 

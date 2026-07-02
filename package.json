@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "description": "Local prompt anonymizing proxy for Codex and Claude Code",
   "license": "MIT",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "npm/cli.js",
+    "npm/postinstall.js",
+    "npm/lib/"
+  ],
   "bin": {
     "klovis": "npm/cli.js",
     "klovys99": "npm/cli.js"

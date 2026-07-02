@@ -97,7 +97,8 @@ function resolveBinaryPath() {
   const binaryPath = path.join(packageRoot, "dist", binaryName);
   if (!fs.existsSync(binaryPath)) {
     throw new Error(
-      `missing compiled binary at ${binaryPath}. Run npm install again or build with go build -o dist/${binaryName} ./cmd/klovys99.`,
+      `missing installed binary at ${binaryPath}. Run npm install again. ` +
+        `From a source checkout, you can also build with go build -o dist/${binaryName} ./cmd/klovys99.`,
     );
   }
   return binaryPath;
