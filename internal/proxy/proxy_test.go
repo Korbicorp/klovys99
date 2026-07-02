@@ -140,24 +140,18 @@ func TestSessionPromptAnonymizerLogsOnlyStats(t *testing.T) {
 	}
 }
 
-func TestSessionPromptAnonymizerAnonymizesSystemPrompts(t *testing.T) {
+func TestSessionPromptAnonymizerPreservesTopLevelSystemPrompts(t *testing.T) {
 	body := []byte(`{"system":[{"type":"text","text":"rules <session>Contact alice@example.com</session> keep alice@example.com"}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
-	logOutput := logs.String()
 
-	if !strings.Contains(anonymizedBody, `rules <session>Contact [EMAIL_1]</session> keep [EMAIL_1]`) {
-		t.Fatalf("body = %q, want system content anonymized", anonymizedBody)
+	if anonymizedBody != string(body) {
+		t.Fatalf("body = %q, want top-level system preserved", anonymizedBody)
 	}
-	if !strings.Contains(logOutput, `"EMAIL":2`) {
-		t.Fatalf("logs = %q, want anonymized stats", logOutput)
-	}
-	for _, unexpected := range []string{"alice@example.com", "[EMAIL_1]", "prompt_original", "prompt_anonymized"} {
-		if strings.Contains(logOutput, unexpected) {
-			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
-		}
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
 	}
 }
 
@@ -189,7 +183,7 @@ func TestSessionPromptAnonymizerAnonymizesUserContentOutsideSession(t *testing.T
 }
 
 func TestSessionPromptAnonymizerLogsMultipleSessionsWithStableTokens(t *testing.T) {
-	body := []byte(`{"text":"<session>Email: alice@example.com</session> mid <session>Email: bob@example.com and alice@example.com</session>"}`)
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<session>Email: alice@example.com</session> mid <session>Email: bob@example.com and alice@example.com</session>"}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -216,11 +210,11 @@ func TestSessionPromptAnonymizerAnonymizesNonUserTextContext(t *testing.T) {
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
 
-	if !strings.Contains(logs.String(), `"EMAIL":1`) {
-		t.Fatalf("logs = %q, want email stats", logs.String())
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
 	}
-	if strings.Contains(anonymizedBody, "alice@example.com") || !strings.Contains(anonymizedBody, "[EMAIL_1] outside session") {
-		t.Fatalf("body = %q, want system text anonymized", anonymizedBody)
+	if anonymizedBody != string(body) {
+		t.Fatalf("body = %q, want top-level system text preserved", anonymizedBody)
 	}
 }
 
@@ -251,7 +245,7 @@ func TestSessionPromptAnonymizerAnonymizesDocumentTextSource(t *testing.T) {
 }
 
 func TestSessionPromptAnonymizerAnonymizesToolResults(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"},{"type":"tool_result","tool_use_id":"toolu_456","content":[{"type":"text","text":"IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}]}`)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_123","name":"Read","input":{"file_path":"/tmp/a.txt"}},{"type":"tool_use","id":"toolu_456","name":"Grep","input":{"pattern":"IBAN"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"},{"type":"tool_result","tool_use_id":"toolu_456","content":[{"type":"text","text":"IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -272,8 +266,23 @@ func TestSessionPromptAnonymizerAnonymizesToolResults(t *testing.T) {
 	}
 }
 
+func TestSessionPromptAnonymizerPreservesNonReadToolResults(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_123","name":"Bash","input":{"command":"date"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"}]}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
+
+	if anonymizedBody != string(body) {
+		t.Fatalf("body = %q, want non-read tool result preserved", anonymizedBody)
+	}
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
+	}
+}
+
 func TestSessionPromptAnonymizerKeepsTokensStableAcrossRequestContexts(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Email alice@example.com"},{"type":"document","source":{"type":"text","data":"File owner alice@example.com"}},{"type":"tool_result","tool_use_id":"toolu_123","content":"Tool saw alice@example.com"}]}]}`)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_123","name":"Read","input":{"file_path":"/tmp/a.txt"}}]},{"role":"user","content":[{"type":"text","text":"Email alice@example.com"},{"type":"document","source":{"type":"text","data":"File owner alice@example.com"}},{"type":"tool_result","tool_use_id":"toolu_123","content":"Tool saw alice@example.com"}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -291,7 +300,7 @@ func TestSessionPromptAnonymizerKeepsTokensStableAcrossRequestContexts(t *testin
 }
 
 func TestSessionPromptAnonymizerPreservesMetadataAndBase64Sources(t *testing.T) {
-	body := []byte(`{"model":"claude","id":"msg_alice@example.com","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_alice@example.com","name":"lookup_alice@example.com","content":"Email alice@example.com"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YWxpY2VAZXhhbXBsZS5jb20="}}]}]}`)
+	body := []byte(`{"model":"claude","id":"msg_alice@example.com","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_alice@example.com","name":"Read","input":{"file_path":"/tmp/a.txt"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_alice@example.com","name":"lookup_alice@example.com","content":"Email alice@example.com"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YWxpY2VAZXhhbXBsZS5jb20="}}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -325,8 +334,8 @@ func TestSessionPromptAnonymizerDoesNotKeepTokensAcrossCalls(t *testing.T) {
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 
-	promptAnonymizer.anonymize(context.Background(), logger, `{"text":"<session>Email: alice@example.com</session>"}`)
-	second := promptAnonymizer.anonymize(context.Background(), logger, `{"text":"<session>Email: bob@example.com</session>"}`)
+	promptAnonymizer.anonymize(context.Background(), logger, `{"messages":[{"role":"user","content":[{"type":"text","text":"<session>Email: alice@example.com</session>"}]}]}`)
+	second := promptAnonymizer.anonymize(context.Background(), logger, `{"messages":[{"role":"user","content":[{"type":"text","text":"<session>Email: bob@example.com</session>"}]}]}`)
 
 	if !strings.Contains(second, `<session>Email: [EMAIL_1]</session>`) {
 		t.Fatalf("body = %q, want token state isolated across calls", second)

@@ -20,8 +20,6 @@ import (
 const (
 	DefaultLogPath      = "proxy.log"
 	DefaultAnthropicURL = "https://api.anthropic.com"
-	sessionOpenTag      = "<session>"
-	sessionCloseTag     = "</session>"
 )
 
 var metadataKeys = map[string]struct{}{
@@ -41,11 +39,12 @@ type sessionPromptAnonymizer struct {
 }
 
 type promptAnonymizationRun struct {
-	anonymizer *sessionPromptAnonymizer
-	engine     *anonymizer.Run
-	ctx        context.Context
-	logger     zerolog.Logger
-	stats      map[anonymizer.EntityType]int
+	anonymizer  *sessionPromptAnonymizer
+	engine      *anonymizer.Run
+	ctx         context.Context
+	logger      zerolog.Logger
+	stats       map[anonymizer.EntityType]int
+	readToolIDs map[string]struct{}
 }
 
 type TextAnonymizer interface {
@@ -173,6 +172,7 @@ func (a *sessionPromptAnonymizer) anonymize(ctx context.Context, logger zerolog.
 	}
 
 	run := a.newRun(ctx, logger)
+	run.readToolIDs = collectReadToolIDs(payload)
 	anonymized, changed := run.anonymizeRequestValue(payload, anonymizationContext{})
 	if !changed {
 		return body
@@ -199,7 +199,8 @@ func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Log
 }
 
 type anonymizationContext struct {
-	textValue bool
+	conversationContent bool
+	textValue           bool
 }
 
 func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonymizationContext) (any, bool) {
@@ -223,9 +224,7 @@ func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonym
 				continue
 			}
 
-			itemContext := anonymizationContext{
-				textValue: isTextValue(key, typed, context),
-			}
+			itemContext := r.childContext(key, typed, context)
 			anonymized, itemChanged := r.anonymizeRequestValue(item, itemContext)
 			if itemChanged {
 				typed[key] = anonymized
@@ -243,24 +242,54 @@ func isMetadataKey(key string) bool {
 	return ok
 }
 
-func isTextValue(key string, parent map[string]any, context anonymizationContext) bool {
-	if key == "data" {
-		return stringMapValue(parent, "type") == "text"
+func (r *promptAnonymizationRun) childContext(key string, parent map[string]any, context anonymizationContext) anonymizationContext {
+	if key == "content" && isConversationMessage(parent) {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           isStringContent(parent, key),
+		}
 	}
 
 	if key == "source" {
-		return false
+		return anonymizationContext{
+			conversationContent: context.conversationContent,
+		}
 	}
 
 	if key == "content" && stringMapValue(parent, "type") == "tool_result" {
-		return true
+		return anonymizationContext{
+			conversationContent: context.conversationContent,
+			textValue:           r.isReadToolResult(parent),
+		}
 	}
 
-	if isTextualKey(key) {
-		return true
+	if key == "text" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
 	}
 
-	return context.textValue && !isMetadataKey(key)
+	if key == "data" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
+	}
+
+	return anonymizationContext{
+		conversationContent: context.conversationContent,
+		textValue:           context.textValue && !isMetadataKey(key),
+	}
+}
+
+func isConversationMessage(value map[string]any) bool {
+	switch stringMapValue(value, "role") {
+	case "user", "assistant":
+		return true
+	default:
+		return false
+	}
 }
 
 func stringMapValue(value map[string]any, key string) string {
@@ -268,9 +297,47 @@ func stringMapValue(value map[string]any, key string) string {
 	return typed
 }
 
-func isTextualKey(key string) bool {
-	switch key {
-	case "content", "error", "input", "output", "result", "system", "text":
+func isStringContent(value map[string]any, key string) bool {
+	_, ok := value[key].(string)
+	return ok
+}
+
+func (r *promptAnonymizationRun) isReadToolResult(value map[string]any) bool {
+	toolUseID := stringMapValue(value, "tool_use_id")
+	if toolUseID == "" {
+		return false
+	}
+	_, ok := r.readToolIDs[toolUseID]
+	return ok
+}
+
+func collectReadToolIDs(value any) map[string]struct{} {
+	ids := make(map[string]struct{})
+	collectReadToolIDsInto(value, ids)
+	return ids
+}
+
+func collectReadToolIDsInto(value any, ids map[string]struct{}) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			collectReadToolIDsInto(item, ids)
+		}
+	case map[string]any:
+		if stringMapValue(typed, "type") == "tool_use" && isFileReadToolName(stringMapValue(typed, "name")) {
+			if id := stringMapValue(typed, "id"); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for _, item := range typed {
+			collectReadToolIDsInto(item, ids)
+		}
+	}
+}
+
+func isFileReadToolName(name string) bool {
+	switch strings.ToLower(name) {
+	case "read", "notebookread", "glob", "grep", "ls":
 		return true
 	default:
 		return false
@@ -281,7 +348,7 @@ func (r *promptAnonymizationRun) anonymizeString(value string, textValue bool) (
 	if textValue {
 		return r.anonymizeTextValue(value)
 	}
-	return r.anonymizeSessionPromptString(value)
+	return value, false
 }
 
 func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
@@ -291,43 +358,6 @@ func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool)
 	}
 	r.addStats(result)
 	return anonymized, true
-}
-
-func (r *promptAnonymizationRun) anonymizeSessionPromptString(value string) (string, bool) {
-	var builder strings.Builder
-	changed := false
-	remaining := value
-
-	for {
-		openIndex := strings.Index(remaining, sessionOpenTag)
-		if openIndex < 0 {
-			builder.WriteString(remaining)
-			break
-		}
-
-		contentStart := openIndex + len(sessionOpenTag)
-		closeIndex := strings.Index(remaining[contentStart:], sessionCloseTag)
-		if closeIndex < 0 {
-			builder.WriteString(remaining)
-			break
-		}
-
-		contentEnd := contentStart + closeIndex
-		prompt := remaining[contentStart:contentEnd]
-		anonymized, result := r.anonymizeText(prompt)
-		r.addStats(result)
-
-		builder.WriteString(remaining[:contentStart])
-		builder.WriteString(anonymized)
-		builder.WriteString(sessionCloseTag)
-		remaining = remaining[contentEnd+len(sessionCloseTag):]
-		changed = true
-	}
-
-	if !changed {
-		return value, false
-	}
-	return builder.String(), true
 }
 
 func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {
