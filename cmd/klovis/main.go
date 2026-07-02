@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -43,6 +45,14 @@ const (
 	defaultLLMModel         = llm.DefaultModel
 	defaultStatsPath        = statlog.DefaultPath
 	defaultStatsMaxBytes    = statlog.DefaultMaxBytes
+)
+
+//go:embed dashboard/index.html dashboard/assets/*
+var dashboardFiles embed.FS
+
+var (
+	dashboardIndexHTML = mustDashboardFile("dashboard/index.html")
+	dashboardAssetsFS  = mustDashboardSubFS("dashboard/assets")
 )
 
 func main() {
@@ -198,6 +208,7 @@ type statsStore interface {
 func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+	registerDashboardRoutes(router)
 	if statsStore != nil {
 		router.GET("/api/stats", func(ctx *gin.Context) {
 			summary, err := statsStore.Summary()
@@ -221,9 +232,40 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore) http.Ha
 			ctx.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
+		if path == "/dashboard" || strings.HasPrefix(path, "/dashboard/") {
+			ctx.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
 		proxyHandler(ctx)
 	})
 	return router
+}
+
+func registerDashboardRoutes(router *gin.Engine) {
+	router.GET("/dashboard", serveDashboardIndex)
+	router.GET("/dashboard/", serveDashboardIndex)
+	router.StaticFS("/dashboard/assets", dashboardAssetsFS)
+}
+
+func serveDashboardIndex(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
+	ctx.Data(http.StatusOK, "text/html; charset=utf-8", dashboardIndexHTML)
+}
+
+func mustDashboardFile(path string) []byte {
+	content, err := dashboardFiles.ReadFile(path)
+	if err != nil {
+		panic(fmt.Sprintf("load embedded dashboard file %q: %v", path, err))
+	}
+	return content
+}
+
+func mustDashboardSubFS(dir string) http.FileSystem {
+	subFS, err := fs.Sub(dashboardFiles, dir)
+	if err != nil {
+		panic(fmt.Sprintf("load embedded dashboard filesystem %q: %v", dir, err))
+	}
+	return http.FS(subFS)
 }
 
 func (a *application) Close() {

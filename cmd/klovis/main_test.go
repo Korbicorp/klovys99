@@ -454,6 +454,95 @@ func TestBuildApplicationServesStatsAPIBeforeProxy(t *testing.T) {
 	}
 }
 
+// TestBuildApplicationServesDashboardBeforeProxy verifies that the local dashboard is served by the proxy itself
+// and that missing dashboard routes are not accidentally forwarded to the upstream LLM provider.
+func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamHits++
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:    mustParseURL(t, upstream.URL),
+		Logger:    ptrLogger(zerolog.Nop()),
+		Detectors: noExternalDetectorsConfig(),
+		StatsPath: t.TempDir() + "/stats.jsonl",
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	dashboardResponse, err := server.Client().Get(server.URL + "/dashboard")
+	if err != nil {
+		t.Fatalf("call dashboard: %v", err)
+	}
+	defer dashboardResponse.Body.Close()
+	if dashboardResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want 200", dashboardResponse.StatusCode)
+	}
+	dashboardBody, err := io.ReadAll(dashboardResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard body: %v", err)
+	}
+	if got := string(dashboardBody); !strings.Contains(got, "klovys99 Anonymisation dashboard") ||
+		!strings.Contains(got, "Anonymisation dashboard") ||
+		!strings.Contains(got, "Protection coverage") ||
+		!strings.Contains(got, "Explore klovys99 Pro") ||
+		!strings.Contains(got, "https://klovys.fr/") ||
+		!strings.Contains(got, "/dashboard/assets/dashboard.js") {
+		t.Fatalf("dashboard body = %q, want embedded dashboard HTML", got)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard not proxied", upstreamHits)
+	}
+
+	cssResponse, err := server.Client().Get(server.URL + "/dashboard/assets/dashboard.css")
+	if err != nil {
+		t.Fatalf("call dashboard CSS: %v", err)
+	}
+	defer cssResponse.Body.Close()
+	if cssResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard CSS status = %d, want 200", cssResponse.StatusCode)
+	}
+	cssBody, err := io.ReadAll(cssResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard CSS: %v", err)
+	}
+	if got := string(cssBody); !strings.Contains(got, "--primary: #076cd8") {
+		t.Fatalf("dashboard CSS = %q, want klovys99 primary color", got)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard assets not proxied", upstreamHits)
+	}
+
+	missingDashboardResponse, err := server.Client().Get(server.URL + "/dashboard/unknown")
+	if err != nil {
+		t.Fatalf("call missing dashboard route: %v", err)
+	}
+	defer missingDashboardResponse.Body.Close()
+	if missingDashboardResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing dashboard status = %d, want 404", missingDashboardResponse.StatusCode)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want missing dashboard route not proxied", upstreamHits)
+	}
+
+	proxyResponse, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy route: %v", err)
+	}
+	defer proxyResponse.Body.Close()
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits = %d, want proxy route forwarded once", upstreamHits)
+	}
+}
+
 func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
 	_, err := buildApplication(context.Background(), runtimeConfig{
 		Target:     mustParseURL(t, "https://api.anthropic.com"),
