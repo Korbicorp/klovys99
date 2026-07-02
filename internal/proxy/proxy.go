@@ -99,13 +99,26 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			return
 		}
 
-		anonymizedBody := promptAnonymizer.anonymize(ctx.Request.Context(), logger, string(requestBody))
-		requestBody = []byte(anonymizedBody)
+		if shouldAnonymizeRequest(ctx.Request) {
+			requestBody = []byte(promptAnonymizer.anonymize(ctx.Request.Context(), logger, string(requestBody)))
+		}
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
-		logTrafficRequest(logger, anonymizedBody)
+		logTrafficRequest(logger, string(requestBody))
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
+}
+
+func shouldAnonymizeRequest(request *http.Request) bool {
+	if request.Method != http.MethodPost {
+		return false
+	}
+	switch request.URL.Path {
+	case "/v1/messages", "/v1/messages/count_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func newDirector(target *url.URL, defaultDirector func(*http.Request)) func(*http.Request) {

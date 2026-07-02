@@ -521,6 +521,99 @@ func TestProxyUsesLLMMatches(t *testing.T) {
 	}
 }
 
+func TestProxyAnonymizesMessagesCountTokensRequests(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	handler, err := NewProxyHandler(Config{
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     &logger,
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/v1/messages/count_tokens", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want count_tokens prompt anonymized", upstreamBody)
+	}
+	if !strings.Contains(upstreamBody, "Email [EMAIL_1]") {
+		t.Fatalf("upstream body = %q, want email token", upstreamBody)
+	}
+	if !strings.Contains(logs.String(), `"EMAIL":1`) {
+		t.Fatalf("logs = %q, want anonymized stats", logs.String())
+	}
+}
+
+func TestProxyDoesNotAnonymizeNonMessagesRequests(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	matchFinder := &fakeMatchFinder{
+		matches: []anonymizer.Match{
+			{Start: 8, End: 19, Type: anonymizer.EntityPersonName, Priority: 50, Normalized: "jean dupont"},
+		},
+	}
+	handler, err := NewProxyHandler(Config{
+		Target:      mustParseURL(t, upstream.URL),
+		Logger:      &logger,
+		Anonymizer:  newTestAnonymizer(),
+		MatchFinder: matchFinder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	requestBody := `{"messages":[{"role":"user","content":"Email alice@example.com and Jean Dupont"}]}`
+	response, err := server.Client().Post(server.URL+"/v1/models", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if upstreamBody != requestBody {
+		t.Fatalf("upstream body = %q, want original body %q", upstreamBody, requestBody)
+	}
+	if matchFinder.calls != 0 {
+		t.Fatalf("match finder calls = %d, want 0", matchFinder.calls)
+	}
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
+	}
+}
+
 func TestProxyFallsBackWhenLLMRequestFails(t *testing.T) {
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
