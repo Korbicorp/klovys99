@@ -57,17 +57,19 @@ type Stats struct {
 }
 
 type FileReport struct {
-	Name       string
-	Stats      Stats
-	ByType     map[anonymizer.EntityType]Stats
-	Missing    []EntityDelta
-	Unexpected []EntityDelta
+	Name         string
+	Stats        Stats
+	RelaxedStats Stats
+	ByType       map[anonymizer.EntityType]Stats
+	Missing      []EntityDelta
+	Unexpected   []EntityDelta
 }
 
 type Report struct {
-	Files  []FileReport
-	Totals Stats
-	ByType map[anonymizer.EntityType]Stats
+	Files         []FileReport
+	Totals        Stats
+	RelaxedTotals Stats
+	ByType        map[anonymizer.EntityType]Stats
 }
 
 type textAnonymizer interface {
@@ -193,6 +195,7 @@ func compareCase(corpusCase CorpusCase, findings []anonymizer.Finding) FileRepor
 		Name:   corpusCase.Name,
 		ByType: make(map[anonymizer.EntityType]Stats),
 	}
+	fileReport.RelaxedStats = relaxedStats(expected, found)
 	for _, key := range keys {
 		expectedCount := expected[key]
 		foundCount := found[key]
@@ -228,6 +231,109 @@ func compareCase(corpusCase CorpusCase, findings []anonymizer.Finding) FileRepor
 	}
 
 	return fileReport
+}
+
+func relaxedStats(expected, found map[entityKey]int) Stats {
+	stats := Stats{
+		Expected: countEntities(expected),
+		Found:    countEntities(found),
+	}
+	remainingExpected := cloneCounts(expected)
+	remainingFound := cloneCounts(found)
+
+	for _, key := range mergedKeys(expected, found) {
+		matched := min(remainingExpected[key], remainingFound[key])
+		if matched == 0 {
+			continue
+		}
+		stats.Matched += matched
+		remainingExpected[key] -= matched
+		remainingFound[key] -= matched
+	}
+
+	foundKeys := sortedEntityKeys(remainingFound)
+	for _, expectedKey := range sortedEntityKeys(remainingExpected) {
+		for remainingExpected[expectedKey] > 0 {
+			foundKey, ok := bestRelaxedMatch(expectedKey, foundKeys, remainingFound)
+			if !ok {
+				break
+			}
+			stats.Matched++
+			remainingExpected[expectedKey]--
+			remainingFound[foundKey]--
+		}
+	}
+
+	stats.Missing = stats.Expected - stats.Matched
+	stats.Unexpected = stats.Found - stats.Matched
+	return stats
+}
+
+func countEntities(counts map[entityKey]int) int {
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	return total
+}
+
+func cloneCounts(counts map[entityKey]int) map[entityKey]int {
+	cloned := make(map[entityKey]int, len(counts))
+	for key, count := range counts {
+		cloned[key] = count
+	}
+	return cloned
+}
+
+func sortedEntityKeys(counts map[entityKey]int) []entityKey {
+	keys := make([]entityKey, 0, len(counts))
+	for key, count := range counts {
+		if count > 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Type != keys[j].Type {
+			return keys[i].Type < keys[j].Type
+		}
+		return keys[i].Value < keys[j].Value
+	})
+	return keys
+}
+
+func bestRelaxedMatch(expected entityKey, foundKeys []entityKey, found map[entityKey]int) (entityKey, bool) {
+	var best entityKey
+	bestQuality := 0
+	bestLength := 0
+	bestFound := false
+	for _, candidate := range foundKeys {
+		if found[candidate] == 0 || !isRelaxedMatch(expected, candidate) {
+			continue
+		}
+		quality := relaxedMatchQuality(expected, candidate)
+		length := len(candidate.Value)
+		if !bestFound || quality < bestQuality || (quality == bestQuality && length < bestLength) {
+			best = candidate
+			bestQuality = quality
+			bestLength = length
+			bestFound = true
+		}
+	}
+	return best, bestFound
+}
+
+func isRelaxedMatch(expected, found entityKey) bool {
+	return expected.Value != "" && strings.Contains(found.Value, expected.Value)
+}
+
+func relaxedMatchQuality(expected, found entityKey) int {
+	if found.Value == expected.Value {
+		return 0
+	}
+	if found.Type == expected.Type {
+		return 1
+	}
+	return 2
 }
 
 func expectedCounts(entities []ExpectedEntity) map[entityKey]int {
@@ -270,6 +376,7 @@ func mergedKeys(left, right map[entityKey]int) []entityKey {
 
 func (r *Report) addFile(fileReport FileReport) {
 	r.Totals.add(fileReport.Stats)
+	r.RelaxedTotals.add(fileReport.RelaxedStats)
 	for entityType, stats := range fileReport.ByType {
 		current := r.ByType[entityType]
 		current.add(stats)
@@ -306,6 +413,15 @@ func printReport(writer io.Writer, corpusDir string, report Report, loadResult *
 		report.Totals.Unexpected,
 		percent(report.Totals.Matched, report.Totals.Found),
 		percent(report.Totals.Matched, report.Totals.Expected),
+	)
+	fmt.Fprintf(writer, "Relaxed totals: expected=%d found=%d matched=%d missing=%d unexpected=%d precision=%.2f%% recall=%.2f%%\n",
+		report.RelaxedTotals.Expected,
+		report.RelaxedTotals.Found,
+		report.RelaxedTotals.Matched,
+		report.RelaxedTotals.Missing,
+		report.RelaxedTotals.Unexpected,
+		percent(report.RelaxedTotals.Matched, report.RelaxedTotals.Found),
+		percent(report.RelaxedTotals.Matched, report.RelaxedTotals.Expected),
 	)
 
 	fmt.Fprintln(writer, "\nBy entity type:")

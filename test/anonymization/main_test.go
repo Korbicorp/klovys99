@@ -92,11 +92,39 @@ func TestCompareCaseMatchesMissingAndUnexpectedByTypeAndValue(t *testing.T) {
 	if got, want := report.Stats, (Stats{Expected: 2, Found: 2, Matched: 1, Missing: 1, Unexpected: 1}); got != want {
 		t.Fatalf("stats = %#v, want %#v", got, want)
 	}
+	if got, want := report.RelaxedStats, report.Stats; got != want {
+		t.Fatalf("relaxed stats = %#v, want %#v", got, want)
+	}
 	if got, want := report.Missing[0].Type, anonymizer.EntityPhone; got != want {
 		t.Fatalf("missing type = %q, want %q", got, want)
 	}
 	if got, want := report.Unexpected[0].Type, anonymizer.EntityIP; got != want {
 		t.Fatalf("unexpected type = %q, want %q", got, want)
+	}
+}
+
+func TestCompareCaseComputesRelaxedStatsForWrongTypeAndTooWideMatches(t *testing.T) {
+	corpusCase := CorpusCase{
+		Name: "one",
+		Expected: []ExpectedEntity{
+			{Type: anonymizer.EntityEmail, Value: "alice@example.com"},
+			{Type: anonymizer.EntitySecret, Value: "sk_live_123"},
+			{Type: anonymizer.EntityPhone, Value: "06 12 34 56 78"},
+		},
+	}
+	findings := []anonymizer.Finding{
+		{Type: anonymizer.EntityIP, Value: "alice@example.com"},
+		{Type: anonymizer.EntitySecret, Value: "API_KEY=sk_live_123"},
+		{Type: anonymizer.EntityDate, Value: "2026-07-02"},
+	}
+
+	report := compareCase(corpusCase, findings)
+
+	if got, want := report.Stats, (Stats{Expected: 3, Found: 3, Missing: 3, Unexpected: 3}); got != want {
+		t.Fatalf("strict stats = %#v, want %#v", got, want)
+	}
+	if got, want := report.RelaxedStats, (Stats{Expected: 3, Found: 3, Matched: 2, Missing: 1, Unexpected: 1}); got != want {
+		t.Fatalf("relaxed stats = %#v, want %#v", got, want)
 	}
 }
 
@@ -121,6 +149,9 @@ func TestRunCasesComputesGlobalStats(t *testing.T) {
 
 	if got, want := report.Totals, (Stats{Expected: 1, Found: 1, Matched: 1}); got != want {
 		t.Fatalf("totals = %#v, want %#v", got, want)
+	}
+	if got, want := report.RelaxedTotals, (Stats{Expected: 1, Found: 1, Matched: 1}); got != want {
+		t.Fatalf("relaxed totals = %#v, want %#v", got, want)
 	}
 	if got, want := report.ByType[anonymizer.EntityEmail], (Stats{Expected: 1, Found: 1, Matched: 1}); got != want {
 		t.Fatalf("email stats = %#v, want %#v", got, want)
@@ -155,7 +186,8 @@ func TestPrintReportIncludesStatsAndMismatches(t *testing.T) {
 				},
 			},
 		},
-		Totals: Stats{Expected: 1, Found: 1, Missing: 1, Unexpected: 1},
+		Totals:        Stats{Expected: 1, Found: 1, Missing: 1, Unexpected: 1},
+		RelaxedTotals: Stats{Expected: 1, Found: 1, Matched: 1},
 		ByType: map[anonymizer.EntityType]Stats{
 			anonymizer.EntityEmail: {Expected: 1, Missing: 1},
 			anonymizer.EntityIP:    {Found: 1, Unexpected: 1},
@@ -169,6 +201,7 @@ func TestPrintReportIncludesStatsAndMismatches(t *testing.T) {
 	for _, expected := range []string{
 		"Files: 1",
 		"Totals: expected=1 found=1 matched=0 missing=1 unexpected=1",
+		"Relaxed totals: expected=1 found=1 matched=1 missing=0 unexpected=0",
 		"EMAIL expected=1",
 		"missing: EMAIL \"alice@example.com\" x1",
 		"unexpected: IP \"192.168.1.42\" x1",

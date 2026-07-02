@@ -38,6 +38,11 @@ The output prints:
 - `precision`: share of detections that were expected.
 - `recall`: share of expected entities that were found.
 
+The `Relaxed totals` line keeps the same counters but also counts a finding as
+matched when the expected value is contained in the found value. This makes
+wrong-category detections and too-wide detections visible as covered PII without
+changing the strict mismatch list.
+
 Formulas:
 
 ```text
