@@ -17,7 +17,6 @@ import (
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
-	"github.com/Korbicorp/klovys99/internal/llm"
 	"github.com/Korbicorp/klovys99/internal/proxy"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
@@ -32,27 +31,15 @@ const (
 	openaiTargetEnv    = "KLOVIS_OPENAI_TARGET_URL"
 	proxyDebugEnv      = "KLOVIS_PROXY_DEBUG"
 	logToFileEnv       = "KLOVIS_LOG_TO_FILE"
-	llmEnabledEnv      = "KLOVIS_LLM_ENABLED"
-	llmURLEnv          = "KLOVIS_LLM_URL"
-	llmModelEnv        = "KLOVIS_LLM_MODEL"
-	llmTimeoutEnv      = "KLOVIS_LLM_TIMEOUT"
-	llmMaxCharsEnv     = "KLOVIS_LLM_MAX_CHARS"
-	llmAutoStartEnv    = "KLOVIS_LLM_AUTOSTART"
 )
 
 const (
-	defaultProxyAdr         = "127.0.0.1:8080"
-	defaultLLMEnable        = false
-	defaultLLMAutoStart     = false
-	defaultDebug            = false
-	defaultLogToFile        = false
-	defaultLLMTimeout       = llm.DefaultTimeout
-	defaultLLMMaxChunkBytes = llm.DefaultMaxChunkBytes
-	defaultLLMBaseUrl       = llm.DefaultBaseURL
-	defaultLLMModel         = llm.DefaultModel
-	defaultStatsPath        = statlog.DefaultPath
-	defaultStatsMaxBytes    = statlog.DefaultMaxBytes
-	defaultConfigPath       = appconfig.DefaultPath
+	defaultProxyAdr      = "127.0.0.1:8080"
+	defaultDebug         = false
+	defaultLogToFile     = false
+	defaultStatsPath     = statlog.DefaultPath
+	defaultStatsMaxBytes = statlog.DefaultMaxBytes
+	defaultConfigPath    = appconfig.DefaultPath
 )
 
 //go:embed dashboard/index.html dashboard/assets/*
@@ -69,28 +56,22 @@ func main() {
 		log.Fatal().Err(err).Msg("fail to parse runtime configuration")
 	}
 	if err := run(context.Background(), config); err != nil {
-		log.Fatal().Err(err).Msg("fail to start llm proxy")
+		log.Fatal().Err(err).Msg("fail to start proxy")
 	}
 }
 
 type runtimeConfig struct {
-	Addr             string
-	Target           *url.URL
-	AnthropicTarget  *url.URL
-	OpenAITarget     *url.URL
-	Logger           *zerolog.Logger
-	DebugTrafficLog  bool
-	LogToFile        bool
-	Detectors        detectors.Config
-	LLMEnabled       bool
-	LLMBaseURL       string
-	LLMModel         string
-	LLMTimeout       time.Duration
-	LLMMaxChunkBytes int
-	LLMAutoStart     bool
-	StatsPath        string
-	StatsMaxBytes    int64
-	ConfigPath       string
+	Addr            string
+	Target          *url.URL
+	AnthropicTarget *url.URL
+	OpenAITarget    *url.URL
+	Logger          *zerolog.Logger
+	DebugTrafficLog bool
+	LogToFile       bool
+	Detectors       detectors.Config
+	StatsPath       string
+	StatsMaxBytes   int64
+	ConfigPath      string
 }
 
 type application struct {
@@ -98,7 +79,6 @@ type application struct {
 	handler       http.Handler
 	logger        *zerolog.Logger
 	logFile       *os.File
-	llmService    *llm.Service
 	statsRecorder *statlog.Recorder
 	configStore   *appconfig.Store
 }
@@ -227,26 +207,6 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	logExternalLoadStats(config.Logger, "presidio", detectorResult.Presidio)
 	config.Logger.Info().Int("detectors", len(detectorResult.Detectors)).Msg("proxy detectors loaded")
 
-	var matchFinder proxy.MatchFinder
-	var llmService *llm.Service
-	if config.LLMEnabled {
-		llmConfig := llmConfigFromRuntime(config)
-		service, err := llm.NewService(ctx, llmConfig)
-		if err != nil {
-			closeLogFile(logFile)
-			return nil, err
-		}
-		llmService = service
-		matchFinder = service
-		config.Logger.Info().
-			Str("url", llmConfig.BaseURL).
-			Str("model", llmConfig.Model).
-			Dur("timeout", llmConfig.Timeout).
-			Int("max_chunk_bytes", llmConfig.MaxChunkBytes).
-			Bool("autostart", llmConfig.AutoStart).
-			Msg("llm enabled")
-	}
-
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target: config.Target,
 		RouteTargets: map[string]*url.URL{
@@ -255,13 +215,9 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		},
 		Logger:        config.Logger,
 		Anonymizer:    anonymizer.NewServiceWithProtectionPolicy(detectorResult.Detectors, configStore),
-		MatchFinder:   matchFinder,
 		StatsRecorder: statsRecorder,
 	})
 	if err != nil {
-		if llmService != nil {
-			llmService.Close()
-		}
 		closeLogFile(logFile)
 		return nil, err
 	}
@@ -272,7 +228,6 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		handler:       handler,
 		logger:        config.Logger,
 		logFile:       logFile,
-		llmService:    llmService,
 		statsRecorder: statsRecorder,
 		configStore:   configStore,
 	}, nil
@@ -395,9 +350,6 @@ func (a *application) Close() {
 	if a == nil {
 		return
 	}
-	if a.llmService != nil {
-		a.llmService.Close()
-	}
 	if a.logFile != nil {
 		closeLogFile(a.logFile)
 	}
@@ -407,29 +359,6 @@ func closeLogFile(logFile *os.File) {
 	if logFile != nil {
 		_ = logFile.Close()
 	}
-}
-
-func llmConfigFromRuntime(config runtimeConfig) llm.Config {
-	llmConfig := llm.Config{
-		BaseURL:       strings.TrimSpace(config.LLMBaseURL),
-		Model:         strings.TrimSpace(config.LLMModel),
-		Timeout:       config.LLMTimeout,
-		MaxChunkBytes: config.LLMMaxChunkBytes,
-		AutoStart:     config.LLMAutoStart,
-	}
-	if llmConfig.BaseURL == "" {
-		llmConfig.BaseURL = defaultLLMBaseUrl
-	}
-	if llmConfig.Model == "" {
-		llmConfig.Model = defaultLLMModel
-	}
-	if llmConfig.Timeout <= 0 {
-		llmConfig.Timeout = defaultLLMTimeout
-	}
-	if llmConfig.MaxChunkBytes <= 0 {
-		llmConfig.MaxChunkBytes = defaultLLMMaxChunkBytes
-	}
-	return llmConfig
 }
 
 func runtimeConfigFromEnv() (runtimeConfig, error) {
@@ -453,40 +382,17 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	llmEnabled, err := envBoolWithDefault(llmEnabledEnv, defaultLLMEnable)
-	if err != nil {
-		return runtimeConfig{}, err
-	}
-	llmTimeout, err := envDurationWithDefault(llmTimeoutEnv, defaultLLMTimeout)
-	if err != nil {
-		return runtimeConfig{}, err
-	}
-	llmMaxChunkBytes, err := envIntWithDefault(llmMaxCharsEnv, defaultLLMMaxChunkBytes)
-	if err != nil {
-		return runtimeConfig{}, err
-	}
-	llmAutoStart, err := envBoolWithDefault(llmAutoStartEnv, defaultLLMAutoStart)
-	if err != nil {
-		return runtimeConfig{}, err
-	}
-
 	return runtimeConfig{
-		Addr:             envStringWithDefault(proxyAddrEnv, defaultProxyAdr),
-		Target:           target,
-		AnthropicTarget:  anthropicTarget,
-		OpenAITarget:     openaiTarget,
-		DebugTrafficLog:  debugTrafficLog,
-		LogToFile:        logToFile,
-		Detectors:        detectors.DefaultConfig(),
-		LLMEnabled:       llmEnabled,
-		LLMBaseURL:       envStringWithDefault(llmURLEnv, defaultLLMBaseUrl),
-		LLMModel:         envStringWithDefault(llmModelEnv, defaultLLMModel),
-		LLMTimeout:       llmTimeout,
-		LLMMaxChunkBytes: llmMaxChunkBytes,
-		LLMAutoStart:     llmAutoStart,
-		StatsPath:        defaultStatsPath,
-		StatsMaxBytes:    defaultStatsMaxBytes,
-		ConfigPath:       defaultConfigPath,
+		Addr:            envStringWithDefault(proxyAddrEnv, defaultProxyAdr),
+		Target:          target,
+		AnthropicTarget: anthropicTarget,
+		OpenAITarget:    openaiTarget,
+		DebugTrafficLog: debugTrafficLog,
+		LogToFile:       logToFile,
+		Detectors:       detectors.DefaultConfig(),
+		StatsPath:       defaultStatsPath,
+		StatsMaxBytes:   defaultStatsMaxBytes,
+		ConfigPath:      defaultConfigPath,
 	}, nil
 }
 

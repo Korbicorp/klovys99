@@ -589,59 +589,6 @@ func TestProxyUsesInjectedExternalDetectors(t *testing.T) {
 	}
 }
 
-func TestProxyUsesLLMMatches(t *testing.T) {
-	var upstreamBody string
-	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			t.Fatalf("read upstream request body: %v", err)
-		}
-		upstreamBody = string(body)
-		writer.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
-
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
-	matchFinder := &fakeMatchFinder{
-		matches: []anonymizer.Match{
-			{Start: 8, End: 19, Type: anonymizer.EntityPersonName, Priority: 50, Normalized: "jean dupont"},
-		},
-	}
-	handler, err := NewProxyHandler(Config{
-		Target:      mustParseURL(t, upstream.URL),
-		Logger:      &logger,
-		Anonymizer:  newTestAnonymizer(),
-		MatchFinder: matchFinder,
-	})
-	if err != nil {
-		t.Fatalf("new handler: %v", err)
-	}
-
-	server := httptest.NewServer(newTestRouter(handler))
-	defer server.Close()
-
-	response, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Bonjour Jean Dupont"}]}`))
-	if err != nil {
-		t.Fatalf("call proxy: %v", err)
-	}
-	defer response.Body.Close()
-
-	if matchFinder.calls == 0 {
-		t.Fatal("match finder was not called")
-	}
-	if strings.Contains(upstreamBody, "Jean Dupont") {
-		t.Fatalf("upstream body = %q, want LLM entity anonymized", upstreamBody)
-	}
-	if !strings.Contains(upstreamBody, "Bonjour [PERSON_NAME_1]") {
-		t.Fatalf("upstream body = %q, want person token", upstreamBody)
-	}
-	if !strings.Contains(logs.String(), `"PERSON_NAME":1`) {
-		t.Fatalf("logs = %q, want LLM stats", logs.String())
-	}
-}
-
-// TestProxyFallsBackWhenLLMRequestFails verifies that LLM failures are recorded while deterministic anonymization still runs.
 func TestProxyAnonymizesMessagesCountTokensRequests(t *testing.T) {
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -699,16 +646,10 @@ func TestProxyDoesNotAnonymizeNonMessagesRequests(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
-	matchFinder := &fakeMatchFinder{
-		matches: []anonymizer.Match{
-			{Start: 8, End: 19, Type: anonymizer.EntityPersonName, Priority: 50, Normalized: "jean dupont"},
-		},
-	}
 	handler, err := NewProxyHandler(Config{
-		Target:      mustParseURL(t, upstream.URL),
-		Logger:      &logger,
-		Anonymizer:  newTestAnonymizer(),
-		MatchFinder: matchFinder,
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     &logger,
+		Anonymizer: newTestAnonymizer(),
 	})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -727,74 +668,8 @@ func TestProxyDoesNotAnonymizeNonMessagesRequests(t *testing.T) {
 	if upstreamBody != requestBody {
 		t.Fatalf("upstream body = %q, want original body %q", upstreamBody, requestBody)
 	}
-	if matchFinder.calls != 0 {
-		t.Fatalf("match finder calls = %d, want 0", matchFinder.calls)
-	}
 	if logs.String() != "" {
 		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
-	}
-}
-
-func TestProxyFallsBackWhenLLMRequestFails(t *testing.T) {
-	var upstreamBody string
-	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			t.Fatalf("read upstream request body: %v", err)
-		}
-		upstreamBody = string(body)
-		writer.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
-
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
-	statsRecorder := &fakeStatsRecorder{}
-	handler, err := NewProxyHandler(Config{
-		Target:        mustParseURL(t, upstream.URL),
-		Logger:        &logger,
-		Anonymizer:    newTestAnonymizer(),
-		MatchFinder:   &fakeMatchFinder{err: fmt.Errorf("llm down")},
-		StatsRecorder: statsRecorder,
-	})
-	if err != nil {
-		t.Fatalf("new handler: %v", err)
-	}
-
-	server := httptest.NewServer(newTestRouter(handler))
-	defer server.Close()
-
-	response, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
-	if err != nil {
-		t.Fatalf("call proxy: %v", err)
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("response status = %d, want %d", response.StatusCode, http.StatusOK)
-	}
-	if strings.Contains(upstreamBody, "alice@example.com") {
-		t.Fatalf("upstream body = %q, want regex fallback anonymization", upstreamBody)
-	}
-	if !strings.Contains(upstreamBody, "Email [EMAIL_1]") {
-		t.Fatalf("upstream body = %q, want email token", upstreamBody)
-	}
-
-	logOutput := logs.String()
-	if !strings.Contains(logOutput, "llm anonymization failed") || !strings.Contains(logOutput, `"EMAIL":1`) {
-		t.Fatalf("logs = %q, want LLM error and regex stats", logOutput)
-	}
-	for _, unexpected := range []string{"alice@example.com"} {
-		if strings.Contains(logOutput, unexpected) {
-			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
-		}
-	}
-	if !statsRecorder.hasEvent(statlog.EventLLMError) {
-		t.Fatalf("stats events = %#v, want LLM error event", statsRecorder.events)
-	}
-	processed := statsRecorder.lastEvent(statlog.EventRequestProcessed)
-	if processed.Event == "" || !processed.Anonymized || processed.Counts["EMAIL"] != 1 {
-		t.Fatalf("request processed stats = %#v, want anonymized EMAIL count", processed)
 	}
 }
 
@@ -899,7 +774,7 @@ func TestProxyRecordsRequestBodyErrors(t *testing.T) {
 }
 
 func newTestPromptAnonymizer() *sessionPromptAnonymizer {
-	return newSessionPromptAnonymizer(newTestAnonymizer(), nil)
+	return newSessionPromptAnonymizer(newTestAnonymizer())
 }
 
 func newTestRouter(handler gin.HandlerFunc) http.Handler {
@@ -949,17 +824,6 @@ func (d literalDetector) FindAll(text string) []anonymizer.Match {
 		offset = end
 		remaining = text[offset:]
 	}
-}
-
-type fakeMatchFinder struct {
-	matches []anonymizer.Match
-	err     error
-	calls   int
-}
-
-func (f *fakeMatchFinder) FindMatches(context.Context, string) ([]anonymizer.Match, error) {
-	f.calls++
-	return f.matches, f.err
 }
 
 type fakeStatsRecorder struct {

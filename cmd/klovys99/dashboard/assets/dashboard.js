@@ -82,7 +82,6 @@ const translations = {
     timelineErrors: "errors",
     timelineRequests: "requests",
     healthTitle: "Operational errors",
-    llmErrors: "LLM errors",
     proxyErrors: "Proxy errors",
     requestBodyErrors: "Request body errors",
     confirmReset: "Reset all local stats? This removes active and rotated stats files.",
@@ -170,7 +169,6 @@ const translations = {
     timelineErrors: "erreurs",
     timelineRequests: "requêtes",
     healthTitle: "Erreurs opérationnelles",
-    llmErrors: "Erreurs LLM",
     proxyErrors: "Erreurs proxy",
     requestBodyErrors: "Erreurs de corps de requête",
     confirmReset: "Réinitialiser toutes les statistiques locales ? Cela supprime le fichier actif et les fichiers rotatés.",
@@ -327,10 +325,8 @@ const elements = {
   timelineRows: document.querySelector("#timelineRows"),
   timelineEmpty: document.querySelector("#timelineEmpty"),
   healthTitle: document.querySelector("#healthTitle"),
-  llmErrorsLabel: document.querySelector("#llmErrorsLabel"),
   proxyErrorsLabel: document.querySelector("#proxyErrorsLabel"),
   requestBodyErrorsLabel: document.querySelector("#requestBodyErrorsLabel"),
-  llmErrors: document.querySelector("#llmErrors"),
   proxyErrors: document.querySelector("#proxyErrors"),
   requestBodyErrors: document.querySelector("#requestBodyErrors"),
 };
@@ -512,7 +508,6 @@ function renderStaticText() {
   elements.pieLegend.setAttribute("aria-label", text.chartLegend);
   elements.pieChart.setAttribute("aria-label", text.detectedDistribution);
   elements.timelineEmpty.textContent = text.noActivity;
-  elements.llmErrorsLabel.textContent = text.llmErrors;
   elements.proxyErrorsLabel.textContent = text.proxyErrors;
   elements.requestBodyErrorsLabel.textContent = text.requestBodyErrors;
 }
@@ -530,7 +525,6 @@ function normalizeSummary(summary) {
   return {
     total_requests: safeNumber(summary.total_requests),
     anonymized_requests: safeNumber(summary.anonymized_requests),
-    llm_errors: safeNumber(summary.llm_errors),
     proxy_errors: safeNumber(summary.proxy_errors),
     request_body_errors: safeNumber(summary.request_body_errors),
     total_replacements: safeNumber(summary.total_replacements),
@@ -803,7 +797,6 @@ function renderTopExposure(summary) {
 }
 
 function renderHealth(summary) {
-  renderHealthValue(elements.llmErrors, summary.llm_errors);
   renderHealthValue(elements.proxyErrors, summary.proxy_errors);
   renderHealthValue(elements.requestBodyErrors, summary.request_body_errors);
 }
@@ -925,7 +918,7 @@ function renderTimeline(timeline) {
       requests: safeNumber(bucket.requests),
       anonymized: safeNumber(bucket.anonymized_requests),
       replacements: safeNumber(bucket.total_replacements),
-      errors: safeNumber(bucket.llm_errors) + safeNumber(bucket.proxy_errors) + safeNumber(bucket.request_body_errors),
+      errors: safeNumber(bucket.proxy_errors) + safeNumber(bucket.request_body_errors),
     }))
     .filter((bucket) => bucket.requests > 0 || bucket.replacements > 0 || bucket.errors > 0)
     .slice(-12);

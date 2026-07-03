@@ -61,22 +61,12 @@ func (a *Service) NewRun() *Run {
 
 // Anonymize replaces detected sensitive values in one input.
 func (a *Service) Anonymize(input string) (string, Result) {
-	return a.AnonymizeWithMatches(input, nil)
-}
-
-// AnonymizeWithMatches replaces detected sensitive values plus caller-provided matches.
-func (a *Service) AnonymizeWithMatches(input string, extraMatches []Match) (string, Result) {
-	return a.NewRun().AnonymizeWithMatches(input, extraMatches)
+	return a.NewRun().Anonymize(input)
 }
 
 // Anonymize replaces detected sensitive values while reusing run-local tokens.
 func (r *Run) Anonymize(input string) (string, Result) {
-	return r.AnonymizeWithMatches(input, nil)
-}
-
-// AnonymizeWithMatches replaces detected sensitive values plus caller-provided matches for one run.
-func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, Result) {
-	matches := append(r.service.collectMatches(input, r.service.detectors), extraMatches...)
+	matches := r.service.collectMatches(input, r.service.detectors)
 	matches = r.service.filterEnabledMatches(deduplicateMatches(validMatches(input, matches)))
 	matches = r.service.resolveOverlaps(matches)
 	sort.SliceStable(matches, func(i, j int) bool {

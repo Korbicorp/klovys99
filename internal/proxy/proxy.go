@@ -41,7 +41,6 @@ var metadataKeys = map[string]struct{}{
 
 type sessionPromptAnonymizer struct {
 	engine        TextAnonymizer
-	matchFinder   MatchFinder
 	statsRecorder StatsRecorder
 }
 
@@ -58,10 +57,6 @@ type TextAnonymizer interface {
 	NewRun() *anonymizer.Run
 }
 
-type MatchFinder interface {
-	FindMatches(ctx context.Context, input string) ([]anonymizer.Match, error)
-}
-
 type StatsRecorder interface {
 	Record(event statlog.Event) error
 }
@@ -72,7 +67,6 @@ type Config struct {
 	Logger        *zerolog.Logger
 	Transport     http.RoundTripper
 	Anonymizer    TextAnonymizer
-	MatchFinder   MatchFinder
 	StatsRecorder StatsRecorder
 }
 
@@ -100,7 +94,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	}
 
 	logger := *config.Logger
-	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder, config.StatsRecorder)
+	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.StatsRecorder)
 	proxy := httputil.NewSingleHostReverseProxy(config.Target)
 	proxy.Director = newDirector(config.Target, config.RouteTargets)
 	if config.Transport != nil {
@@ -250,14 +244,13 @@ func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
 		Msg("traffic body")
 }
 
-func newSessionPromptAnonymizer(engine TextAnonymizer, matchFinder MatchFinder, statsRecorders ...StatsRecorder) *sessionPromptAnonymizer {
+func newSessionPromptAnonymizer(engine TextAnonymizer, statsRecorders ...StatsRecorder) *sessionPromptAnonymizer {
 	var statsRecorder StatsRecorder
 	if len(statsRecorders) > 0 {
 		statsRecorder = statsRecorders[0]
 	}
 	return &sessionPromptAnonymizer{
 		engine:        engine,
-		matchFinder:   matchFinder,
 		statsRecorder: statsRecorder,
 	}
 }
@@ -483,18 +476,7 @@ func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool)
 }
 
 func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {
-	var llmMatches []anonymizer.Match
-	if r.anonymizer.matchFinder != nil {
-		matches, err := r.anonymizer.matchFinder.FindMatches(r.ctx, value)
-		if err != nil {
-			recordStatsEvent(r.logger, r.anonymizer.statsRecorder, statlog.Event{Event: statlog.EventLLMError})
-			r.logger.Error().Err(err).Msg("llm anonymization failed")
-		} else {
-			llmMatches = matches
-		}
-	}
-
-	return r.engine.AnonymizeWithMatches(value, llmMatches)
+	return r.engine.Anonymize(value)
 }
 
 func (r *promptAnonymizationRun) addStats(result anonymizer.Result) {

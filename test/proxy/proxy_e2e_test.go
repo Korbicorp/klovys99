@@ -1,7 +1,6 @@
 package proxy_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,10 +51,9 @@ func TestProxyReplaysClaudeCodeCapturedRequest(t *testing.T) {
 
 	logger := zerolog.Nop()
 	handler, err := proxy.NewProxyHandler(proxy.Config{
-		Target:      mustParseURL(t, upstream.URL),
-		Logger:      &logger,
-		Anonymizer:  anonymizer.NewService(detectors.Default(true)),
-		MatchFinder: manifestSecretMatchFinder{secret: "svc_live_abcdefghijklmnopqrstuvwxyz123456"},
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     &logger,
+		Anonymizer: anonymizer.NewService(detectors.Default(true)),
 	})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -240,35 +238,4 @@ func mustParseURL(t *testing.T, value string) *url.URL {
 		t.Fatalf("parse URL: %v", err)
 	}
 	return parsed
-}
-
-type manifestSecretMatchFinder struct {
-	secret string
-}
-
-func (f manifestSecretMatchFinder) FindMatches(_ context.Context, input string) ([]anonymizer.Match, error) {
-	if !strings.Contains(input, "kind: Secret") {
-		return nil, nil
-	}
-
-	var matches []anonymizer.Match
-	remaining := input
-	offset := 0
-	for {
-		index := strings.Index(remaining, f.secret)
-		if index < 0 {
-			return matches, nil
-		}
-		start := offset + index
-		end := start + len(f.secret)
-		matches = append(matches, anonymizer.Match{
-			Start:      start,
-			End:        end,
-			Type:       anonymizer.EntitySecret,
-			Priority:   600,
-			Normalized: f.secret,
-		})
-		offset = end
-		remaining = input[offset:]
-	}
 }

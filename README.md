@@ -18,8 +18,6 @@ pseudonym tokens before the request leaves the machine.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
   rule sources.
-- Optional local LLM extraction through Ollama for contextual names, addresses,
-  dates, and vehicle plates.
 - Stable pseudonym tokens for the lifetime of the proxy process.
 - Structured logs with anonymization counters instead of raw prompt values.
 - Disk cache for downloaded external rules to avoid repeated network fetches on
@@ -32,7 +30,6 @@ pseudonym tokens before the request leaves the machine.
   rule sources.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
   client you route through Klovys99.
-- Ollama, only when `KLOVIS_LLM_ENABLED=true`.
 
 Go 1.25 or newer is only required if you work from a source checkout or build
 release binaries yourself.
@@ -43,13 +40,6 @@ Check your local tooling:
 node -v
 npm -v
 go version
-```
-
-Optional LLM mode requires a local Ollama model:
-
-```sh
-ollama --version
-ollama pull mistral
 ```
 
 ## Installation
@@ -240,12 +230,6 @@ Klovys99 runtime is configured with environment variables.
 | `KLOVIS_OPENAI_TARGET_URL` | `https://api.openai.com` | Upstream used by `/openai/...` routes. |
 | `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic body logging when set to `true`. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
-| `KLOVIS_LLM_ENABLED` | `false` | Enables optional local LLM extraction through Ollama. |
-| `KLOVIS_LLM_URL` | `http://localhost:11434` | Ollama base URL. |
-| `KLOVIS_LLM_MODEL` | `mistral` | Ollama model used for entity extraction. |
-| `KLOVIS_LLM_TIMEOUT` | `30s` | Startup and request timeout for LLM calls. |
-| `KLOVIS_LLM_MAX_CHARS` | `1000` | Maximum input bytes sent to the LLM per chunk. |
-| `KLOVIS_LLM_AUTOSTART` | `false` | Starts `ollama serve` automatically when the Ollama URL is local and not already reachable. |
 
 The npm wrapper also honors:
 
@@ -278,33 +262,6 @@ Use debug mode carefully, because it records both the original incoming request
 body and the anonymized upstream request body in whichever log destination is
 configured.
 
-## Optional LLM Extraction
-
-LLM extraction is disabled by default. Enable it with:
-
-```sh
-KLOVIS_LLM_ENABLED=true npx klovys99 start
-```
-
-When enabled, Klovys99 checks the Ollama connection during startup and runs a small
-extraction probe before accepting traffic. If startup verification fails, the
-proxy exits.
-
-By default, Klovys99 does not start Ollama for you. Start Ollama separately before
-enabling LLM extraction, or opt in to local autostart:
-
-```sh
-KLOVIS_LLM_ENABLED=true KLOVIS_LLM_AUTOSTART=true npx klovys99 start
-```
-
-Autostart only applies to local Ollama URLs such as `http://localhost:11434` or
-loopback IP addresses. Remote Ollama URLs are never started by Klovys99.
-
-Deterministic detectors remain the baseline. LLM matches are added when
-available and have lower priority than deterministic regex, Gitleaks, and
-Presidio matches. If the LLM fails during a request, Klovys99 logs the technical
-error and continues with deterministic anonymization.
-
 ## Detectors
 
 Klovys99 combines built-in detectors with external rules loaded at startup.
@@ -320,19 +277,16 @@ External rule payloads are cached for 24 hours in the user cache directory under
 | `CREDIT_CARD` | Built-in / Presidio | 900 / 600 | Credit card-like digit sequences. |
 | `MAC_ADDRESS` | Built-in / Presidio | 900 / 600 | MAC addresses with `:` or `-` separators. |
 | `PHONE` | Built-in | 700 | French and common international phone numbers. |
-| `DATE` | Built-in / Presidio / LLM | 600 / external / 50 | Conservatively labelled birth dates and supported contextual dates. |
+| `DATE` | Built-in / Presidio | 600 / external | Conservatively labelled birth dates and supported contextual dates. |
 | `BLOOD_TYPE` | Built-in | 600 | Contextual blood groups such as `Groupe sanguin O+`. |
 | `SECRET` | Gitleaks | 600 | Secrets loaded dynamically from the official Gitleaks config. |
 | `CRYPTO` | Presidio | 600 | Cryptocurrency wallet identifiers loaded from supported Presidio recognizers. |
-| `ADDRESS` | Built-in / LLM | 900 / 700 / 50 | French postal addresses, labelled addresses, and optional contextual LLM matches. |
+| `ADDRESS` | Built-in | 900 / 700 | French postal addresses and labelled addresses. |
 | `NAME` | Built-in | 900 | Contextual names following strong French or English cues and form labels. |
 | `FIRST_NAME` | Built-in | 500 | Conservatively labelled first names. |
 | `LAST_NAME` | Built-in | 500 | Conservatively labelled last names. |
 | `NUMERIC_ID` | Built-in | 100 | Generic long numeric IDs. |
 | `REFERENCE_ID` | Built-in | 100 | Labelled alphanumeric references requiring letters and digits. |
-| `PERSON_NAME` | LLM | 50 | Contextual full names found by the local model. |
-| `DATE` | LLM / Presidio | 50 / 600 | Dates tied to identity, family, documents, health, work, or events. |
-| `VEHICLE_PLATE` | LLM | 50 | Vehicle registration plates found by the local model. |
 
 ## Claude Code Notes
 
