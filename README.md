@@ -9,6 +9,63 @@ It is designed to sit between coding clients such as Claude Code or Codex and
 their upstream API, replacing detected personal or sensitive values with stable
 pseudonym tokens before the request leaves the machine.
 
+![Klovys99 proxy schema](schema.png)
+
+Klovys99 sits between the local client and the upstream API so prompt content
+can be anonymized before it leaves the machine.
+
+## Get Started
+
+If you cloned this repository, start with these commands from the repository
+root:
+
+1. Install the package and the local CLI.
+
+```sh
+npm install
+```
+
+2. Configure the client you want to route through Klovys99. Run one of:
+
+```sh
+npm run cli -- configure codex
+npm run cli -- configure claude
+npm run cli -- configure both
+```
+
+3. Start the local proxy.
+
+```sh
+npm run cli -- start
+```
+
+Klovys99 listens on `http://127.0.0.1:8080` by default and exposes:
+
+- `http://127.0.0.1:8080/anthropic` for Claude Code and other Anthropic clients
+- `http://127.0.0.1:8080/openai/v1` for Codex and other OpenAI-compatible
+  clients
+
+If you installed the published npm package instead of cloning this repository,
+use the same flow with `npx klovys99`:
+
+```sh
+npx klovys99 configure both
+npx klovys99 start
+```
+
+The historical command name `npx klovis` still works. The historical unprefixed
+route also still exists and forwards to `KLOVIS_TARGET_URL`, which defaults to
+`https://api.anthropic.com`.
+
+If you want the install step to also update your client configuration
+immediately:
+
+```sh
+KLOVIS_CLIENT=claude npm install
+```
+
+Supported values are `codex`, `claude`, and `both`.
+
 ## Features
 
 - Local reverse proxy for Anthropic and OpenAI-compatible JSON requests.
@@ -50,10 +107,16 @@ From the repository root:
 npm install
 ```
 
-`npm install klovys99` runs a `postinstall` step that downloads the matching
-binary from the GitHub release for the package version into `dist/` and exposes
-the CLI entrypoints `klovys99` and `klovis`. `klovys99` is the preferred name
-and `klovis` remains available for compatibility.
+If you are installing the published package instead of working from a checkout:
+
+```sh
+npm install klovys99
+```
+
+The install step downloads the matching binary from the GitHub release for the
+package version into `dist/` and exposes the CLI entrypoints `klovys99` and
+`klovis`. `klovys99` is the preferred name and `klovis` remains available for
+compatibility.
 
 Supported prebuilt targets:
 
@@ -64,66 +127,10 @@ Supported prebuilt targets:
 - Windows `arm64`
 - Windows `x64`
 
-For local execution from an unpublished checkout, use:
-
-```sh
-npm install
-npm run cli -- configure claude
-```
-
-If you want the install step to also update your client configuration
-immediately:
-
-```sh
-KLOVIS_CLIENT=claude npm install
-```
-
-Supported values are `codex`, `claude`, and `both`.
-
-## Quick Start
-
-Configure one or both clients to point to Klovys99:
-
-```sh
-npx klovys99 configure codex
-npx klovys99 configure claude
-```
-
-The historical command name still works:
-
-```sh
-npx klovis configure claude
-```
-
-From a local checkout that is not published to npm, prefer:
-
-```sh
-npm run cli -- configure claude
-```
-
-Or configure both at once:
-
-```sh
-npx klovys99 configure both
-```
-
-Then start the proxy:
-
-```sh
-npx klovys99 start
-```
-
-By default, Klovys99 listens on `http://127.0.0.1:8080` and exposes these local
-routes:
-
-- `http://127.0.0.1:8080/anthropic` for Claude Code and other Anthropic clients
-- `http://127.0.0.1:8080/openai/v1` for Codex and other OpenAI-compatible
-  clients
-
-The historical unprefixed route still exists and forwards to
-`KLOVIS_TARGET_URL`, which defaults to `https://api.anthropic.com`.
-
 ## Client Configuration
+
+Examples below use the published CLI form. From a local repository checkout,
+replace `npx klovys99` with `npm run cli --`.
 
 ### Codex
 
