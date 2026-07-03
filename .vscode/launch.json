@@ -2,15 +2,14 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug klovis with input.txt",
+      "name": "Debug klovys99",
       "type": "go",
       "request": "launch",
       "debugAdapter": "dlv-dap",
       "mode": "debug",
-      "program": "${workspaceFolder}/cmd/klovis",
+      "program": "${workspaceFolder}/cmd/klovys99",
       "cwd": "${workspaceFolder}",
       "console": "internalConsole",
-      "stdinFrom": "${workspaceFolder}/input.txt",
       "args": ["--stats"]
     }
   ]
