@@ -286,6 +286,28 @@ func TestURISecretDetectorDoesNotCatchRoutesOrMarkdownLinks(t *testing.T) {
 	}
 }
 
+func TestLabeledSecretDetectorAnonymizesConfigValues(t *testing.T) {
+	input := strings.Join([]string{
+		`apiKey: "svc_live_abcdefghijklmnopqrstuvwxyz123456"`,
+		`password = "super-secret-value-2026"`,
+		`refresh_token: token_abcdefghijklmnopqrstuvwxyz`,
+	}, "\n")
+
+	output, result := anonymize(t, input, true)
+
+	want := strings.Join([]string{
+		`apiKey: "[SECRET_1]"`,
+		`password = "[SECRET_2]"`,
+		`refresh_token: [SECRET_3]`,
+	}, "\n")
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
+	}
+	if got, want := result.Stats[anonymizer.EntitySecret].Count, 3; got != want {
+		t.Fatalf("secret count = %d, want %d", got, want)
+	}
+}
+
 func TestGenericIDDetectorUsesWhitespaceEqualsAtAndAmpersandDelimiters(t *testing.T) {
 	output, result := anonymize(t, "workspace=T123456&owner user@ABC789 plain ABC12345 key=abcdef", true)
 
