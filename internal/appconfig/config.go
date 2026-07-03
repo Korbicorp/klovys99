@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/rs/zerolog/log"
 )
 

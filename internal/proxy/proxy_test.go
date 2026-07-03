@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	"github.com/Korbicorp/klovis/internal/detectors"
-	statlog "github.com/Korbicorp/klovis/internal/stats"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/detectors"
+	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
@@ -117,6 +117,110 @@ func TestProxyForwardsRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestProxyRoutesConfiguredPrefixesToDifferentUpstreams(t *testing.T) {
+	var anthropicPath string
+	var openAIPath string
+
+	anthropicUpstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		anthropicPath = request.URL.Path
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer anthropicUpstream.Close()
+
+	openAIUpstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		openAIPath = request.URL.Path
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer openAIUpstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, anthropicUpstream.URL),
+		RouteTargets: map[string]*url.URL{
+			AnthropicRoutePrefix: mustParseURL(t, anthropicUpstream.URL),
+			OpenAIRoutePrefix:    mustParseURL(t, openAIUpstream.URL),
+		},
+		Logger:     ptrLogger(zerolog.Nop()),
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	anthropicResponse, err := http.Post(server.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatalf("call anthropic route: %v", err)
+	}
+	anthropicResponse.Body.Close()
+
+	openAIResponse, err := http.Post(server.URL+"/openai/v1/responses", "application/json", strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("call openai route: %v", err)
+	}
+	openAIResponse.Body.Close()
+
+	if anthropicPath != "/v1/messages" {
+		t.Fatalf("anthropic path = %q, want /v1/messages", anthropicPath)
+	}
+	if openAIPath != "/v1/responses" {
+		t.Fatalf("openai path = %q, want /v1/responses", openAIPath)
+	}
+}
+
+func TestProxyAnonymizesPrefixedAnthropicMessagesRequests(t *testing.T) {
+	var upstreamPath string
+	var upstreamBody string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamPath = request.URL.Path
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, upstream.URL),
+		RouteTargets: map[string]*url.URL{
+			AnthropicRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:     &logger,
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if upstreamPath != "/v1/messages" {
+		t.Fatalf("upstream path = %q, want /v1/messages", upstreamPath)
+	}
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want prefixed Anthropic prompt anonymized", upstreamBody)
+	}
+	if !strings.Contains(upstreamBody, "Email [EMAIL_1]") {
+		t.Fatalf("upstream body = %q, want email token", upstreamBody)
+	}
+	if !strings.Contains(logs.String(), `"EMAIL":1`) {
+		t.Fatalf("logs = %q, want anonymized stats", logs.String())
+	}
+}
+
 func TestSessionPromptAnonymizerLogsOnlyStats(t *testing.T) {
 	body := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before <session>Email: alice@example.com\nTel: 06 12 34 56 78</session> after","cache_control":{"type":"ephemeral"}}]}]}`)
 
@@ -141,24 +245,18 @@ func TestSessionPromptAnonymizerLogsOnlyStats(t *testing.T) {
 	}
 }
 
-func TestSessionPromptAnonymizerAnonymizesSystemPrompts(t *testing.T) {
+func TestSessionPromptAnonymizerPreservesTopLevelSystemPrompts(t *testing.T) {
 	body := []byte(`{"system":[{"type":"text","text":"rules <session>Contact alice@example.com</session> keep alice@example.com"}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
-	logOutput := logs.String()
 
-	if !strings.Contains(anonymizedBody, `rules <session>Contact [EMAIL_1]</session> keep [EMAIL_1]`) {
-		t.Fatalf("body = %q, want system content anonymized", anonymizedBody)
+	if anonymizedBody != string(body) {
+		t.Fatalf("body = %q, want top-level system preserved", anonymizedBody)
 	}
-	if !strings.Contains(logOutput, `"EMAIL":2`) {
-		t.Fatalf("logs = %q, want anonymized stats", logOutput)
-	}
-	for _, unexpected := range []string{"alice@example.com", "[EMAIL_1]", "prompt_original", "prompt_anonymized"} {
-		if strings.Contains(logOutput, unexpected) {
-			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
-		}
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
 	}
 }
 
@@ -190,7 +288,7 @@ func TestSessionPromptAnonymizerAnonymizesUserContentOutsideSession(t *testing.T
 }
 
 func TestSessionPromptAnonymizerLogsMultipleSessionsWithStableTokens(t *testing.T) {
-	body := []byte(`{"text":"<session>Email: alice@example.com</session> mid <session>Email: bob@example.com and alice@example.com</session>"}`)
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<session>Email: alice@example.com</session> mid <session>Email: bob@example.com and alice@example.com</session>"}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -217,11 +315,11 @@ func TestSessionPromptAnonymizerAnonymizesNonUserTextContext(t *testing.T) {
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
 
-	if !strings.Contains(logs.String(), `"EMAIL":1`) {
-		t.Fatalf("logs = %q, want email stats", logs.String())
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
 	}
-	if strings.Contains(anonymizedBody, "alice@example.com") || !strings.Contains(anonymizedBody, "[EMAIL_1] outside session") {
-		t.Fatalf("body = %q, want system text anonymized", anonymizedBody)
+	if anonymizedBody != string(body) {
+		t.Fatalf("body = %q, want top-level system text preserved", anonymizedBody)
 	}
 }
 
@@ -252,7 +350,7 @@ func TestSessionPromptAnonymizerAnonymizesDocumentTextSource(t *testing.T) {
 }
 
 func TestSessionPromptAnonymizerAnonymizesToolResults(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"},{"type":"tool_result","tool_use_id":"toolu_456","content":[{"type":"text","text":"IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}]}`)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_123","name":"Read","input":{"file_path":"/tmp/a.txt"}},{"type":"tool_use","id":"toolu_456","name":"Grep","input":{"pattern":"IBAN"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"},{"type":"tool_result","tool_use_id":"toolu_456","content":[{"type":"text","text":"IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -273,8 +371,23 @@ func TestSessionPromptAnonymizerAnonymizesToolResults(t *testing.T) {
 	}
 }
 
+func TestSessionPromptAnonymizerPreservesNonReadToolResults(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_123","name":"Bash","input":{"command":"date"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"Email alice@example.com"}]}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
+
+	if anonymizedBody != string(body) {
+		t.Fatalf("body = %q, want non-read tool result preserved", anonymizedBody)
+	}
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
+	}
+}
+
 func TestSessionPromptAnonymizerKeepsTokensStableAcrossRequestContexts(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Email alice@example.com"},{"type":"document","source":{"type":"text","data":"File owner alice@example.com"}},{"type":"tool_result","tool_use_id":"toolu_123","content":"Tool saw alice@example.com"}]}]}`)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_123","name":"Read","input":{"file_path":"/tmp/a.txt"}}]},{"role":"user","content":[{"type":"text","text":"Email alice@example.com"},{"type":"document","source":{"type":"text","data":"File owner alice@example.com"}},{"type":"tool_result","tool_use_id":"toolu_123","content":"Tool saw alice@example.com"}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -292,7 +405,7 @@ func TestSessionPromptAnonymizerKeepsTokensStableAcrossRequestContexts(t *testin
 }
 
 func TestSessionPromptAnonymizerPreservesMetadataAndBase64Sources(t *testing.T) {
-	body := []byte(`{"model":"claude","id":"msg_alice@example.com","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_alice@example.com","name":"lookup_alice@example.com","content":"Email alice@example.com"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YWxpY2VAZXhhbXBsZS5jb20="}}]}]}`)
+	body := []byte(`{"model":"claude","id":"msg_alice@example.com","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_alice@example.com","name":"Read","input":{"file_path":"/tmp/a.txt"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_alice@example.com","name":"lookup_alice@example.com","content":"Email alice@example.com"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YWxpY2VAZXhhbXBsZS5jb20="}}]}]}`)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
@@ -326,8 +439,8 @@ func TestSessionPromptAnonymizerDoesNotKeepTokensAcrossCalls(t *testing.T) {
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
 
-	promptAnonymizer.anonymize(context.Background(), logger, `{"text":"<session>Email: alice@example.com</session>"}`)
-	second := promptAnonymizer.anonymize(context.Background(), logger, `{"text":"<session>Email: bob@example.com</session>"}`)
+	promptAnonymizer.anonymize(context.Background(), logger, `{"messages":[{"role":"user","content":[{"type":"text","text":"<session>Email: alice@example.com</session>"}]}]}`)
+	second := promptAnonymizer.anonymize(context.Background(), logger, `{"messages":[{"role":"user","content":[{"type":"text","text":"<session>Email: bob@example.com</session>"}]}]}`)
 
 	if !strings.Contains(second, `<session>Email: [EMAIL_1]</session>`) {
 		t.Fatalf("body = %q, want token state isolated across calls", second)
@@ -406,11 +519,17 @@ func TestProxyForwardsAnonymizedSessionPrompts(t *testing.T) {
 	}
 
 	logOutput := logs.String()
-	if strings.Contains(logOutput, "alice@example.com") || strings.Contains(logOutput, "FR76 3000 6000 0112 3456 7890 189") {
-		t.Fatalf("logs = %q, want final anonymized request only", logOutput)
+	if !strings.Contains(logOutput, `"stage":"before_anonymization"`) {
+		t.Fatalf("logs = %q, want pre-anonymization request body", logOutput)
+	}
+	if !strings.Contains(logOutput, "alice@example.com") || !strings.Contains(logOutput, "FR76 3000 6000 0112 3456 7890 189") {
+		t.Fatalf("logs = %q, want original request values before anonymization", logOutput)
+	}
+	if !strings.Contains(logOutput, `"stage":"after_anonymization"`) {
+		t.Fatalf("logs = %q, want post-anonymization request body", logOutput)
 	}
 	if !strings.Contains(logOutput, `<session>Email: [EMAIL_1]</session>`) || !strings.Contains(logOutput, `IBAN [IBAN_1]`) {
-		t.Fatalf("logs = %q, want final request body", logOutput)
+		t.Fatalf("logs = %q, want anonymized request body after anonymization", logOutput)
 	}
 	if strings.Contains(logOutput, `"direction":"response"`) || strings.Contains(logOutput, "visible response") {
 		t.Fatalf("logs = %q, want no response traffic log", logOutput)
@@ -418,7 +537,7 @@ func TestProxyForwardsAnonymizedSessionPrompts(t *testing.T) {
 	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"IBAN":1`) {
 		t.Fatalf("logs = %q, want anonymized stats", logOutput)
 	}
-	for _, unexpected := range []string{"request.", "response.", "upstream.", "alice@example.com", "FR76 3000 6000 0112 3456 7890 189", "prompt_original", "prompt_anonymized"} {
+	for _, unexpected := range []string{"request.", "response.", "upstream.", "prompt_original", "prompt_anonymized"} {
 		if strings.Contains(logOutput, unexpected) {
 			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
 		}
@@ -523,6 +642,99 @@ func TestProxyUsesLLMMatches(t *testing.T) {
 }
 
 // TestProxyFallsBackWhenLLMRequestFails verifies that LLM failures are recorded while deterministic anonymization still runs.
+func TestProxyAnonymizesMessagesCountTokensRequests(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	handler, err := NewProxyHandler(Config{
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     &logger,
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/v1/messages/count_tokens", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want count_tokens prompt anonymized", upstreamBody)
+	}
+	if !strings.Contains(upstreamBody, "Email [EMAIL_1]") {
+		t.Fatalf("upstream body = %q, want email token", upstreamBody)
+	}
+	if !strings.Contains(logs.String(), `"EMAIL":1`) {
+		t.Fatalf("logs = %q, want anonymized stats", logs.String())
+	}
+}
+
+func TestProxyDoesNotAnonymizeNonMessagesRequests(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	matchFinder := &fakeMatchFinder{
+		matches: []anonymizer.Match{
+			{Start: 8, End: 19, Type: anonymizer.EntityPersonName, Priority: 50, Normalized: "jean dupont"},
+		},
+	}
+	handler, err := NewProxyHandler(Config{
+		Target:      mustParseURL(t, upstream.URL),
+		Logger:      &logger,
+		Anonymizer:  newTestAnonymizer(),
+		MatchFinder: matchFinder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	requestBody := `{"messages":[{"role":"user","content":"Email alice@example.com and Jean Dupont"}]}`
+	response, err := server.Client().Post(server.URL+"/v1/models", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if upstreamBody != requestBody {
+		t.Fatalf("upstream body = %q, want original body %q", upstreamBody, requestBody)
+	}
+	if matchFinder.calls != 0 {
+		t.Fatalf("match finder calls = %d, want 0", matchFinder.calls)
+	}
+	if logs.String() != "" {
+		t.Fatalf("logs = %q, want no anonymization logs", logs.String())
+	}
+}
+
 func TestProxyFallsBackWhenLLMRequestFails(t *testing.T) {
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

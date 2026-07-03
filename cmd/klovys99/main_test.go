@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	appconfig "github.com/Korbicorp/klovis/internal/appconfig"
-	"github.com/Korbicorp/klovis/internal/detectors"
-	"github.com/Korbicorp/klovis/internal/proxy"
-	statlog "github.com/Korbicorp/klovis/internal/stats"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
+	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/proxy"
+	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -148,7 +148,40 @@ func TestEnvIntWithDefault(t *testing.T) {
 	}
 }
 
+func TestEnvURLWithDefault(t *testing.T) {
+	tests := []struct {
+		name      string
+		envValue  *string
+		def       string
+		want      string
+		wantError string
+	}{
+		{name: "unset uses default", def: "https://api.anthropic.com", want: "https://api.anthropic.com"},
+		{name: "value is returned", envValue: stringPtr("https://api.openai.com"), def: "https://api.anthropic.com", want: "https://api.openai.com"},
+		{name: "trimmed value is returned", envValue: stringPtr(" https://example.com/base "), def: "https://api.anthropic.com", want: "https://example.com/base"},
+		{name: "missing host rejected", envValue: stringPtr("https:///missing-host"), def: "https://api.anthropic.com", wantError: "value must include scheme and host"},
+		{name: "missing scheme rejected", envValue: stringPtr("localhost:8080"), def: "https://api.anthropic.com", wantError: "value must include scheme and host"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const envName = "KLOVIS_TEST_URL"
+			setEnv(t, envName, tt.envValue)
+
+			got, err := envURLWithDefault(envName, tt.def)
+			assertErrorContains(t, err, tt.wantError)
+			if tt.wantError == "" && got.String() != tt.want {
+				t.Fatalf("envURLWithDefault() = %q, want %q", got.String(), tt.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeConfigFromEnv(t *testing.T) {
+	t.Setenv(proxyAddrEnv, "127.0.0.1:8181")
+	t.Setenv(targetEnv, "https://gateway.example.com")
+	t.Setenv(anthropicTargetEnv, "https://api.anthropic.com")
+	t.Setenv(openaiTargetEnv, "https://api.openai.com")
 	t.Setenv(proxyDebugEnv, "true")
 	t.Setenv(logToFileEnv, "true")
 	t.Setenv(llmEnabledEnv, "false")
@@ -187,6 +220,18 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	if !config.LLMAutoStart {
 		t.Fatal("LLMAutoStart = false, want true")
 	}
+	if config.Addr != "127.0.0.1:8181" {
+		t.Fatalf("Addr = %q, want custom addr", config.Addr)
+	}
+	if config.Target.String() != "https://gateway.example.com" {
+		t.Fatalf("Target = %q, want custom target", config.Target.String())
+	}
+	if config.AnthropicTarget.String() != "https://api.anthropic.com" {
+		t.Fatalf("AnthropicTarget = %q, want anthropic target", config.AnthropicTarget.String())
+	}
+	if config.OpenAITarget.String() != "https://api.openai.com" {
+		t.Fatalf("OpenAITarget = %q, want openai target", config.OpenAITarget.String())
+	}
 	if config.StatsPath != statlog.DefaultPath {
 		t.Fatalf("StatsPath = %q, want default stats path", config.StatsPath)
 	}
@@ -204,7 +249,7 @@ func TestDashboardURLFromAddr(t *testing.T) {
 		addr string
 		want string
 	}{
-		{name: "default empty address", addr: "", want: "http://localhost:8080/dashboard"},
+		{name: "default empty address", addr: "", want: "http://127.0.0.1:8080/dashboard"},
 		{name: "port only listen address", addr: ":8080", want: "http://localhost:8080/dashboard"},
 		{name: "all interfaces", addr: "0.0.0.0:9090", want: "http://localhost:9090/dashboard"},
 		{name: "loopback address", addr: "127.0.0.1:9090", want: "http://127.0.0.1:9090/dashboard"},

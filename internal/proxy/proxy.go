@@ -12,17 +12,20 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
-	statlog "github.com/Korbicorp/klovis/internal/stats"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
 
 const (
-	DefaultLogPath      = "proxy.log"
-	DefaultAnthropicURL = "https://api.anthropic.com"
-	sessionOpenTag      = "<session>"
-	sessionCloseTag     = "</session>"
+	DefaultLogPath       = "proxy.log"
+	DefaultAnthropicURL  = "https://api.anthropic.com"
+	DefaultOpenAIURL     = "https://api.openai.com"
+	AnthropicRoutePrefix = "/anthropic"
+	OpenAIRoutePrefix    = "/openai"
+	sessionOpenTag       = "<session>"
+	sessionCloseTag      = "</session>"
 )
 
 var metadataKeys = map[string]struct{}{
@@ -43,11 +46,12 @@ type sessionPromptAnonymizer struct {
 }
 
 type promptAnonymizationRun struct {
-	anonymizer *sessionPromptAnonymizer
-	engine     *anonymizer.Run
-	ctx        context.Context
-	logger     zerolog.Logger
-	stats      map[anonymizer.EntityType]int
+	anonymizer  *sessionPromptAnonymizer
+	engine      *anonymizer.Run
+	ctx         context.Context
+	logger      zerolog.Logger
+	stats       map[anonymizer.EntityType]int
+	readToolIDs map[string]struct{}
 }
 
 type TextAnonymizer interface {
@@ -64,6 +68,7 @@ type StatsRecorder interface {
 
 type Config struct {
 	Target        *url.URL
+	RouteTargets  map[string]*url.URL
 	Logger        *zerolog.Logger
 	Transport     http.RoundTripper
 	Anonymizer    TextAnonymizer
@@ -75,8 +80,16 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	if config.Target == nil {
 		return nil, fmt.Errorf("proxy target is required")
 	}
-	if config.Target.Scheme == "" || config.Target.Host == "" {
-		return nil, fmt.Errorf("proxy target must include scheme and host")
+	if err := validateTarget(config.Target); err != nil {
+		return nil, err
+	}
+	for prefix, target := range config.RouteTargets {
+		if !strings.HasPrefix(prefix, "/") {
+			return nil, fmt.Errorf("proxy route prefix %q must start with /", prefix)
+		}
+		if err := validateTarget(target); err != nil {
+			return nil, fmt.Errorf("proxy route %q: %w", prefix, err)
+		}
 	}
 	if config.Logger == nil {
 		logger := zerolog.Nop()
@@ -89,7 +102,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	logger := *config.Logger
 	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder, config.StatsRecorder)
 	proxy := httputil.NewSingleHostReverseProxy(config.Target)
-	proxy.Director = newDirector(config.Target, proxy.Director)
+	proxy.Director = newDirector(config.Target, config.RouteTargets)
 	if config.Transport != nil {
 		proxy.Transport = config.Transport
 	}
@@ -108,24 +121,109 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			return
 		}
 
-		outcome := promptAnonymizer.anonymizeWithStats(ctx.Request.Context(), logger, string(requestBody))
-		anonymizedBody := outcome.body
-		recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.stats))
-		requestBody = []byte(anonymizedBody)
+		logTrafficRequest(logger, "before_anonymization", string(requestBody))
+		if shouldAnonymizeRequest(ctx.Request) {
+			outcome := promptAnonymizer.anonymizeWithStats(ctx.Request.Context(), logger, string(requestBody))
+			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.stats))
+			requestBody = []byte(outcome.body)
+		}
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
-		logTrafficRequest(logger, anonymizedBody)
+		logTrafficRequest(logger, "after_anonymization", string(requestBody))
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
 }
 
-func newDirector(target *url.URL, defaultDirector func(*http.Request)) func(*http.Request) {
+func shouldAnonymizeRequest(request *http.Request) bool {
+	if request.Method != http.MethodPost {
+		return false
+	}
+	switch anthropicRequestPath(request.URL.Path) {
+	case "/v1/messages", "/v1/messages/count_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func anthropicRequestPath(path string) string {
+	if path == AnthropicRoutePrefix {
+		return "/"
+	}
+	return strings.TrimPrefix(path, AnthropicRoutePrefix)
+}
+
+func validateTarget(target *url.URL) error {
+	if target == nil {
+		return fmt.Errorf("proxy target is required")
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return fmt.Errorf("proxy target must include scheme and host")
+	}
+	return nil
+}
+
+func newDirector(defaultTarget *url.URL, routeTargets map[string]*url.URL) func(*http.Request) {
+	routes := compileTargetRoutes(routeTargets)
 	return func(request *http.Request) {
-		defaultDirector(request)
+		target, requestPath := resolveTarget(request.URL.Path, defaultTarget, routes)
+		request.URL.Path = joinURLPath(target.Path, requestPath)
 		request.Host = target.Host
 		request.URL.Host = target.Host
 		request.URL.Scheme = target.Scheme
 	}
+}
+
+type targetRoute struct {
+	prefix string
+	target *url.URL
+}
+
+func compileTargetRoutes(routeTargets map[string]*url.URL) []targetRoute {
+	if len(routeTargets) == 0 {
+		return nil
+	}
+
+	routes := make([]targetRoute, 0, len(routeTargets))
+	for prefix, target := range routeTargets {
+		routes = append(routes, targetRoute{
+			prefix: strings.TrimRight(prefix, "/"),
+			target: target,
+		})
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		return len(routes[i].prefix) > len(routes[j].prefix)
+	})
+	return routes
+}
+
+func resolveTarget(requestPath string, defaultTarget *url.URL, routes []targetRoute) (*url.URL, string) {
+	for _, route := range routes {
+		if route.prefix == "" {
+			continue
+		}
+		if requestPath == route.prefix {
+			return route.target, "/"
+		}
+		if strings.HasPrefix(requestPath, route.prefix+"/") {
+			return route.target, strings.TrimPrefix(requestPath, route.prefix)
+		}
+	}
+	return defaultTarget, requestPath
+}
+
+func joinURLPath(basePath, requestPath string) string {
+	basePath = strings.TrimRight(basePath, "/")
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+	}
+	if basePath == "" {
+		return requestPath
+	}
+	return basePath + requestPath
 }
 
 func readBody(body io.ReadCloser) ([]byte, error) {
@@ -144,9 +242,10 @@ func readBody(body io.ReadCloser) ([]byte, error) {
 	return content, nil
 }
 
-func logTrafficRequest(logger zerolog.Logger, body string) {
+func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
 	logger.Debug().
 		Str("direction", "request").
+		Str("stage", stage).
 		Str("body", body).
 		Msg("traffic body")
 }
@@ -185,6 +284,7 @@ func (a *sessionPromptAnonymizer) anonymizeWithStats(ctx context.Context, logger
 	}
 
 	run := a.newRun(ctx, logger)
+	run.readToolIDs = collectReadToolIDs(payload)
 	anonymized, changed := run.anonymizeRequestValue(payload, anonymizationContext{})
 	if !changed {
 		return anonymizationOutcome{body: body, stats: run.stats}
@@ -214,7 +314,8 @@ func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Log
 }
 
 type anonymizationContext struct {
-	textValue bool
+	conversationContent bool
+	textValue           bool
 }
 
 func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonymizationContext) (any, bool) {
@@ -238,9 +339,7 @@ func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonym
 				continue
 			}
 
-			itemContext := anonymizationContext{
-				textValue: isTextValue(key, typed, context),
-			}
+			itemContext := r.childContext(key, typed, context)
 			anonymized, itemChanged := r.anonymizeRequestValue(item, itemContext)
 			if itemChanged {
 				typed[key] = anonymized
@@ -258,24 +357,61 @@ func isMetadataKey(key string) bool {
 	return ok
 }
 
-func isTextValue(key string, parent map[string]any, context anonymizationContext) bool {
-	if key == "data" {
-		return stringMapValue(parent, "type") == "text"
+func (r *promptAnonymizationRun) childContext(key string, parent map[string]any, context anonymizationContext) anonymizationContext {
+	if key == "content" && isConversationMessage(parent) {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           isStringContent(parent, key),
+		}
 	}
 
 	if key == "source" {
-		return false
+		return anonymizationContext{
+			conversationContent: context.conversationContent,
+		}
 	}
 
 	if key == "content" && stringMapValue(parent, "type") == "tool_result" {
-		return true
+		return anonymizationContext{
+			conversationContent: context.conversationContent,
+			textValue:           r.isReadToolResult(parent),
+		}
 	}
 
-	if isTextualKey(key) {
-		return true
+	if key == "text" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
 	}
 
-	return context.textValue && !isMetadataKey(key)
+	if key == "thinking" && stringMapValue(parent, "type") == "thinking" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
+	}
+
+	if key == "data" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
+	}
+
+	return anonymizationContext{
+		conversationContent: context.conversationContent,
+		textValue:           context.textValue && !isMetadataKey(key),
+	}
+}
+
+func isConversationMessage(value map[string]any) bool {
+	switch stringMapValue(value, "role") {
+	case "user", "assistant":
+		return true
+	default:
+		return false
+	}
 }
 
 func stringMapValue(value map[string]any, key string) string {
@@ -283,9 +419,47 @@ func stringMapValue(value map[string]any, key string) string {
 	return typed
 }
 
-func isTextualKey(key string) bool {
-	switch key {
-	case "content", "error", "input", "output", "result", "system", "text":
+func isStringContent(value map[string]any, key string) bool {
+	_, ok := value[key].(string)
+	return ok
+}
+
+func (r *promptAnonymizationRun) isReadToolResult(value map[string]any) bool {
+	toolUseID := stringMapValue(value, "tool_use_id")
+	if toolUseID == "" {
+		return false
+	}
+	_, ok := r.readToolIDs[toolUseID]
+	return ok
+}
+
+func collectReadToolIDs(value any) map[string]struct{} {
+	ids := make(map[string]struct{})
+	collectReadToolIDsInto(value, ids)
+	return ids
+}
+
+func collectReadToolIDsInto(value any, ids map[string]struct{}) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			collectReadToolIDsInto(item, ids)
+		}
+	case map[string]any:
+		if stringMapValue(typed, "type") == "tool_use" && isFileReadToolName(stringMapValue(typed, "name")) {
+			if id := stringMapValue(typed, "id"); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for _, item := range typed {
+			collectReadToolIDsInto(item, ids)
+		}
+	}
+}
+
+func isFileReadToolName(name string) bool {
+	switch strings.ToLower(name) {
+	case "read", "notebookread", "glob", "grep", "ls":
 		return true
 	default:
 		return false
@@ -296,7 +470,7 @@ func (r *promptAnonymizationRun) anonymizeString(value string, textValue bool) (
 	if textValue {
 		return r.anonymizeTextValue(value)
 	}
-	return r.anonymizeSessionPromptString(value)
+	return value, false
 }
 
 func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
@@ -306,43 +480,6 @@ func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool)
 	}
 	r.addStats(result)
 	return anonymized, true
-}
-
-func (r *promptAnonymizationRun) anonymizeSessionPromptString(value string) (string, bool) {
-	var builder strings.Builder
-	changed := false
-	remaining := value
-
-	for {
-		openIndex := strings.Index(remaining, sessionOpenTag)
-		if openIndex < 0 {
-			builder.WriteString(remaining)
-			break
-		}
-
-		contentStart := openIndex + len(sessionOpenTag)
-		closeIndex := strings.Index(remaining[contentStart:], sessionCloseTag)
-		if closeIndex < 0 {
-			builder.WriteString(remaining)
-			break
-		}
-
-		contentEnd := contentStart + closeIndex
-		prompt := remaining[contentStart:contentEnd]
-		anonymized, result := r.anonymizeText(prompt)
-		r.addStats(result)
-
-		builder.WriteString(remaining[:contentStart])
-		builder.WriteString(anonymized)
-		builder.WriteString(sessionCloseTag)
-		remaining = remaining[contentEnd+len(sessionCloseTag):]
-		changed = true
-	}
-
-	if !changed {
-		return value, false
-	}
-	return builder.String(), true
 }
 
 func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {

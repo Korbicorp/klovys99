@@ -7,7 +7,7 @@ Endpoint references:
 - `/v1/models`.
 
 Markdown source links:
-- ([main.go:171](cmd/klovis/main.go#l171))
+- ([main.go:171](cmd/klovys99/main.go#l171))
 - ([proxy.go:22](internal/proxy/proxy.go#l22)).
 - ([proxy.go:84](internal/proxy/proxy.go#l84))
 - [proxy.go:32](internal/proxy/proxy.go#l32)).

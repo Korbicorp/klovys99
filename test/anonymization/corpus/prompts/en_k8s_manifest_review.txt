@@ -1,4 +1,4 @@
-Review this Kubernetes secret manifest like Claude Code would during a refactor.
+Review this Kubernetes secret manifest.
 apiVersion: v1
 kind: Secret
 metadata:

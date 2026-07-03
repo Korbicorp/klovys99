@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Korbicorp/klovis/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/dlclark/regexp2"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -101,7 +101,7 @@ func detectorsFromGitleaksRules(rules []gitleaksRule) ([]anonymizer.Detector, er
 		if strings.TrimSpace(rule.Regex) == "" {
 			continue
 		}
-		// Klovis scans request text without file metadata, so path-scoped rules cannot
+		// Klovys99 scans request text without file metadata, so path-scoped rules cannot
 		// be applied faithfully and are skipped to avoid context-free false positives.
 		if strings.TrimSpace(rule.Path) != "" {
 			continue
