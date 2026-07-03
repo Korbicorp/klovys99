@@ -184,12 +184,6 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	t.Setenv(openaiTargetEnv, "https://api.openai.com")
 	t.Setenv(proxyDebugEnv, "true")
 	t.Setenv(logToFileEnv, "true")
-	t.Setenv(llmEnabledEnv, "false")
-	t.Setenv(llmURLEnv, "http://localhost:11435")
-	t.Setenv(llmModelEnv, "llama")
-	t.Setenv(llmTimeoutEnv, "5s")
-	t.Setenv(llmMaxCharsEnv, "64")
-	t.Setenv(llmAutoStartEnv, "true")
 
 	config, err := runtimeConfigFromEnv()
 	if err != nil {
@@ -201,24 +195,6 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	}
 	if !config.LogToFile {
 		t.Fatal("LogToFile = false, want true")
-	}
-	if config.LLMEnabled {
-		t.Fatal("LLMEnabled = true, want false")
-	}
-	if config.LLMBaseURL != "http://localhost:11435" {
-		t.Fatalf("LLMBaseURL = %q, want custom URL", config.LLMBaseURL)
-	}
-	if config.LLMModel != "llama" {
-		t.Fatalf("LLMModel = %q, want llama", config.LLMModel)
-	}
-	if config.LLMTimeout != 5*time.Second {
-		t.Fatalf("LLMTimeout = %s, want 5s", config.LLMTimeout)
-	}
-	if config.LLMMaxChunkBytes != 64 {
-		t.Fatalf("LLMMaxChunkBytes = %d, want 64", config.LLMMaxChunkBytes)
-	}
-	if !config.LLMAutoStart {
-		t.Fatal("LLMAutoStart = false, want true")
 	}
 	if config.Addr != "127.0.0.1:8181" {
 		t.Fatalf("Addr = %q, want custom addr", config.Addr)
@@ -382,34 +358,16 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	ollama := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/api/tags":
-			writer.WriteHeader(http.StatusOK)
-		case "/api/generate":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"response":"{\"entities\":[{\"type\":\"PERSON_NAME\",\"text\":\"Jean Dupont\"}]}","done":true}`))
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer ollama.Close()
-
 	var logs strings.Builder
 	logger := zerolog.New(&logs)
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Addr:             ":9090",
-		Target:           mustParseURL(t, upstream.URL),
-		Logger:           &logger,
-		Detectors:        noExternalDetectorsConfig(),
-		LLMEnabled:       true,
-		LLMBaseURL:       ollama.URL,
-		LLMModel:         "llama",
-		LLMTimeout:       5 * time.Second,
-		LLMMaxChunkBytes: 64,
-		StatsPath:        t.TempDir() + "/stats.jsonl",
-		ConfigPath:       testConfigPath(t),
+		Addr:       ":9090",
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     &logger,
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -419,14 +377,14 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 	if app.addr != ":9090" {
 		t.Fatalf("addr = %q, want :9090", app.addr)
 	}
-	if app.handler == nil || app.llmService == nil {
+	if app.handler == nil {
 		t.Fatalf("application dependencies not built: %#v", app)
 	}
 
 	proxyServer := httptest.NewServer(app.handler)
 	defer proxyServer.Close()
 
-	response, err := proxyServer.Client().Post(proxyServer.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Bonjour Jean Dupont"}]}`))
+	response, err := proxyServer.Client().Post(proxyServer.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
 	if err != nil {
 		t.Fatalf("call proxy: %v", err)
 	}
@@ -434,11 +392,8 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("response status = %d, want 200", response.StatusCode)
 	}
-	if strings.Contains(upstreamBody, "Jean Dupont") || !strings.Contains(upstreamBody, "Bonjour [PERSON_NAME_1]") {
-		t.Fatalf("upstream body = %q, want LLM anonymized body", upstreamBody)
-	}
-	if !strings.Contains(logs.String(), `"message":"llm enabled"`) || !strings.Contains(logs.String(), `"autostart":false`) {
-		t.Fatalf("logs = %q, want llm enabled log", logs.String())
+	if strings.Contains(upstreamBody, "alice@example.com") || !strings.Contains(upstreamBody, "Email [EMAIL_1]") {
+		t.Fatalf("upstream body = %q, want anonymized body", upstreamBody)
 	}
 }
 
@@ -624,7 +579,7 @@ func TestBuildApplicationConfigAPIUpdatesAnonymization(t *testing.T) {
 }
 
 // TestBuildApplicationServesDashboardBeforeProxy verifies that the local dashboard is served by the proxy itself
-// and that missing dashboard routes are not accidentally forwarded to the upstream LLM provider.
+// and that missing dashboard routes are not accidentally forwarded upstream.
 func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	upstreamHits := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -754,21 +709,6 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	defer proxyResponse.Body.Close()
 	if upstreamHits != 1 {
 		t.Fatalf("upstreamHits = %d, want proxy route forwarded once", upstreamHits)
-	}
-}
-
-func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
-	_, err := buildApplication(context.Background(), runtimeConfig{
-		Target:     mustParseURL(t, "https://api.anthropic.com"),
-		Logger:     ptrLogger(zerolog.Nop()),
-		Detectors:  noExternalDetectorsConfig(),
-		LLMEnabled: true,
-		LLMBaseURL: "localhost:11434",
-		StatsPath:  t.TempDir() + "/stats.jsonl",
-		ConfigPath: testConfigPath(t),
-	})
-	if err == nil || !strings.Contains(err.Error(), "connect llm") {
-		t.Fatalf("error = %v, want llm startup error", err)
 	}
 }
 

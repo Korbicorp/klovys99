@@ -36,8 +36,7 @@ var metadataKeys = map[string]struct{}{
 }
 
 type sessionPromptAnonymizer struct {
-	engine      TextAnonymizer
-	matchFinder MatchFinder
+	engine TextAnonymizer
 }
 
 type promptAnonymizationRun struct {
@@ -52,16 +51,11 @@ type TextAnonymizer interface {
 	NewRun() *anonymizer.Run
 }
 
-type MatchFinder interface {
-	FindMatches(ctx context.Context, input string) ([]anonymizer.Match, error)
-}
-
 type Config struct {
-	Target      *url.URL
-	Logger      *zerolog.Logger
-	Transport   http.RoundTripper
-	Anonymizer  TextAnonymizer
-	MatchFinder MatchFinder
+	Target     *url.URL
+	Logger     *zerolog.Logger
+	Transport  http.RoundTripper
+	Anonymizer TextAnonymizer
 }
 
 func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
@@ -80,7 +74,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	}
 
 	logger := *config.Logger
-	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.MatchFinder)
+	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer)
 	proxy := httputil.NewSingleHostReverseProxy(config.Target)
 	proxy.Director = newDirector(config.Target, proxy.Director)
 	if config.Transport != nil {
@@ -140,10 +134,9 @@ func logTrafficRequest(logger zerolog.Logger, body string) {
 		Msg("traffic body")
 }
 
-func newSessionPromptAnonymizer(engine TextAnonymizer, matchFinder MatchFinder) *sessionPromptAnonymizer {
+func newSessionPromptAnonymizer(engine TextAnonymizer) *sessionPromptAnonymizer {
 	return &sessionPromptAnonymizer{
-		engine:      engine,
-		matchFinder: matchFinder,
+		engine: engine,
 	}
 }
 
@@ -318,17 +311,7 @@ func (r *promptAnonymizationRun) anonymizeSessionPromptString(value string) (str
 }
 
 func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {
-	var llmMatches []anonymizer.Match
-	if r.anonymizer.matchFinder != nil {
-		matches, err := r.anonymizer.matchFinder.FindMatches(r.ctx, value)
-		if err != nil {
-			r.logger.Error().Err(err).Msg("llm anonymization failed")
-		} else {
-			llmMatches = matches
-		}
-	}
-
-	return r.engine.AnonymizeWithMatches(value, llmMatches)
+	return r.engine.Anonymize(value)
 }
 
 func (r *promptAnonymizationRun) addStats(result anonymizer.Result) {

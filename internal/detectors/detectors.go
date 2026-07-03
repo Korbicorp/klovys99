@@ -124,6 +124,7 @@ func Default(includeExtra bool) []anonymizer.Detector {
 		creditCardDetector(),
 		macAddressDetector(),
 		uriSecretDetector(),
+		labeledSecretDetector(),
 		genericIDDetector(),
 		numericIDDetector(),
 		referenceIDDetector(),
@@ -565,6 +566,19 @@ func uriSecretDetector() anonymizer.Detector {
 		captureGroup: 1,
 		pattern: regexp2.MustCompile(
 			`(?i)\b[a-z][a-z0-9+.-]*://(?:[^:@\s/?#]+)?:([^@\s/?#]+)@`,
+			regexp2.RE2,
+		),
+		normalizerPolicy: normalizerPolicyFold,
+	}
+}
+
+func labeledSecretDetector() anonymizer.Detector {
+	return regexDetector{
+		entityType:   anonymizer.EntitySecret,
+		priority:     priorityDefault,
+		captureGroup: 1,
+		pattern: regexp2.MustCompile(
+			`(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret)\s*[:=]\s*["']?([a-z0-9][a-z0-9._~+/=-]{10,})["']?`,
 			regexp2.RE2,
 		),
 		normalizerPolicy: normalizerPolicyFold,

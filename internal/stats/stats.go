@@ -24,8 +24,6 @@ const (
 
 	// EventRequestProcessed records one intercepted request after local processing.
 	EventRequestProcessed = "request_processed"
-	// EventLLMError records a failure from the optional local LLM extractor.
-	EventLLMError = "llm_error"
 	// EventProxyError records a failure while forwarding to the upstream provider.
 	EventProxyError = "proxy_error"
 	// EventRequestBodyError records a failure while reading the incoming request body.
@@ -62,7 +60,6 @@ type Recorder struct {
 type Summary struct {
 	TotalRequests      int              `json:"total_requests"`
 	AnonymizedRequests int              `json:"anonymized_requests"`
-	LLMErrors          int              `json:"llm_errors"`
 	ProxyErrors        int              `json:"proxy_errors"`
 	RequestBodyErrors  int              `json:"request_body_errors"`
 	TotalReplacements  int              `json:"total_replacements"`
@@ -81,7 +78,6 @@ type TimelineBucket struct {
 	Bucket             time.Time      `json:"bucket"`
 	Requests           int            `json:"requests"`
 	AnonymizedRequests int            `json:"anonymized_requests"`
-	LLMErrors          int            `json:"llm_errors"`
 	ProxyErrors        int            `json:"proxy_errors"`
 	RequestBodyErrors  int            `json:"request_body_errors"`
 	TotalReplacements  int            `json:"total_replacements"`
@@ -432,9 +428,6 @@ func aggregate(events []Event, bucketDuration time.Duration) Summary {
 			timelineBucket.TotalReplacements += event.TotalReplacements
 			addCounts(countsByType, event.Counts)
 			addCounts(timelineBucket.Counts, event.Counts)
-		case EventLLMError:
-			summary.LLMErrors++
-			timelineBucket.LLMErrors++
 		case EventProxyError:
 			summary.ProxyErrors++
 			timelineBucket.ProxyErrors++

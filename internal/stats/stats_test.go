@@ -14,7 +14,6 @@ func TestRecorderRecordsAndAggregatesStats(t *testing.T) {
 		time.Date(2026, 7, 2, 10, 20, 0, 0, time.UTC),
 		time.Date(2026, 7, 2, 10, 25, 0, 0, time.UTC),
 		time.Date(2026, 7, 2, 10, 30, 0, 0, time.UTC),
-		time.Date(2026, 7, 2, 10, 35, 0, 0, time.UTC),
 		time.Date(2026, 7, 2, 11, 5, 0, 0, time.UTC),
 	}
 	index := 0
@@ -41,7 +40,6 @@ func TestRecorderRecordsAndAggregatesStats(t *testing.T) {
 		Event:  EventRequestProcessed,
 		Counts: map[string]int{},
 	})
-	mustRecord(t, recorder, Event{Event: EventLLMError})
 	mustRecord(t, recorder, Event{Event: EventProxyError})
 	mustRecord(t, recorder, Event{Event: EventRequestBodyError})
 	mustRecord(t, recorder, Event{
@@ -60,8 +58,8 @@ func TestRecorderRecordsAndAggregatesStats(t *testing.T) {
 	if summary.AnonymizedRequests != 2 {
 		t.Fatalf("AnonymizedRequests = %d, want 2", summary.AnonymizedRequests)
 	}
-	if summary.LLMErrors != 1 || summary.ProxyErrors != 1 || summary.RequestBodyErrors != 1 {
-		t.Fatalf("errors = llm:%d proxy:%d body:%d, want 1 each", summary.LLMErrors, summary.ProxyErrors, summary.RequestBodyErrors)
+	if summary.ProxyErrors != 1 || summary.RequestBodyErrors != 1 {
+		t.Fatalf("errors = proxy:%d body:%d, want 1 each", summary.ProxyErrors, summary.RequestBodyErrors)
 	}
 	if summary.TotalReplacements != 7 {
 		t.Fatalf("TotalReplacements = %d, want 7", summary.TotalReplacements)
@@ -80,8 +78,8 @@ func TestRecorderRecordsAndAggregatesStats(t *testing.T) {
 	if summary.Timeline[0].Requests != 3 || summary.Timeline[0].AnonymizedRequests != 1 {
 		t.Fatalf("first bucket requests = %d/%d, want 3/1", summary.Timeline[0].Requests, summary.Timeline[0].AnonymizedRequests)
 	}
-	if summary.Timeline[0].LLMErrors != 1 || summary.Timeline[0].ProxyErrors != 1 || summary.Timeline[0].RequestBodyErrors != 1 {
-		t.Fatalf("first bucket errors = %#v, want one of each", summary.Timeline[0])
+	if summary.Timeline[0].ProxyErrors != 1 || summary.Timeline[0].RequestBodyErrors != 1 {
+		t.Fatalf("first bucket errors = %#v, want proxy and body errors", summary.Timeline[0])
 	}
 	if summary.Timeline[1].Requests != 1 || summary.Timeline[1].TotalReplacements != 4 {
 		t.Fatalf("second bucket = %#v, want one request and four replacements", summary.Timeline[1])
