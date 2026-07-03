@@ -1014,7 +1014,8 @@ function formatNumber(value) {
 
 function detectLanguage() {
   const languages = navigator.languages && navigator.languages.length > 0 ? navigator.languages : [navigator.language || "en"];
-  return languages.some((candidate) => String(candidate).toLowerCase().startsWith("fr")) ? "fr" : "en";
+  const primaryLanguage = String(languages[0] || "en").toLowerCase();
+  return primaryLanguage.startsWith("fr") ? "fr" : "en";
 }
 
 function escapeHtml(value) {
