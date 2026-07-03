@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
 	"github.com/Korbicorp/klovys99/internal/proxy"
+	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -228,6 +232,38 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	if config.OpenAITarget.String() != "https://api.openai.com" {
 		t.Fatalf("OpenAITarget = %q, want openai target", config.OpenAITarget.String())
 	}
+	if config.StatsPath != statlog.DefaultPath {
+		t.Fatalf("StatsPath = %q, want default stats path", config.StatsPath)
+	}
+	if config.StatsMaxBytes != statlog.DefaultMaxBytes {
+		t.Fatalf("StatsMaxBytes = %d, want default stats max bytes", config.StatsMaxBytes)
+	}
+	if config.ConfigPath != appconfig.DefaultPath {
+		t.Fatalf("ConfigPath = %q, want default config path", config.ConfigPath)
+	}
+}
+
+func TestDashboardURLFromAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		addr string
+		want string
+	}{
+		{name: "default empty address", addr: "", want: "http://127.0.0.1:8080/dashboard"},
+		{name: "port only listen address", addr: ":8080", want: "http://localhost:8080/dashboard"},
+		{name: "all interfaces", addr: "0.0.0.0:9090", want: "http://localhost:9090/dashboard"},
+		{name: "loopback address", addr: "127.0.0.1:9090", want: "http://127.0.0.1:9090/dashboard"},
+		{name: "localhost address", addr: "localhost:9090", want: "http://localhost:9090/dashboard"},
+		{name: "ipv6 loopback", addr: "[::1]:9090", want: "http://[::1]:9090/dashboard"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dashboardURLFromAddr(tt.addr); got != tt.want {
+				t.Fatalf("dashboardURLFromAddr(%q) = %q, want %q", tt.addr, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRuntimeLoggerDefaultsToStdoutWithoutProxyLog(t *testing.T) {
@@ -313,9 +349,10 @@ func TestBuildApplicationSetsGlobalLoggerToRuntimeFile(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:    mustParseURL(t, upstream.URL),
-		LogToFile: true,
-		Detectors: noExternalDetectorsConfig(),
+		Target:     mustParseURL(t, upstream.URL),
+		LogToFile:  true,
+		Detectors:  noExternalDetectorsConfig(),
+		ConfigPath: testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -371,6 +408,8 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 		LLMModel:         "llama",
 		LLMTimeout:       5 * time.Second,
 		LLMMaxChunkBytes: 64,
+		StatsPath:        t.TempDir() + "/stats.jsonl",
+		ConfigPath:       testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -403,6 +442,321 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 	}
 }
 
+// TestBuildApplicationServesStatsAPIBeforeProxy verifies that dashboard API routes are handled locally before proxy fallback.
+func TestBuildApplicationServesStatsAPIBeforeProxy(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamHits++
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	if err := app.statsRecorder.Record(statlog.Event{
+		Event:  statlog.EventRequestProcessed,
+		Counts: map[string]int{"EMAIL": 2},
+	}); err != nil {
+		t.Fatalf("record stats event: %v", err)
+	}
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/api/stats")
+	if err != nil {
+		t.Fatalf("call stats API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200", response.StatusCode)
+	}
+	var summary statlog.Summary
+	if err := json.NewDecoder(response.Body).Decode(&summary); err != nil {
+		t.Fatalf("decode stats response: %v", err)
+	}
+	if summary.TotalRequests != 1 || summary.AnonymizedRequests != 1 || len(summary.CountsByType) != 1 || summary.CountsByType[0].Count != 2 {
+		t.Fatalf("summary = %#v, want one anonymized EMAIL request", summary)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want stats API not proxied", upstreamHits)
+	}
+
+	missingAPIResponse, err := server.Client().Get(server.URL + "/api/unknown")
+	if err != nil {
+		t.Fatalf("call missing API route: %v", err)
+	}
+	defer missingAPIResponse.Body.Close()
+	if missingAPIResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing API status = %d, want 404", missingAPIResponse.StatusCode)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want missing API route not proxied", upstreamHits)
+	}
+
+	resetResponse, err := server.Client().Post(server.URL+"/api/stats/reset", "application/json", nil)
+	if err != nil {
+		t.Fatalf("call stats reset API: %v", err)
+	}
+	defer resetResponse.Body.Close()
+	if resetResponse.StatusCode != http.StatusOK {
+		t.Fatalf("reset status = %d, want 200", resetResponse.StatusCode)
+	}
+	summaryAfterReset, err := app.statsRecorder.Summary()
+	if err != nil {
+		t.Fatalf("summary after reset: %v", err)
+	}
+	if summaryAfterReset.TotalRequests != 0 {
+		t.Fatalf("summary after reset = %#v, want empty", summaryAfterReset)
+	}
+
+	proxyResponse, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy route: %v", err)
+	}
+	defer proxyResponse.Body.Close()
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits = %d, want proxy route forwarded once", upstreamHits)
+	}
+}
+
+// TestBuildApplicationConfigAPIUpdatesAnonymization verifies that saved dashboard toggles affect real anonymization.
+func TestBuildApplicationConfigAPIUpdatesAnonymization(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	configResponse, err := server.Client().Get(server.URL + "/api/config")
+	if err != nil {
+		t.Fatalf("call config API: %v", err)
+	}
+	defer configResponse.Body.Close()
+	if configResponse.StatusCode != http.StatusOK {
+		t.Fatalf("config status = %d, want 200", configResponse.StatusCode)
+	}
+	var initialConfig configAPIResponse
+	if err := json.NewDecoder(configResponse.Body).Decode(&initialConfig); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+	if !optionEnabled(initialConfig.ProtectionOptions, anonymizer.EntityEmail) {
+		t.Fatalf("initial config = %#v, want EMAIL enabled", initialConfig)
+	}
+
+	updateBody := strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false}]}`)
+	updateResponse, err := server.Client().Post(server.URL+"/api/config", "application/json", updateBody)
+	if err != nil {
+		t.Fatalf("call config update with POST: %v", err)
+	}
+	defer updateResponse.Body.Close()
+	if updateResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("config POST status = %d, want 404", updateResponse.StatusCode)
+	}
+
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/config", strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false}]}`))
+	if err != nil {
+		t.Fatalf("build config request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	putResponse, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("call config update: %v", err)
+	}
+	defer putResponse.Body.Close()
+	if putResponse.StatusCode != http.StatusOK {
+		t.Fatalf("config update status = %d, want 200", putResponse.StatusCode)
+	}
+	var updatedConfig configAPIResponse
+	if err := json.NewDecoder(putResponse.Body).Decode(&updatedConfig); err != nil {
+		t.Fatalf("decode updated config: %v", err)
+	}
+	if optionEnabled(updatedConfig.ProtectionOptions, anonymizer.EntityEmail) {
+		t.Fatalf("updated config = %#v, want EMAIL disabled", updatedConfig)
+	}
+
+	proxyResponse, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer proxyResponse.Body.Close()
+	if strings.Contains(upstreamBody, "[EMAIL_") || !strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want EMAIL left untouched", upstreamBody)
+	}
+
+	summary, err := app.statsRecorder.Summary()
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if summary.TotalRequests != 1 || summary.AnonymizedRequests != 0 || len(summary.CountsByType) != 0 {
+		t.Fatalf("summary = %#v, want one non-anonymized request", summary)
+	}
+}
+
+// TestBuildApplicationServesDashboardBeforeProxy verifies that the local dashboard is served by the proxy itself
+// and that missing dashboard routes are not accidentally forwarded to the upstream LLM provider.
+func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamHits++
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	dashboardResponse, err := server.Client().Get(server.URL + "/dashboard")
+	if err != nil {
+		t.Fatalf("call dashboard: %v", err)
+	}
+	defer dashboardResponse.Body.Close()
+	if dashboardResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want 200", dashboardResponse.StatusCode)
+	}
+	dashboardBody, err := io.ReadAll(dashboardResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard body: %v", err)
+	}
+	if got := string(dashboardBody); !strings.Contains(got, "klovys99 Anonymization dashboard") ||
+		!strings.Contains(got, "Anonymization dashboard") ||
+		!strings.Contains(got, "klovys99-logo.png") ||
+		!strings.Contains(got, "icon.svg") ||
+		!strings.Contains(got, "Protection coverage") ||
+		!strings.Contains(got, "Protection options") ||
+		!strings.Contains(got, "Enable all") ||
+		!strings.Contains(got, "Disable all") ||
+		!strings.Contains(got, "Save changes") ||
+		!strings.Contains(got, "Explore klovys99 Pro") ||
+		!strings.Contains(got, "https://klovys.fr/") ||
+		!strings.Contains(got, "/dashboard/assets/dashboard.js") {
+		t.Fatalf("dashboard body = %q, want embedded dashboard HTML", got)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard not proxied", upstreamHits)
+	}
+
+	cssResponse, err := server.Client().Get(server.URL + "/dashboard/assets/dashboard.css")
+	if err != nil {
+		t.Fatalf("call dashboard CSS: %v", err)
+	}
+	defer cssResponse.Body.Close()
+	if cssResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard CSS status = %d, want 200", cssResponse.StatusCode)
+	}
+	cssBody, err := io.ReadAll(cssResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard CSS: %v", err)
+	}
+	if got := string(cssBody); !strings.Contains(got, "--primary: #076cd8") {
+		t.Fatalf("dashboard CSS = %q, want klovys99 primary color", got)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard assets not proxied", upstreamHits)
+	}
+
+	logoResponse, err := server.Client().Get(server.URL + "/dashboard/assets/klovys99-logo.png")
+	if err != nil {
+		t.Fatalf("call dashboard logo: %v", err)
+	}
+	defer logoResponse.Body.Close()
+	if logoResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard logo status = %d, want 200", logoResponse.StatusCode)
+	}
+	logoBody, err := io.ReadAll(logoResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard logo: %v", err)
+	}
+	if len(logoBody) < 8 || string(logoBody[1:4]) != "PNG" {
+		t.Fatalf("dashboard logo does not look like a PNG, length=%d", len(logoBody))
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard logo not proxied", upstreamHits)
+	}
+
+	iconResponse, err := server.Client().Get(server.URL + "/dashboard/assets/icon.svg")
+	if err != nil {
+		t.Fatalf("call dashboard icon: %v", err)
+	}
+	defer iconResponse.Body.Close()
+	if iconResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard icon status = %d, want 200", iconResponse.StatusCode)
+	}
+	iconBody, err := io.ReadAll(iconResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard icon: %v", err)
+	}
+	if !strings.Contains(string(iconBody), "<svg") {
+		t.Fatalf("dashboard icon does not look like SVG: %q", string(iconBody))
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard icon not proxied", upstreamHits)
+	}
+
+	missingDashboardResponse, err := server.Client().Get(server.URL + "/dashboard/unknown")
+	if err != nil {
+		t.Fatalf("call missing dashboard route: %v", err)
+	}
+	defer missingDashboardResponse.Body.Close()
+	if missingDashboardResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing dashboard status = %d, want 404", missingDashboardResponse.StatusCode)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want missing dashboard route not proxied", upstreamHits)
+	}
+
+	proxyResponse, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy route: %v", err)
+	}
+	defer proxyResponse.Body.Close()
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits = %d, want proxy route forwarded once", upstreamHits)
+	}
+}
+
 func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
 	_, err := buildApplication(context.Background(), runtimeConfig{
 		Target:     mustParseURL(t, "https://api.anthropic.com"),
@@ -410,6 +764,8 @@ func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
 		Detectors:  noExternalDetectorsConfig(),
 		LLMEnabled: true,
 		LLMBaseURL: "localhost:11434",
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), "connect llm") {
 		t.Fatalf("error = %v, want llm startup error", err)
@@ -450,11 +806,27 @@ func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
 	return &logger
 }
 
+// optionEnabled returns one type's enabled state from an API option list.
+func optionEnabled(options []appconfig.ProtectionOption, entityType anonymizer.EntityType) bool {
+	for _, option := range options {
+		if option.Type == entityType {
+			return option.Enabled
+		}
+	}
+	return false
+}
+
 func noExternalDetectorsConfig() detectors.Config {
 	config := detectors.DefaultConfig()
 	config.EnableGitleaks = false
 	config.EnablePresidio = false
 	return config
+}
+
+// testConfigPath returns a per-test app config file path.
+func testConfigPath(t *testing.T) string {
+	t.Helper()
+	return t.TempDir() + "/klovys99_config.json"
 }
 
 func stringPtr(value string) *string {

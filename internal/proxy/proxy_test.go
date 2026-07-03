@@ -13,6 +13,7 @@ import (
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/detectors"
+	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
@@ -640,6 +641,7 @@ func TestProxyUsesLLMMatches(t *testing.T) {
 	}
 }
 
+// TestProxyFallsBackWhenLLMRequestFails verifies that LLM failures are recorded while deterministic anonymization still runs.
 func TestProxyAnonymizesMessagesCountTokensRequests(t *testing.T) {
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -747,11 +749,13 @@ func TestProxyFallsBackWhenLLMRequestFails(t *testing.T) {
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	statsRecorder := &fakeStatsRecorder{}
 	handler, err := NewProxyHandler(Config{
-		Target:      mustParseURL(t, upstream.URL),
-		Logger:      &logger,
-		Anonymizer:  newTestAnonymizer(),
-		MatchFinder: &fakeMatchFinder{err: fmt.Errorf("llm down")},
+		Target:        mustParseURL(t, upstream.URL),
+		Logger:        &logger,
+		Anonymizer:    newTestAnonymizer(),
+		MatchFinder:   &fakeMatchFinder{err: fmt.Errorf("llm down")},
+		StatsRecorder: statsRecorder,
 	})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -785,6 +789,113 @@ func TestProxyFallsBackWhenLLMRequestFails(t *testing.T) {
 			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
 		}
 	}
+	if !statsRecorder.hasEvent(statlog.EventLLMError) {
+		t.Fatalf("stats events = %#v, want LLM error event", statsRecorder.events)
+	}
+	processed := statsRecorder.lastEvent(statlog.EventRequestProcessed)
+	if processed.Event == "" || !processed.Anonymized || processed.Counts["EMAIL"] != 1 {
+		t.Fatalf("request processed stats = %#v, want anonymized EMAIL count", processed)
+	}
+}
+
+// TestProxyRecordsRequestProcessedStats verifies that each processed request emits replacement counters for the dashboard.
+func TestProxyRecordsRequestProcessedStats(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	statsRecorder := &fakeStatsRecorder{}
+	handler, err := NewProxyHandler(Config{
+		Target:        mustParseURL(t, upstream.URL),
+		Logger:        ptrLogger(zerolog.Nop()),
+		Anonymizer:    newTestAnonymizer(),
+		StatsRecorder: statsRecorder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	processed := statsRecorder.lastEvent(statlog.EventRequestProcessed)
+	if processed.Event == "" {
+		t.Fatalf("stats events = %#v, want request processed event", statsRecorder.events)
+	}
+	if !processed.Anonymized || processed.TotalReplacements != 1 || processed.Counts["EMAIL"] != 1 {
+		t.Fatalf("request processed event = %#v, want one EMAIL replacement", processed)
+	}
+}
+
+// TestProxyRecordsProxyErrors verifies that upstream forwarding failures are counted separately from processed requests.
+func TestProxyRecordsProxyErrors(t *testing.T) {
+	statsRecorder := &fakeStatsRecorder{}
+	handler, err := NewProxyHandler(Config{
+		Target:        mustParseURL(t, "http://upstream.example"),
+		Logger:        ptrLogger(zerolog.Nop()),
+		Transport:     failingRoundTripper{},
+		Anonymizer:    newTestAnonymizer(),
+		StatsRecorder: statsRecorder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("response status = %d, want 502", response.StatusCode)
+	}
+	if !statsRecorder.hasEvent(statlog.EventProxyError) {
+		t.Fatalf("stats events = %#v, want proxy error event", statsRecorder.events)
+	}
+	if !statsRecorder.hasEvent(statlog.EventRequestProcessed) {
+		t.Fatalf("stats events = %#v, want request processed event", statsRecorder.events)
+	}
+}
+
+// TestProxyRecordsRequestBodyErrors verifies that unreadable request bodies are counted without marking the request as processed.
+func TestProxyRecordsRequestBodyErrors(t *testing.T) {
+	statsRecorder := &fakeStatsRecorder{}
+	handler, err := NewProxyHandler(Config{
+		Target:        mustParseURL(t, "http://upstream.example"),
+		Logger:        ptrLogger(zerolog.Nop()),
+		Transport:     failingRoundTripper{},
+		Anonymizer:    newTestAnonymizer(),
+		StatsRecorder: statsRecorder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	request.Body = errReadCloser{}
+	response := httptest.NewRecorder()
+	newTestRouter(handler).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("response status = %d, want 400", response.Code)
+	}
+	if !statsRecorder.hasEvent(statlog.EventRequestBodyError) {
+		t.Fatalf("stats events = %#v, want request body error event", statsRecorder.events)
+	}
+	if statsRecorder.hasEvent(statlog.EventRequestProcessed) {
+		t.Fatalf("stats events = %#v, did not want processed event after body read failure", statsRecorder.events)
+	}
 }
 
 func newTestPromptAnonymizer() *sessionPromptAnonymizer {
@@ -800,10 +911,6 @@ func newTestRouter(handler gin.HandlerFunc) http.Handler {
 
 func newTestAnonymizer() *anonymizer.Service {
 	return anonymizer.NewService(detectors.Default(true))
-}
-
-func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
-	return &logger
 }
 
 func mustParseURL(t *testing.T, value string) *url.URL {
@@ -853,4 +960,47 @@ type fakeMatchFinder struct {
 func (f *fakeMatchFinder) FindMatches(context.Context, string) ([]anonymizer.Match, error) {
 	f.calls++
 	return f.matches, f.err
+}
+
+type fakeStatsRecorder struct {
+	events []statlog.Event
+	err    error
+}
+
+func (r *fakeStatsRecorder) Record(event statlog.Event) error {
+	r.events = append(r.events, event)
+	return r.err
+}
+
+func (r *fakeStatsRecorder) hasEvent(eventName string) bool {
+	return r.lastEvent(eventName).Event != ""
+}
+
+func (r *fakeStatsRecorder) lastEvent(eventName string) statlog.Event {
+	for index := len(r.events) - 1; index >= 0; index-- {
+		if r.events[index].Event == eventName {
+			return r.events[index]
+		}
+	}
+	return statlog.Event{}
+}
+
+type failingRoundTripper struct{}
+
+func (failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("upstream unavailable")
+}
+
+type errReadCloser struct{}
+
+func (errReadCloser) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("read failed")
+}
+
+func (errReadCloser) Close() error {
+	return nil
+}
+
+func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
+	return &logger
 }

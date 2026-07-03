@@ -4,3 +4,8 @@ node_modules/
 output.txt
 proxy.log
 .env
+anonymization_stats*.jsonl
+klovys99_config.json
+klovys99_config.json.tmp
+cmd/klovis/__debug_bin*
+fake_secret_context.txt

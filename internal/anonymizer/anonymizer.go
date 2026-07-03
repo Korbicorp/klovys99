@@ -10,7 +10,8 @@ import (
 
 type Service struct {
 	// detectors is the ordered set of regex-based detectors used for each call.
-	detectors []Detector
+	detectors        []Detector
+	protectionPolicy ProtectionPolicy
 }
 
 type Run struct {
@@ -21,12 +22,35 @@ type Run struct {
 	nextID map[EntityType]int
 }
 
+type allowAllProtectionPolicy struct{}
+
+// ProtectionPolicy decides whether a detected type can be anonymized.
+type ProtectionPolicy interface {
+	IsTypeEnabled(entityType EntityType) bool
+}
+
+// IsTypeEnabled keeps every type enabled when no external policy is configured.
+func (allowAllProtectionPolicy) IsTypeEnabled(EntityType) bool {
+	return true
+}
+
+// NewService creates an anonymizer with every detected type enabled.
 func NewService(detectors []Detector) *Service {
+	return NewServiceWithProtectionPolicy(detectors, nil)
+}
+
+// NewServiceWithProtectionPolicy creates an anonymizer that filters matches through a runtime policy.
+func NewServiceWithProtectionPolicy(detectors []Detector, protectionPolicy ProtectionPolicy) *Service {
+	if protectionPolicy == nil {
+		protectionPolicy = allowAllProtectionPolicy{}
+	}
 	return &Service{
-		detectors: detectors,
+		detectors:        detectors,
+		protectionPolicy: protectionPolicy,
 	}
 }
 
+// NewRun creates an isolated anonymization run with stable tokens across calls.
 func (a *Service) NewRun() *Run {
 	return &Run{
 		service: a,
@@ -35,27 +59,33 @@ func (a *Service) NewRun() *Run {
 	}
 }
 
+// Anonymize replaces detected sensitive values in one input.
 func (a *Service) Anonymize(input string) (string, Result) {
 	return a.AnonymizeWithMatches(input, nil)
 }
 
+// AnonymizeWithMatches replaces detected sensitive values plus caller-provided matches.
 func (a *Service) AnonymizeWithMatches(input string, extraMatches []Match) (string, Result) {
 	return a.NewRun().AnonymizeWithMatches(input, extraMatches)
 }
 
+// Anonymize replaces detected sensitive values while reusing run-local tokens.
 func (r *Run) Anonymize(input string) (string, Result) {
 	return r.AnonymizeWithMatches(input, nil)
 }
 
+// AnonymizeWithMatches replaces detected sensitive values plus caller-provided matches for one run.
 func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, Result) {
 	matches := append(r.service.collectMatches(input, r.service.detectors), extraMatches...)
-	matches = deduplicateMatches(validMatches(input, matches))
+	matches = r.service.filterEnabledMatches(deduplicateMatches(validMatches(input, matches)))
 	matches = r.service.resolveOverlaps(matches)
 	sort.SliceStable(matches, func(i, j int) bool {
 		return matches[i].Start < matches[j].Start
 	})
 
-	log.Info().Interface("pii", matches).Msg("Secret and PII found")
+	if len(matches) > 0 {
+		log.Debug().Interface("pii", matches).Msg("Secret and PII found")
+	}
 
 	result := Result{Stats: make(map[EntityType]EntityStats)}
 
@@ -84,6 +114,21 @@ func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, 
 
 	output.WriteString(input[last:])
 	return output.String(), result
+}
+
+// filterEnabledMatches removes matches for types disabled by the current protection policy.
+func (a *Service) filterEnabledMatches(matches []Match) []Match {
+	if a == nil || a.protectionPolicy == nil {
+		return matches
+	}
+	filtered := matches[:0]
+	for _, match := range matches {
+		if !a.protectionPolicy.IsTypeEnabled(match.Type) {
+			continue
+		}
+		filtered = append(filtered, match)
+	}
+	return filtered
 }
 
 func validMatches(input string, matches []Match) []Match {

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>klovys99 Anonymization dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="/dashboard/assets/icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Afacad:wght@400;500;600;700;800&display=swap" />
+    <link rel="stylesheet" href="/dashboard/assets/dashboard.css" />
+    <script defer src="/dashboard/assets/dashboard.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="container header-inner">
+        <a class="brand" href="/dashboard" aria-label="klovys99 dashboard">
+          <img src="/dashboard/assets/klovys99-logo.png" alt="klovys99" class="brand-logo" />
+        </a>
+        <a class="button button-primary header-cta" href="https://klovys.fr/" target="_blank" rel="noreferrer">
+          <span aria-hidden="true">🚀</span>
+          <span id="proCtaLabel">Explore klovys99 Pro</span>
+        </a>
+        <div class="header-actions">
+          <span id="connectionStatus" class="status-pill" data-status="loading">Loading</span>
+          <button id="refreshButton" class="button button-secondary" type="button">Refresh</button>
+          <button id="resetButton" class="button button-danger" type="button">Reset stats</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container dashboard-shell">
+      <section class="page-heading" aria-labelledby="dashboardTitle">
+        <div>
+          <h1 id="dashboardTitle">Anonymization dashboard</h1>
+        </div>
+        <div class="last-updated">
+          <span id="lastUpdatedLabel">Last updated</span>
+          <strong id="lastUpdated">Never</strong>
+        </div>
+      </section>
+
+      <section class="hero-grid" aria-label="Primary protection metrics">
+        <article class="panel protection-panel">
+          <div class="panel-heading">
+            <div>
+              <h2 id="protectionTitle"><span aria-hidden="true">🛡️</span> Protection coverage</h2>
+            </div>
+          </div>
+          <div class="protection-summary">
+            <strong id="protectionRate">0%</strong>
+            <span id="protectedRatio">0 / 0 protections enabled</span>
+          </div>
+          <div class="protection-bar" aria-hidden="true">
+            <div id="protectionBarFill" class="protection-bar-fill"></div>
+          </div>
+          <div class="protection-bar-caption">
+            <span id="protectedBarLabel">0 enabled</span>
+            <span id="totalBarLabel">0 available</span>
+          </div>
+          <div class="protection-legend" aria-label="Protection coverage scale">
+            <span><i class="legend-dot legend-dot-low" aria-hidden="true"></i><span id="lowProtectionLabel">Low protection</span></span>
+            <span><i class="legend-dot legend-dot-mid" aria-hidden="true"></i><span id="improvingProtectionLabel">Improving</span></span>
+            <span><i class="legend-dot legend-dot-high" aria-hidden="true"></i><span id="strongProtectionLabel">Strong protection</span></span>
+          </div>
+        </article>
+
+        <article class="panel exposure-panel">
+          <div class="panel-heading">
+            <div>
+              <h2 id="exposureTitle"><span aria-hidden="true">⚠️</span> Highest exposure signal</h2>
+            </div>
+          </div>
+          <strong id="topExposureType" class="exposure-type">None yet</strong>
+          <span id="topExposureCount" class="exposure-count">0 replacements</span>
+          <p id="topExposureDescription" class="exposure-description">
+            No sensitive data type has been detected yet.
+          </p>
+        </article>
+      </section>
+
+      <details class="panel options-panel" aria-labelledby="optionsTitle">
+        <summary class="options-summary">
+          <div>
+            <h2 id="optionsTitle"><span aria-hidden="true">⚙️</span> Protection options</h2>
+          </div>
+          <div class="options-summary-meta">
+            <span id="optionsStatus" class="options-status" data-status="loading">Loading</span>
+            <span class="options-chevron" aria-hidden="true">⌄</span>
+          </div>
+        </summary>
+        <div class="options-body">
+          <div class="options-actions">
+            <button id="enableAllOptionsButton" class="button button-secondary" type="button">Enable all</button>
+            <button id="disableAllOptionsButton" class="button button-secondary" type="button">Disable all</button>
+            <button id="saveOptionsButton" class="button button-primary" type="button" disabled>Save changes</button>
+          </div>
+          <div id="protectionOptionsList" class="protection-options-list"></div>
+          <p id="optionsEmpty" class="empty-state" hidden>No protection option available.</p>
+        </div>
+      </details>
+
+      <section class="content-grid">
+        <article class="panel ranking-panel" aria-labelledby="tableTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="tableTitle"><span aria-hidden="true">🏷️</span> Replacement types</h2>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th id="typeHeader" scope="col">Type</th>
+                  <th id="countHeader" scope="col">Count</th>
+                  <th id="shareHeader" scope="col">Share</th>
+                </tr>
+              </thead>
+              <tbody id="typeRows"></tbody>
+            </table>
+          </div>
+          <p id="typeEmpty" class="empty-state" hidden>No replacement type recorded.</p>
+        </article>
+
+        <article class="panel panel-chart" aria-labelledby="pieTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="pieTitle"><span aria-hidden="true">📊</span> Detected data by type</h2>
+            </div>
+          </div>
+          <div class="pie-layout">
+            <div class="pie-chart-shell">
+              <svg id="pieChart" class="pie-chart" viewBox="0 0 240 240" role="img" aria-label="Detected data distribution"></svg>
+              <div class="pie-center" aria-hidden="true">
+                <strong id="pieTotal">0</strong>
+                <span id="pieUnit">items</span>
+              </div>
+            </div>
+            <ul id="pieLegend" class="legend" aria-label="Chart legend"></ul>
+          </div>
+          <p id="pieEmpty" class="empty-state" hidden>No anonymized data yet.</p>
+        </article>
+      </section>
+
+      <section class="panel timeline-panel" aria-labelledby="timelineTitle">
+        <div class="panel-heading">
+          <div>
+            <h2 id="timelineTitle"><span aria-hidden="true">⏱️</span> Hourly activity</h2>
+          </div>
+        </div>
+        <div id="timelineRows" class="timeline-rows"></div>
+        <p id="timelineEmpty" class="empty-state" hidden>No activity recorded yet.</p>
+      </section>
+
+      <section class="panel health-panel" aria-labelledby="healthTitle">
+        <div class="panel-heading">
+          <div>
+            <h2 id="healthTitle"><span aria-hidden="true">🧭</span> Operational errors</h2>
+          </div>
+        </div>
+        <div class="health-grid">
+          <div class="health-item">
+            <span id="llmErrorsLabel">LLM errors</span>
+            <strong id="llmErrors">0</strong>
+          </div>
+          <div class="health-item">
+            <span id="proxyErrorsLabel">Proxy errors</span>
+            <strong id="proxyErrors">0</strong>
+          </div>
+          <div class="health-item">
+            <span id="requestBodyErrorsLabel">Request body errors</span>
+            <strong id="requestBodyErrors">0</strong>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
