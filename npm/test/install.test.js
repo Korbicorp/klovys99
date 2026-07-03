@@ -5,8 +5,10 @@ const assert = require("node:assert/strict");
 
 const {
   binaryFileName,
+  defaultRepository,
   detectTarget,
   normalizedVersion,
+  parseRepository,
   releaseAssetName,
   releaseAssetUrl,
   releaseTag,
@@ -65,4 +67,15 @@ test("releaseAssetUrl points to the GitHub release asset", () => {
 test("binaryFileName uses .exe on Windows", () => {
   assert.equal(binaryFileName("win32"), "klovys99.exe");
   assert.equal(binaryFileName("linux"), "klovys99");
+});
+
+test("parseRepository supports git https URLs", () => {
+  assert.deepEqual(
+    parseRepository("git+https://github.com/Korbicorp/klovys99.git"),
+    { owner: "Korbicorp", name: "klovys99" },
+  );
+});
+
+test("parseRepository falls back to the default repository", () => {
+  assert.deepEqual(parseRepository(""), defaultRepository());
 });

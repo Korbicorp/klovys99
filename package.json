@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Local prompt anonymizing proxy for Codex and Claude Code",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Korbicorp/klovys99.git"
+  },
+  "homepage": "https://github.com/Korbicorp/klovys99",
+  "bugs": {
+    "url": "https://github.com/Korbicorp/klovys99/issues"
+  },
   "files": [
     "LICENSE",
     "README.md",

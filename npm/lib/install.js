@@ -5,8 +5,6 @@ const https = require("node:https");
 const path = require("node:path");
 const { pipeline } = require("node:stream/promises");
 
-const REPOSITORY_OWNER = "Korbicorp";
-const REPOSITORY_NAME = "klovys99";
 const RELEASE_HOST = "https://github.com";
 
 function detectTarget(platform = process.platform, arch = process.arch) {
@@ -51,16 +49,58 @@ function releaseAssetName(version, target) {
   return `klovys99_${normalizedVersion(version)}_${target.os}_${target.arch}${target.extension}`;
 }
 
-function releaseAssetUrl(version, target) {
+function releaseAssetUrl(version, target, repository = defaultRepository()) {
   const tag = releaseTag(version);
   const assetName = releaseAssetName(version, target);
-  return `${RELEASE_HOST}/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/releases/download/${tag}/${assetName}`;
+  return `${RELEASE_HOST}/${repository.owner}/${repository.name}/releases/download/${tag}/${assetName}`;
+}
+
+function readPackageManifest(packageRoot) {
+  const manifestPath = path.join(packageRoot, "package.json");
+  return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 }
 
 function readPackageVersion(packageRoot) {
-  const manifestPath = path.join(packageRoot, "package.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  return manifest.version;
+  return readPackageManifest(packageRoot).version;
+}
+
+function readRepository(packageRoot) {
+  const manifest = readPackageManifest(packageRoot);
+  const value =
+    typeof manifest.repository === "string"
+      ? manifest.repository
+      : manifest.repository && typeof manifest.repository.url === "string"
+        ? manifest.repository.url
+        : "";
+  return parseRepository(value);
+}
+
+function defaultRepository() {
+  return {
+    owner: "Korbicorp",
+    name: "klovys99",
+  };
+}
+
+function parseRepository(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return defaultRepository();
+  }
+
+  const normalized = trimmed
+    .replace(/^git\+/, "")
+    .replace(/^git@github\.com:/, "https://github.com/")
+    .replace(/\.git$/, "");
+  const match = normalized.match(/github\.com\/([^/]+)\/([^/]+)$/);
+  if (!match) {
+    return defaultRepository();
+  }
+
+  return {
+    owner: match[1],
+    name: match[2],
+  };
 }
 
 async function installReleaseBinary({
@@ -71,7 +111,7 @@ async function installReleaseBinary({
 }) {
   const target = detectTarget(platform, arch);
   const binaryPath = path.join(packageRoot, "dist", binaryFileName(platform));
-  const assetUrl = releaseAssetUrl(version, target);
+  const assetUrl = releaseAssetUrl(version, target, readRepository(packageRoot));
 
   await fs.promises.mkdir(path.dirname(binaryPath), { recursive: true });
   await downloadToFile(assetUrl, binaryPath);
@@ -152,10 +192,13 @@ async function readResponseBody(response) {
 
 module.exports = {
   binaryFileName,
+  defaultRepository,
   detectTarget,
   installReleaseBinary,
   normalizedVersion,
+  parseRepository,
   readPackageVersion,
+  readRepository,
   releaseAssetName,
   releaseAssetUrl,
   releaseTag,
