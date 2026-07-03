@@ -357,7 +357,7 @@ go mod download
 ```
 
 Tagged releases build one binary per supported OS and architecture in GitHub
-Actions. If `NPM_TOKEN` is configured in repository secrets, the same tag
+Actions. If `NPM_TOKEN_KLOVYS` is configured in repository secrets, the same tag
 workflow also publishes the npm package after uploading the release assets.
 
 Run the test suites:
