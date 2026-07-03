@@ -34,6 +34,41 @@ const (
 	EntityPetIdentifier     EntityType = "PET_IDENTIFIER"
 )
 
+// KnownEntityTypes returns the anonymization types supported by the local config.
+func KnownEntityTypes() []EntityType {
+	return []EntityType{
+		EntityEmail,
+		EntityIP,
+		EntityPhone,
+		EntityNIR,
+		EntityFirstName,
+		EntityLastName,
+		EntityAddress,
+		EntityIBAN,
+		EntityCreditCard,
+		EntityMACAddress,
+		EntityCrypto,
+		EntitySecret,
+		EntityGenericID,
+		EntityNumericID,
+		EntityReferenceID,
+		EntityName,
+		EntityPersonName,
+		EntityLocation,
+		EntityOrganization,
+		EntityContextIdentifier,
+		EntityOtherPII,
+		EntityDate,
+		EntityBloodType,
+		EntityDocumentID,
+		EntityVehiclePlate,
+		EntityMedicalProvider,
+		EntitySchool,
+		EntityEmployer,
+		EntityPetIdentifier,
+	}
+}
+
 type Match struct {
 	// Start is the byte offset where the sensitive value starts in the input.
 	Start int

@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Korbicorp/klovis/internal/anonymizer"
+	appconfig "github.com/Korbicorp/klovis/internal/appconfig"
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/llm"
 	"github.com/Korbicorp/klovis/internal/proxy"
@@ -45,6 +48,7 @@ const (
 	defaultLLMModel         = llm.DefaultModel
 	defaultStatsPath        = statlog.DefaultPath
 	defaultStatsMaxBytes    = statlog.DefaultMaxBytes
+	defaultConfigPath       = appconfig.DefaultPath
 )
 
 //go:embed dashboard/index.html dashboard/assets/*
@@ -80,6 +84,7 @@ type runtimeConfig struct {
 	LLMAutoStart     bool
 	StatsPath        string
 	StatsMaxBytes    int64
+	ConfigPath       string
 }
 
 type application struct {
@@ -89,6 +94,7 @@ type application struct {
 	logFile       *os.File
 	llmService    *llm.Service
 	statsRecorder *statlog.Recorder
+	configStore   *appconfig.Store
 }
 
 func run(ctx context.Context, config runtimeConfig) error {
@@ -98,8 +104,40 @@ func run(ctx context.Context, config runtimeConfig) error {
 	}
 	defer app.Close()
 
-	app.logger.Info().Msg("proxy starting")
+	app.logger.Info().
+		Str("addr", app.addr).
+		Str("dashboard_url", dashboardURLFromAddr(app.addr)).
+		Msg("proxy starting")
 	return http.ListenAndServe(app.addr, app.handler)
+}
+
+// dashboardURLFromAddr converts the listen address into a local dashboard URL.
+func dashboardURLFromAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		addr = defaultProxyAdr
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			host = "localhost"
+			port = strings.TrimPrefix(addr, ":")
+		} else if !strings.Contains(addr, ":") {
+			host = "localhost"
+			port = addr
+		} else {
+			return "http://" + addr + "/dashboard"
+		}
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("http://%s:%s/dashboard", host, port)
 }
 
 func buildApplication(ctx context.Context, config runtimeConfig) (*application, error) {
@@ -144,6 +182,16 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
+	configPath := strings.TrimSpace(config.ConfigPath)
+	if configPath == "" {
+		configPath = defaultConfigPath
+	}
+	configStore, err := appconfig.NewStore(configPath, anonymizer.KnownEntityTypes())
+	if err != nil {
+		closeLogFile(logFile)
+		return nil, err
+	}
+
 	detectorService := detectors.NewService(config.Detectors)
 	detectorResult, err := detectorService.Load(ctx)
 	if err != nil {
@@ -177,7 +225,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target:        config.Target,
 		Logger:        config.Logger,
-		Anonymizer:    anonymizer.NewService(detectorResult.Detectors),
+		Anonymizer:    anonymizer.NewServiceWithProtectionPolicy(detectorResult.Detectors, configStore),
 		MatchFinder:   matchFinder,
 		StatsRecorder: statsRecorder,
 	})
@@ -189,7 +237,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder)
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore)
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,
@@ -197,6 +245,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		logFile:       logFile,
 		llmService:    llmService,
 		statsRecorder: statsRecorder,
+		configStore:   configStore,
 	}, nil
 }
 
@@ -205,7 +254,16 @@ type statsStore interface {
 	Reset() error
 }
 
-func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore) http.Handler {
+type appConfigStore interface {
+	ProtectionOptions() []appconfig.ProtectionOption
+	UpdateProtectionOptions(options []appconfig.ProtectionOption) ([]appconfig.ProtectionOption, error)
+}
+
+type configAPIResponse struct {
+	ProtectionOptions []appconfig.ProtectionOption `json:"protection_options"`
+}
+
+func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configStore appConfigStore) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	registerDashboardRoutes(router)
@@ -224,6 +282,24 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore) http.Ha
 				return
 			}
 			ctx.JSON(http.StatusOK, gin.H{"reset": true})
+		})
+	}
+	if configStore != nil {
+		router.GET("/api/config", func(ctx *gin.Context) {
+			ctx.JSON(http.StatusOK, configResponse(configStore))
+		})
+		router.PUT("/api/config", func(ctx *gin.Context) {
+			options, err := decodeConfigRequest(ctx.Request)
+			if err != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			updated, err := configStore.UpdateProtectionOptions(options)
+			if err != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, configAPIResponse{ProtectionOptions: updated})
 		})
 	}
 	router.NoRoute(func(ctx *gin.Context) {
@@ -245,6 +321,24 @@ func registerDashboardRoutes(router *gin.Engine) {
 	router.GET("/dashboard", serveDashboardIndex)
 	router.GET("/dashboard/", serveDashboardIndex)
 	router.StaticFS("/dashboard/assets", dashboardAssetsFS)
+}
+
+// configResponse builds the dashboard/API view of the current app config.
+func configResponse(configStore appConfigStore) configAPIResponse {
+	return configAPIResponse{ProtectionOptions: configStore.ProtectionOptions()}
+}
+
+// decodeConfigRequest parses a dashboard config update request.
+func decodeConfigRequest(request *http.Request) ([]appconfig.ProtectionOption, error) {
+	defer request.Body.Close()
+	var payload configAPIResponse
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode config request: %w", err)
+	}
+	if payload.ProtectionOptions == nil {
+		return nil, fmt.Errorf("protection_options is required")
+	}
+	return payload.ProtectionOptions, nil
 }
 
 func serveDashboardIndex(ctx *gin.Context) {
@@ -353,6 +447,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		LLMAutoStart:     llmAutoStart,
 		StatsPath:        defaultStatsPath,
 		StatsMaxBytes:    defaultStatsMaxBytes,
+		ConfigPath:       defaultConfigPath,
 	}, nil
 }
 

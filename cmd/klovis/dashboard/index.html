@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>klovys99 Anonymisation dashboard</title>
+    <title>klovys99 Anonymization dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/dashboard/assets/icon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -15,12 +15,11 @@
     <header class="app-header">
       <div class="container header-inner">
         <a class="brand" href="/dashboard" aria-label="klovys99 dashboard">
-          <img src="/dashboard/assets/icon.svg" alt="" class="brand-icon" />
-          <span class="brand-text">klovys99</span>
+          <img src="/dashboard/assets/klovys99-logo.png" alt="klovys99" class="brand-logo" />
         </a>
         <a class="button button-primary header-cta" href="https://klovys.fr/" target="_blank" rel="noreferrer">
           <span aria-hidden="true">🚀</span>
-          Explore klovys99 Pro
+          <span id="proCtaLabel">Explore klovys99 Pro</span>
         </a>
         <div class="header-actions">
           <span id="connectionStatus" class="status-pill" data-status="loading">Loading</span>
@@ -33,11 +32,10 @@
     <main class="container dashboard-shell">
       <section class="page-heading" aria-labelledby="dashboardTitle">
         <div>
-          <p class="eyebrow"><span aria-hidden="true">📍</span> Local proxy telemetry</p>
-          <h1 id="dashboardTitle">Anonymisation dashboard</h1>
+          <h1 id="dashboardTitle">Anonymization dashboard</h1>
         </div>
         <div class="last-updated">
-          <span>Last updated</span>
+          <span id="lastUpdatedLabel">Last updated</span>
           <strong id="lastUpdated">Never</strong>
         </div>
       </section>
@@ -46,8 +44,7 @@
         <article class="panel protection-panel">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow"><span aria-hidden="true">🛡️</span> Primary signal</p>
-              <h2>Protection coverage</h2>
+              <h2 id="protectionTitle"><span aria-hidden="true">🛡️</span> Protection coverage</h2>
             </div>
           </div>
           <div class="protection-summary">
@@ -62,17 +59,16 @@
             <span id="totalBarLabel">0 available</span>
           </div>
           <div class="protection-legend" aria-label="Protection coverage scale">
-            <span><i class="legend-dot legend-dot-low" aria-hidden="true"></i>Low protection</span>
-            <span><i class="legend-dot legend-dot-mid" aria-hidden="true"></i>Improving</span>
-            <span><i class="legend-dot legend-dot-high" aria-hidden="true"></i>Strong protection</span>
+            <span><i class="legend-dot legend-dot-low" aria-hidden="true"></i><span id="lowProtectionLabel">Low protection</span></span>
+            <span><i class="legend-dot legend-dot-mid" aria-hidden="true"></i><span id="improvingProtectionLabel">Improving</span></span>
+            <span><i class="legend-dot legend-dot-high" aria-hidden="true"></i><span id="strongProtectionLabel">Strong protection</span></span>
           </div>
         </article>
 
         <article class="panel exposure-panel">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow"><span aria-hidden="true">⚠️</span> Attention</p>
-              <h2>Highest exposure signal</h2>
+              <h2 id="exposureTitle"><span aria-hidden="true">⚠️</span> Highest exposure signal</h2>
             </div>
           </div>
           <strong id="topExposureType" class="exposure-type">None yet</strong>
@@ -83,21 +79,41 @@
         </article>
       </section>
 
+      <details class="panel options-panel" aria-labelledby="optionsTitle">
+        <summary class="options-summary">
+          <div>
+            <h2 id="optionsTitle"><span aria-hidden="true">⚙️</span> Protection options</h2>
+          </div>
+          <div class="options-summary-meta">
+            <span id="optionsStatus" class="options-status" data-status="loading">Loading</span>
+            <span class="options-chevron" aria-hidden="true">⌄</span>
+          </div>
+        </summary>
+        <div class="options-body">
+          <div class="options-actions">
+            <button id="enableAllOptionsButton" class="button button-secondary" type="button">Enable all</button>
+            <button id="disableAllOptionsButton" class="button button-secondary" type="button">Disable all</button>
+            <button id="saveOptionsButton" class="button button-primary" type="button" disabled>Save changes</button>
+          </div>
+          <div id="protectionOptionsList" class="protection-options-list"></div>
+          <p id="optionsEmpty" class="empty-state" hidden>No protection option available.</p>
+        </div>
+      </details>
+
       <section class="content-grid">
         <article class="panel ranking-panel" aria-labelledby="tableTitle">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow"><span aria-hidden="true">🏷️</span> Ranking</p>
-              <h2 id="tableTitle">Replacement types</h2>
+              <h2 id="tableTitle"><span aria-hidden="true">🏷️</span> Replacement types</h2>
             </div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th scope="col">Type</th>
-                  <th scope="col">Count</th>
-                  <th scope="col">Share</th>
+                  <th id="typeHeader" scope="col">Type</th>
+                  <th id="countHeader" scope="col">Count</th>
+                  <th id="shareHeader" scope="col">Share</th>
                 </tr>
               </thead>
               <tbody id="typeRows"></tbody>
@@ -109,8 +125,7 @@
         <article class="panel panel-chart" aria-labelledby="pieTitle">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow"><span aria-hidden="true">📊</span> Distribution</p>
-              <h2 id="pieTitle">Detected data by type</h2>
+              <h2 id="pieTitle"><span aria-hidden="true">📊</span> Detected data by type</h2>
             </div>
           </div>
           <div class="pie-layout">
@@ -130,8 +145,7 @@
       <section class="panel timeline-panel" aria-labelledby="timelineTitle">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow"><span aria-hidden="true">⏱️</span> Timeline</p>
-            <h2 id="timelineTitle">Hourly activity</h2>
+            <h2 id="timelineTitle"><span aria-hidden="true">⏱️</span> Hourly activity</h2>
           </div>
         </div>
         <div id="timelineRows" class="timeline-rows"></div>
@@ -141,21 +155,20 @@
       <section class="panel health-panel" aria-labelledby="healthTitle">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow"><span aria-hidden="true">🧭</span> System health</p>
-            <h2 id="healthTitle">Operational errors</h2>
+            <h2 id="healthTitle"><span aria-hidden="true">🧭</span> Operational errors</h2>
           </div>
         </div>
         <div class="health-grid">
           <div class="health-item">
-            <span>LLM errors</span>
+            <span id="llmErrorsLabel">LLM errors</span>
             <strong id="llmErrors">0</strong>
           </div>
           <div class="health-item">
-            <span>Proxy errors</span>
+            <span id="proxyErrorsLabel">Proxy errors</span>
             <strong id="proxyErrors">0</strong>
           </div>
           <div class="health-item">
-            <span>Request body errors</span>
+            <span id="requestBodyErrorsLabel">Request body errors</span>
             <strong id="requestBodyErrors">0</strong>
           </div>
         </div>

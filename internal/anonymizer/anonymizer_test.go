@@ -9,8 +9,19 @@ type staticDetector struct {
 	matches []Match
 }
 
+type staticProtectionPolicy map[EntityType]bool
+
 func (d staticDetector) FindAll(string) []Match {
 	return append([]Match(nil), d.matches...)
+}
+
+// IsTypeEnabled returns the test-configured enabled state for one entity type.
+func (p staticProtectionPolicy) IsTypeEnabled(entityType EntityType) bool {
+	enabled, ok := p[entityType]
+	if !ok {
+		return true
+	}
+	return enabled
 }
 
 func TestAnonymizeKeepsStableTokensForRepeatedValues(t *testing.T) {
@@ -39,6 +50,36 @@ func TestAnonymizeKeepsStableTokensForRepeatedValues(t *testing.T) {
 	}
 	if got, want := result.Findings[0].Token, "[EMAIL_1]"; got != want {
 		t.Fatalf("finding token = %q, want %q", got, want)
+	}
+}
+
+// TestAnonymizeSkipsDisabledTypes verifies that disabled entity types are neither replaced nor counted.
+func TestAnonymizeSkipsDisabledTypes(t *testing.T) {
+	engine := NewServiceWithProtectionPolicy([]Detector{
+		staticDetector{
+			matches: []Match{
+				{Start: 0, End: 16, Type: EntityEmail, Priority: 10, Normalized: "alice@example.io"},
+				{Start: 21, End: 33, Type: EntitySecret, Priority: 10, Normalized: "secret-token"},
+			},
+		},
+	}, staticProtectionPolicy{
+		EntityEmail:  false,
+		EntitySecret: true,
+	})
+
+	output, result := engine.Anonymize("alice@example.io and secret-token")
+
+	if got, want := output, "alice@example.io and [SECRET_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if _, ok := result.Stats[EntityEmail]; ok {
+		t.Fatal("disabled EMAIL should not be counted")
+	}
+	if got, want := result.Stats[EntitySecret].Count, 1; got != want {
+		t.Fatalf("secret count = %d, want %d", got, want)
+	}
+	if got, want := len(result.Findings), 1; got != want {
+		t.Fatalf("findings count = %d, want %d", got, want)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Korbicorp/klovis/internal/anonymizer"
+	appconfig "github.com/Korbicorp/klovis/internal/appconfig"
 	"github.com/Korbicorp/klovis/internal/detectors"
 	"github.com/Korbicorp/klovis/internal/proxy"
 	statlog "github.com/Korbicorp/klovis/internal/stats"
@@ -191,6 +193,32 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	if config.StatsMaxBytes != statlog.DefaultMaxBytes {
 		t.Fatalf("StatsMaxBytes = %d, want default stats max bytes", config.StatsMaxBytes)
 	}
+	if config.ConfigPath != appconfig.DefaultPath {
+		t.Fatalf("ConfigPath = %q, want default config path", config.ConfigPath)
+	}
+}
+
+func TestDashboardURLFromAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		addr string
+		want string
+	}{
+		{name: "default empty address", addr: "", want: "http://localhost:8080/dashboard"},
+		{name: "port only listen address", addr: ":8080", want: "http://localhost:8080/dashboard"},
+		{name: "all interfaces", addr: "0.0.0.0:9090", want: "http://localhost:9090/dashboard"},
+		{name: "loopback address", addr: "127.0.0.1:9090", want: "http://127.0.0.1:9090/dashboard"},
+		{name: "localhost address", addr: "localhost:9090", want: "http://localhost:9090/dashboard"},
+		{name: "ipv6 loopback", addr: "[::1]:9090", want: "http://[::1]:9090/dashboard"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dashboardURLFromAddr(tt.addr); got != tt.want {
+				t.Fatalf("dashboardURLFromAddr(%q) = %q, want %q", tt.addr, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRuntimeLoggerDefaultsToStdoutWithoutProxyLog(t *testing.T) {
@@ -276,9 +304,10 @@ func TestBuildApplicationSetsGlobalLoggerToRuntimeFile(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:    mustParseURL(t, upstream.URL),
-		LogToFile: true,
-		Detectors: noExternalDetectorsConfig(),
+		Target:     mustParseURL(t, upstream.URL),
+		LogToFile:  true,
+		Detectors:  noExternalDetectorsConfig(),
+		ConfigPath: testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -335,6 +364,7 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 		LLMTimeout:       5 * time.Second,
 		LLMMaxChunkBytes: 64,
 		StatsPath:        t.TempDir() + "/stats.jsonl",
+		ConfigPath:       testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -377,10 +407,11 @@ func TestBuildApplicationServesStatsAPIBeforeProxy(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:    mustParseURL(t, upstream.URL),
-		Logger:    ptrLogger(zerolog.Nop()),
-		Detectors: noExternalDetectorsConfig(),
-		StatsPath: t.TempDir() + "/stats.jsonl",
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -454,6 +485,99 @@ func TestBuildApplicationServesStatsAPIBeforeProxy(t *testing.T) {
 	}
 }
 
+// TestBuildApplicationConfigAPIUpdatesAnonymization verifies that saved dashboard toggles affect real anonymization.
+func TestBuildApplicationConfigAPIUpdatesAnonymization(t *testing.T) {
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	configResponse, err := server.Client().Get(server.URL + "/api/config")
+	if err != nil {
+		t.Fatalf("call config API: %v", err)
+	}
+	defer configResponse.Body.Close()
+	if configResponse.StatusCode != http.StatusOK {
+		t.Fatalf("config status = %d, want 200", configResponse.StatusCode)
+	}
+	var initialConfig configAPIResponse
+	if err := json.NewDecoder(configResponse.Body).Decode(&initialConfig); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+	if !optionEnabled(initialConfig.ProtectionOptions, anonymizer.EntityEmail) {
+		t.Fatalf("initial config = %#v, want EMAIL enabled", initialConfig)
+	}
+
+	updateBody := strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false}]}`)
+	updateResponse, err := server.Client().Post(server.URL+"/api/config", "application/json", updateBody)
+	if err != nil {
+		t.Fatalf("call config update with POST: %v", err)
+	}
+	defer updateResponse.Body.Close()
+	if updateResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("config POST status = %d, want 404", updateResponse.StatusCode)
+	}
+
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/config", strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false}]}`))
+	if err != nil {
+		t.Fatalf("build config request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	putResponse, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("call config update: %v", err)
+	}
+	defer putResponse.Body.Close()
+	if putResponse.StatusCode != http.StatusOK {
+		t.Fatalf("config update status = %d, want 200", putResponse.StatusCode)
+	}
+	var updatedConfig configAPIResponse
+	if err := json.NewDecoder(putResponse.Body).Decode(&updatedConfig); err != nil {
+		t.Fatalf("decode updated config: %v", err)
+	}
+	if optionEnabled(updatedConfig.ProtectionOptions, anonymizer.EntityEmail) {
+		t.Fatalf("updated config = %#v, want EMAIL disabled", updatedConfig)
+	}
+
+	proxyResponse, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hello alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer proxyResponse.Body.Close()
+	if strings.Contains(upstreamBody, "[EMAIL_") || !strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want EMAIL left untouched", upstreamBody)
+	}
+
+	summary, err := app.statsRecorder.Summary()
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if summary.TotalRequests != 1 || summary.AnonymizedRequests != 0 || len(summary.CountsByType) != 0 {
+		t.Fatalf("summary = %#v, want one non-anonymized request", summary)
+	}
+}
+
 // TestBuildApplicationServesDashboardBeforeProxy verifies that the local dashboard is served by the proxy itself
 // and that missing dashboard routes are not accidentally forwarded to the upstream LLM provider.
 func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
@@ -465,10 +589,11 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:    mustParseURL(t, upstream.URL),
-		Logger:    ptrLogger(zerolog.Nop()),
-		Detectors: noExternalDetectorsConfig(),
-		StatsPath: t.TempDir() + "/stats.jsonl",
+		Target:     mustParseURL(t, upstream.URL),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -490,9 +615,15 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dashboard body: %v", err)
 	}
-	if got := string(dashboardBody); !strings.Contains(got, "klovys99 Anonymisation dashboard") ||
-		!strings.Contains(got, "Anonymisation dashboard") ||
+	if got := string(dashboardBody); !strings.Contains(got, "klovys99 Anonymization dashboard") ||
+		!strings.Contains(got, "Anonymization dashboard") ||
+		!strings.Contains(got, "klovys99-logo.png") ||
+		!strings.Contains(got, "icon.svg") ||
 		!strings.Contains(got, "Protection coverage") ||
+		!strings.Contains(got, "Protection options") ||
+		!strings.Contains(got, "Enable all") ||
+		!strings.Contains(got, "Disable all") ||
+		!strings.Contains(got, "Save changes") ||
 		!strings.Contains(got, "Explore klovys99 Pro") ||
 		!strings.Contains(got, "https://klovys.fr/") ||
 		!strings.Contains(got, "/dashboard/assets/dashboard.js") {
@@ -519,6 +650,44 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	}
 	if upstreamHits != 0 {
 		t.Fatalf("upstreamHits = %d, want dashboard assets not proxied", upstreamHits)
+	}
+
+	logoResponse, err := server.Client().Get(server.URL + "/dashboard/assets/klovys99-logo.png")
+	if err != nil {
+		t.Fatalf("call dashboard logo: %v", err)
+	}
+	defer logoResponse.Body.Close()
+	if logoResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard logo status = %d, want 200", logoResponse.StatusCode)
+	}
+	logoBody, err := io.ReadAll(logoResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard logo: %v", err)
+	}
+	if len(logoBody) < 8 || string(logoBody[1:4]) != "PNG" {
+		t.Fatalf("dashboard logo does not look like a PNG, length=%d", len(logoBody))
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard logo not proxied", upstreamHits)
+	}
+
+	iconResponse, err := server.Client().Get(server.URL + "/dashboard/assets/icon.svg")
+	if err != nil {
+		t.Fatalf("call dashboard icon: %v", err)
+	}
+	defer iconResponse.Body.Close()
+	if iconResponse.StatusCode != http.StatusOK {
+		t.Fatalf("dashboard icon status = %d, want 200", iconResponse.StatusCode)
+	}
+	iconBody, err := io.ReadAll(iconResponse.Body)
+	if err != nil {
+		t.Fatalf("read dashboard icon: %v", err)
+	}
+	if !strings.Contains(string(iconBody), "<svg") {
+		t.Fatalf("dashboard icon does not look like SVG: %q", string(iconBody))
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want dashboard icon not proxied", upstreamHits)
 	}
 
 	missingDashboardResponse, err := server.Client().Get(server.URL + "/dashboard/unknown")
@@ -551,6 +720,7 @@ func TestBuildApplicationReturnsLLMStartupError(t *testing.T) {
 		LLMEnabled: true,
 		LLMBaseURL: "localhost:11434",
 		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), "connect llm") {
 		t.Fatalf("error = %v, want llm startup error", err)
@@ -591,11 +761,27 @@ func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
 	return &logger
 }
 
+// optionEnabled returns one type's enabled state from an API option list.
+func optionEnabled(options []appconfig.ProtectionOption, entityType anonymizer.EntityType) bool {
+	for _, option := range options {
+		if option.Type == entityType {
+			return option.Enabled
+		}
+	}
+	return false
+}
+
 func noExternalDetectorsConfig() detectors.Config {
 	config := detectors.DefaultConfig()
 	config.EnableGitleaks = false
 	config.EnablePresidio = false
 	return config
+}
+
+// testConfigPath returns a per-test app config file path.
+func testConfigPath(t *testing.T) string {
+	t.Helper()
+	return t.TempDir() + "/klovys99_config.json"
 }
 
 func stringPtr(value string) *string {
