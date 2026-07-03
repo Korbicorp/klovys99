@@ -260,7 +260,7 @@ func TestSessionPromptAnonymizerPreservesTopLevelSystemPrompts(t *testing.T) {
 	}
 }
 
-func TestSessionPromptAnonymizerAnonymizesUserContentOutsideSession(t *testing.T) {
+func TestSessionPromptAnonymizerPreservesSystemReminderAndAnonymizesUserContent(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>Contact alice@example.com</system-reminder>"},{"type":"text","text":"Donne moi l'IBAN FR76 3000 6000 0112 3456 7890 189"}]}]}`)
 
 	var logs bytes.Buffer
@@ -274,13 +274,43 @@ func TestSessionPromptAnonymizerAnonymizesUserContentOutsideSession(t *testing.T
 	if !strings.Contains(anonymizedBody, "Donne moi l'IBAN [IBAN_1]") {
 		t.Fatalf("body = %q, want anonymized user content", anonymizedBody)
 	}
-	if !strings.Contains(anonymizedBody, "<system-reminder>Contact [EMAIL_1]</system-reminder>") {
-		t.Fatalf("body = %q, want system reminder anonymized", anonymizedBody)
+	if !strings.Contains(anonymizedBody, "<system-reminder>Contact alice@example.com</system-reminder>") {
+		t.Fatalf("body = %q, want system reminder preserved", anonymizedBody)
 	}
-	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"IBAN":1`) {
+	if strings.Contains(anonymizedBody, "[EMAIL_1]") {
+		t.Fatalf("body = %q, did not want system reminder email anonymized", anonymizedBody)
+	}
+	if !strings.Contains(logOutput, `"IBAN":1`) {
 		t.Fatalf("logs = %q, want IBAN stats", logOutput)
 	}
+	if strings.Contains(logOutput, `"EMAIL"`) {
+		t.Fatalf("logs = %q, did not want system reminder email stats", logOutput)
+	}
 	for _, unexpected := range []string{"alice@example.com", "FR76 3000 6000 0112 3456 7890 189", "[EMAIL_1]", "[IBAN_1]", "prompt_original", "prompt_anonymized"} {
+		if strings.Contains(logOutput, unexpected) {
+			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
+		}
+	}
+}
+
+func TestSessionPromptAnonymizerPreservesSystemReminderInsideMixedString(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"Email bob@example.com <system-reminder>Contact alice@example.com</system-reminder> Phone 06 12 34 56 78"}]}`)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	anonymizedBody := newTestPromptAnonymizer().anonymize(context.Background(), logger, string(body))
+	logOutput := logs.String()
+
+	if strings.Contains(anonymizedBody, "bob@example.com") || strings.Contains(anonymizedBody, "06 12 34 56 78") {
+		t.Fatalf("body = %q, want user content values anonymized", anonymizedBody)
+	}
+	if !strings.Contains(anonymizedBody, `"content":"Email [EMAIL_1] <system-reminder>Contact alice@example.com</system-reminder> Phone [PHONE_1]"`) {
+		t.Fatalf("body = %q, want only system reminder preserved", anonymizedBody)
+	}
+	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"PHONE":1`) {
+		t.Fatalf("logs = %q, want user content stats only", logOutput)
+	}
+	for _, unexpected := range []string{"alice@example.com", "bob@example.com", "06 12 34 56 78", "[EMAIL_1]", "[PHONE_1]", "prompt_original", "prompt_anonymized"} {
 		if strings.Contains(logOutput, unexpected) {
 			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
 		}

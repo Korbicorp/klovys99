@@ -19,13 +19,15 @@ import (
 )
 
 const (
-	DefaultLogPath       = "proxy.log"
-	DefaultAnthropicURL  = "https://api.anthropic.com"
-	DefaultOpenAIURL     = "https://api.openai.com"
-	AnthropicRoutePrefix = "/anthropic"
-	OpenAIRoutePrefix    = "/openai"
-	sessionOpenTag       = "<session>"
-	sessionCloseTag      = "</session>"
+	DefaultLogPath         = "proxy.log"
+	DefaultAnthropicURL    = "https://api.anthropic.com"
+	DefaultOpenAIURL       = "https://api.openai.com"
+	AnthropicRoutePrefix   = "/anthropic"
+	OpenAIRoutePrefix      = "/openai"
+	sessionOpenTag         = "<session>"
+	sessionCloseTag        = "</session>"
+	systemReminderOpenTag  = "<system-reminder>"
+	systemReminderCloseTag = "</system-reminder>"
 )
 
 var metadataKeys = map[string]struct{}{
@@ -307,14 +309,15 @@ func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Log
 }
 
 type anonymizationContext struct {
-	conversationContent bool
-	textValue           bool
+	conversationContent     bool
+	textValue               bool
+	preserveSystemReminders bool
 }
 
 func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonymizationContext) (any, bool) {
 	switch typed := value.(type) {
 	case string:
-		return r.anonymizeString(typed, context.textValue)
+		return r.anonymizeString(typed, context)
 	case []any:
 		changed := false
 		for index, item := range typed {
@@ -353,8 +356,9 @@ func isMetadataKey(key string) bool {
 func (r *promptAnonymizationRun) childContext(key string, parent map[string]any, context anonymizationContext) anonymizationContext {
 	if key == "content" && isConversationMessage(parent) {
 		return anonymizationContext{
-			conversationContent: true,
-			textValue:           isStringContent(parent, key),
+			conversationContent:     true,
+			textValue:               isStringContent(parent, key),
+			preserveSystemReminders: isStringContent(parent, key),
 		}
 	}
 
@@ -373,8 +377,9 @@ func (r *promptAnonymizationRun) childContext(key string, parent map[string]any,
 
 	if key == "text" && stringMapValue(parent, "type") == "text" && context.conversationContent {
 		return anonymizationContext{
-			conversationContent: true,
-			textValue:           true,
+			conversationContent:     true,
+			textValue:               true,
+			preserveSystemReminders: true,
 		}
 	}
 
@@ -459,11 +464,14 @@ func isFileReadToolName(name string) bool {
 	}
 }
 
-func (r *promptAnonymizationRun) anonymizeString(value string, textValue bool) (string, bool) {
-	if textValue {
-		return r.anonymizeTextValue(value)
+func (r *promptAnonymizationRun) anonymizeString(value string, context anonymizationContext) (string, bool) {
+	if !context.textValue {
+		return value, false
 	}
-	return value, false
+	if context.preserveSystemReminders {
+		return r.anonymizeTextValuePreservingSystemReminders(value)
+	}
+	return r.anonymizeTextValue(value)
 }
 
 func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
@@ -473,6 +481,40 @@ func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool)
 	}
 	r.addStats(result)
 	return anonymized, true
+}
+
+func (r *promptAnonymizationRun) anonymizeTextValuePreservingSystemReminders(value string) (string, bool) {
+	if !strings.Contains(value, systemReminderOpenTag) {
+		return r.anonymizeTextValue(value)
+	}
+
+	var output strings.Builder
+	changed := false
+	remaining := value
+	for {
+		openIndex := strings.Index(remaining, systemReminderOpenTag)
+		if openIndex < 0 {
+			anonymized, segmentChanged := r.anonymizeTextValue(remaining)
+			output.WriteString(anonymized)
+			return output.String(), changed || segmentChanged
+		}
+
+		closeSearchStart := openIndex + len(systemReminderOpenTag)
+		closeIndex := strings.Index(remaining[closeSearchStart:], systemReminderCloseTag)
+		if closeIndex < 0 {
+			anonymized, segmentChanged := r.anonymizeTextValue(remaining)
+			output.WriteString(anonymized)
+			return output.String(), changed || segmentChanged
+		}
+
+		anonymized, segmentChanged := r.anonymizeTextValue(remaining[:openIndex])
+		output.WriteString(anonymized)
+		changed = changed || segmentChanged
+
+		closeEnd := closeSearchStart + closeIndex + len(systemReminderCloseTag)
+		output.WriteString(remaining[openIndex:closeEnd])
+		remaining = remaining[closeEnd:]
+	}
 }
 
 func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {
