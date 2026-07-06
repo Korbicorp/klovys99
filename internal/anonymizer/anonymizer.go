@@ -20,6 +20,8 @@ type Run struct {
 	tokens map[EntityType]map[string]string
 	// nextID tracks the next numeric suffix to allocate for each entity type.
 	nextID map[EntityType]int
+	// logMatches controls whether raw detector matches are emitted in debug logs.
+	logMatches bool
 }
 
 type allowAllProtectionPolicy struct{}
@@ -52,10 +54,15 @@ func NewServiceWithProtectionPolicy(detectors []Detector, protectionPolicy Prote
 
 // NewRun creates an isolated anonymization run with stable tokens across calls.
 func (a *Service) NewRun() *Run {
+	return a.newRun(true)
+}
+
+func (a *Service) newRun(logMatches bool) *Run {
 	return &Run{
-		service: a,
-		tokens:  make(map[EntityType]map[string]string),
-		nextID:  make(map[EntityType]int),
+		service:    a,
+		tokens:     make(map[EntityType]map[string]string),
+		nextID:     make(map[EntityType]int),
+		logMatches: logMatches,
 	}
 }
 
@@ -64,21 +71,44 @@ func (a *Service) Anonymize(input string) (string, Result) {
 	return a.NewRun().Anonymize(input)
 }
 
+// Preview returns an anonymization preview for the currently enabled protections.
+func (a *Service) Preview(input string) PreviewResult {
+	return a.PreviewWithMatches(input, nil)
+}
+
+// PreviewWithMatches returns an anonymization preview that includes caller-provided matches.
+func (a *Service) PreviewWithMatches(input string, extraMatches []Match) PreviewResult {
+	run := a.newRun(false)
+	return run.PreviewWithMatches(input, extraMatches)
+}
+
 // Anonymize replaces detected sensitive values while reusing run-local tokens.
 func (r *Run) Anonymize(input string) (string, Result) {
-	matches := r.service.collectMatches(input, r.service.detectors)
-	matches = r.service.filterEnabledMatches(deduplicateMatches(validMatches(input, matches)))
-	matches = r.service.resolveOverlaps(matches)
-	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].Start < matches[j].Start
-	})
+	return r.AnonymizeWithMatches(input, nil)
+}
 
-	if len(matches) > 0 {
+// AnonymizeWithMatches replaces detected sensitive values plus caller-provided matches for one run.
+func (r *Run) AnonymizeWithMatches(input string, extraMatches []Match) (string, Result) {
+	matches := r.resolvedEnabledMatches(input, extraMatches)
+	return r.anonymizeResolvedMatches(input, matches)
+}
+
+// PreviewWithMatches returns a visual preview without emitting raw sensitive logs.
+func (r *Run) PreviewWithMatches(input string, extraMatches []Match) PreviewResult {
+	enabledMatches := r.resolvedEnabledMatches(input, extraMatches)
+	anonymized, result := r.anonymizeResolvedMatches(input, enabledMatches)
+	return PreviewResult{
+		Anonymized: anonymized,
+		Result:     result,
+	}
+}
+
+func (r *Run) anonymizeResolvedMatches(input string, matches []Match) (string, Result) {
+	if r.logMatches && len(matches) > 0 {
 		log.Debug().Interface("pii", matches).Msg("Secret and PII found")
 	}
 
 	result := Result{Stats: make(map[EntityType]EntityStats)}
-
 	var output strings.Builder
 	output.Grow(len(input))
 
@@ -98,7 +128,6 @@ func (r *Run) Anonymize(input string) (string, Result) {
 			End:   match.End,
 			Token: token,
 		})
-
 		last = match.End
 	}
 
@@ -159,6 +188,20 @@ func (a *Service) collectMatches(input string, detectors []Detector) []Match {
 	for _, detector := range detectors {
 		matches = append(matches, detector.FindAll(input)...)
 	}
+	return matches
+}
+
+func (a *Service) normalizedMatches(input string, extraMatches []Match) []Match {
+	matches := append(a.collectMatches(input, a.detectors), extraMatches...)
+	return deduplicateMatches(validMatches(input, matches))
+}
+
+func (r *Run) resolvedEnabledMatches(input string, extraMatches []Match) []Match {
+	matches := r.service.filterEnabledMatches(r.service.normalizedMatches(input, extraMatches))
+	matches = r.service.resolveOverlaps(matches)
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].Start < matches[j].Start
+	})
 	return matches
 }
 

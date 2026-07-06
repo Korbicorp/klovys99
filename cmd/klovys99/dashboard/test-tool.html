@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>klovys99 Test tool</title>
+    <link rel="icon" type="image/svg+xml" href="/dashboard/assets/icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Afacad:wght@400;500;600;700;800&display=swap" />
+    <link rel="stylesheet" href="/dashboard/assets/dashboard.css" />
+    <script defer src="/dashboard/assets/dashboard.js"></script>
+  </head>
+  <body data-page="test-tool">
+    <header class="app-header">
+      <div class="container header-inner">
+        <a class="brand" href="/dashboard" aria-label="klovys99 dashboard">
+          <img src="/dashboard/assets/klovys99-logo.png" alt="klovys99" class="brand-logo" />
+        </a>
+        <div class="header-center">
+          <a id="testToolNavLink" class="button button-success header-tool-link" href="/dashboard/test-tool" aria-current="page" data-active="true">Test tool</a>
+        </div>
+        <div class="header-actions">
+          <span id="connectionStatus" class="status-pill" data-status="loading">Loading</span>
+          <button id="refreshButton" class="button button-secondary" type="button">Refresh</button>
+          <button id="resetButton" class="button button-danger" type="button">Reset stats</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container dashboard-shell">
+      <section class="page-heading page-heading-single" aria-labelledby="testToolPageTitle">
+        <div>
+          <h1 id="testToolPageTitle">Test tool</h1>
+          <p id="testToolPageDescription" class="page-lead">Preview how klovys99 anonymizes a prompt with your current protection options.</p>
+        </div>
+      </section>
+
+      <section class="panel test-panel" aria-labelledby="testTitle">
+        <div class="panel-heading">
+          <div>
+            <h2 id="testTitle"><span aria-hidden="true">🧪</span> Test anonymization</h2>
+          </div>
+          <div class="test-actions">
+            <button id="runAnonymizationTestButton" class="button button-primary" type="button">Test</button>
+          </div>
+        </div>
+        <div class="test-grid">
+          <div class="test-input-column">
+            <label id="testInputLabel" class="field-label" for="anonymizationTestInput">Prompt to test</label>
+            <textarea
+              id="anonymizationTestInput"
+              class="test-textarea"
+              rows="10"
+              spellcheck="false"
+              placeholder="Paste text to preview what klovys99 anonymizes."
+            ></textarea>
+            <p id="testInputHint" class="field-hint">The preview uses your current protection options and does not write logs.</p>
+          </div>
+          <div class="test-output-column">
+            <div class="test-summary-row">
+              <div class="test-summary-card">
+                <span id="testSummaryAnonymizedLabel">Anonymized findings</span>
+                <strong id="testSummaryAnonymizedValue">0</strong>
+              </div>
+            </div>
+            <div class="test-result-grid">
+              <article class="test-result-card">
+                <h3 id="testSourceTitle">Source view</h3>
+                <div id="anonymizationSourcePreview" class="test-preview empty-preview">Run a test to inspect original data.</div>
+              </article>
+              <article class="test-result-card">
+                <h3 id="testAnonymizedTitle">Anonymized view</h3>
+                <div id="anonymizationResultPreview" class="test-preview empty-preview">The anonymized result will appear here.</div>
+              </article>
+            </div>
+            <article class="test-result-card findings-card">
+              <div class="findings-header">
+                <h3 id="testFindingsTitle">Detected findings</h3>
+                <span id="testFindingsStatus" class="findings-status">No test yet</span>
+              </div>
+              <div id="anonymizationTypeSummary" class="findings-summary"></div>
+              <div id="anonymizationFindingsList" class="findings-list"></div>
+              <p id="anonymizationFindingsEmpty" class="empty-state">No finding to display yet.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

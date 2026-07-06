@@ -1,8 +1,12 @@
 package anonymizer
 
 import (
+	"bytes"
 	"sync"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 type staticDetector struct {
@@ -196,5 +200,63 @@ func TestAnonymizeResolvesOverlapsByPriorityThenLength(t *testing.T) {
 	}
 	if _, ok := result.Stats[EntityLastName]; ok {
 		t.Fatal("lower priority overlapping match should not be counted")
+	}
+}
+
+func TestPreviewUsesEnabledAnonymizationOnly(t *testing.T) {
+	engine := NewServiceWithProtectionPolicy([]Detector{
+		staticDetector{
+			matches: []Match{
+				{Start: 0, End: 16, Type: EntityEmail, Priority: 10, Normalized: "alice@example.io"},
+				{Start: 21, End: 33, Type: EntitySecret, Priority: 10, Normalized: "secret-token"},
+			},
+		},
+	}, staticProtectionPolicy{
+		EntityEmail:  false,
+		EntitySecret: true,
+	})
+
+	preview := engine.Preview("alice@example.io and secret-token")
+
+	if got, want := preview.Anonymized, "alice@example.io and [SECRET_1]"; got != want {
+		t.Fatalf("anonymized = %q, want %q", got, want)
+	}
+	if got, want := preview.Stats[EntitySecret].Count, 1; got != want {
+		t.Fatalf("enabled secret count = %d, want %d", got, want)
+	}
+	if got, want := len(preview.Findings), 1; got != want {
+		t.Fatalf("findings count = %d, want %d", got, want)
+	}
+	if got, want := preview.Findings[0].Value, "secret-token"; got != want {
+		t.Fatalf("finding value = %q, want %q", got, want)
+	}
+	if got, want := preview.Findings[0].Token, "[SECRET_1]"; got != want {
+		t.Fatalf("finding token = %q, want %q", got, want)
+	}
+}
+
+func TestPreviewDoesNotEmitRawMatchLogs(t *testing.T) {
+	engine := NewService([]Detector{
+		staticDetector{
+			matches: []Match{
+				{Start: 0, End: 16, Type: EntityEmail, Priority: 10, Normalized: "alice@example.io"},
+			},
+		},
+	})
+
+	previousLogger := log.Logger
+	var logs bytes.Buffer
+	log.Logger = zerolog.New(&logs).Level(zerolog.DebugLevel)
+	t.Cleanup(func() {
+		log.Logger = previousLogger
+	})
+
+	preview := engine.Preview("alice@example.io")
+
+	if got, want := preview.Anonymized, "[EMAIL_1]"; got != want {
+		t.Fatalf("anonymized = %q, want %q", got, want)
+	}
+	if got := logs.String(); got != "" {
+		t.Fatalf("logs = %q, want preview to stay silent", got)
 	}
 }

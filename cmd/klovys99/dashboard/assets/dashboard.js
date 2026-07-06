@@ -3,10 +3,14 @@
 const refreshIntervalMs = 5000;
 const svgNamespace = "http://www.w3.org/2000/svg";
 const colors = ["#076cd8", "#262626", "#16a34a", "#dc2626", "#9333ea", "#f59e0b", "#0f766e", "#64748b"];
+const pageKind = document.body.dataset.page || "dashboard";
+const isDashboardPage = pageKind === "dashboard";
+const isTestToolPage = pageKind === "test-tool";
 
 const translations = {
   en: {
     documentTitle: "klovys99 Anonymization dashboard",
+    testToolDocumentTitle: "klovys99 Test tool",
     loading: "Loading",
     live: "Live",
     unavailable: "Unavailable",
@@ -90,9 +94,34 @@ const translations = {
     anonymizedRequestsDescription: "Requests where klovys99 replaced at least one sensitive value.",
     unchangedRequests: "Unchanged requests",
     unchangedRequestsDescription: "Requests processed without a detected sensitive replacement.",
+    testToolNav: "Test tool",
+    testToolPageTitle: "Test tool",
+    testToolPageDescription: "Preview how klovys99 anonymizes a prompt with your current protection options.",
+    testTitle: "Test anonymization",
+    testButton: "Test",
+    testing: "Testing",
+    testInputLabel: "Prompt to test",
+    testPlaceholder: "Paste text to preview what klovys99 anonymizes.",
+    testInputHint: "The preview uses your current protection options and does not write logs.",
+    testSourceTitle: "Source view",
+    testAnonymizedTitle: "Anonymized view",
+    testFindingsTitle: "Detected findings",
+    testAnonymizedFindings: "Anonymized findings",
+    testSourceEmpty: "Run a test to inspect original data.",
+    testResultEmpty: "The anonymized result will appear here.",
+    testFindingsEmpty: "No finding to display yet.",
+    testNoResult: "No test yet",
+    testReady: "Ready",
+    testSuccessStatus: (anonymized) => `${anonymized} anonymized`,
+    testRequestFailed: "Preview unavailable",
+    testFindingOriginal: "Original value",
+    testFindingOutput: "Rendered output",
+    testFindingAnonymized: "Anonymized",
+    testFindingOffsets: (start, end) => `Offsets ${start}-${end}`,
   },
   fr: {
     documentTitle: "klovys99 Tableau de bord d'anonymisation",
+    testToolDocumentTitle: "klovys99 Outil de test",
     loading: "Chargement",
     live: "En direct",
     unavailable: "Indisponible",
@@ -176,6 +205,30 @@ const translations = {
     anonymizedRequestsDescription: "Requêtes pour lesquelles klovys99 a remplacé au moins une valeur sensible.",
     unchangedRequests: "Requêtes inchangées",
     unchangedRequestsDescription: "Requêtes traitées sans remplacement sensible détecté.",
+    testToolNav: "Outil de test",
+    testToolPageTitle: "Outil de test",
+    testToolPageDescription: "Prévisualisez comment klovys99 anonymise un prompt avec les options de protection actuellement actives.",
+    testTitle: "Test anonymisation",
+    testButton: "Tester",
+    testing: "Test en cours",
+    testInputLabel: "Prompt à tester",
+    testPlaceholder: "Collez un texte pour prévisualiser ce que klovys99 anonymise.",
+    testInputHint: "La prévisualisation utilise les options de protection actuelles et n'écrit aucun log.",
+    testSourceTitle: "Vue source",
+    testAnonymizedTitle: "Vue anonymisée",
+    testFindingsTitle: "Éléments détectés",
+    testAnonymizedFindings: "Éléments anonymisés",
+    testSourceEmpty: "Lancez un test pour inspecter les données d'origine.",
+    testResultEmpty: "Le résultat anonymisé apparaîtra ici.",
+    testFindingsEmpty: "Aucun élément à afficher pour l'instant.",
+    testNoResult: "Aucun test pour l'instant",
+    testReady: "Prêt",
+    testSuccessStatus: (anonymized) => `${anonymized} anonymisés`,
+    testRequestFailed: "Prévisualisation indisponible",
+    testFindingOriginal: "Valeur d'origine",
+    testFindingOutput: "Rendu affiché",
+    testFindingAnonymized: "Anonymisé",
+    testFindingOffsets: (start, end) => `Positions ${start}-${end}`,
   },
 };
 
@@ -277,14 +330,24 @@ const categoryDefinitions = [
     types: ["ORGANIZATION", "EMPLOYER", "SCHOOL", "MEDICAL_PROVIDER", "DATE", "OTHER_PII", "BLOOD_TYPE", "PET_IDENTIFIER"],
   },
 ];
+const knownTypes = Object.keys(typeDescriptions.en);
+const typeColorThemes = buildTypeColorThemes(knownTypes);
+const unknownTypeTheme = {
+  background: "#eef2f7",
+  border: "#cbd5e1",
+  text: "#334155",
+};
 
 const elements = {
   status: document.querySelector("#connectionStatus"),
   refreshButton: document.querySelector("#refreshButton"),
   resetButton: document.querySelector("#resetButton"),
+  testToolNavLink: document.querySelector("#testToolNavLink"),
   lastUpdatedLabel: document.querySelector("#lastUpdatedLabel"),
   lastUpdated: document.querySelector("#lastUpdated"),
   dashboardTitle: document.querySelector("#dashboardTitle"),
+  testToolPageTitle: document.querySelector("#testToolPageTitle"),
+  testToolPageDescription: document.querySelector("#testToolPageDescription"),
   protectionPanel: document.querySelector(".protection-panel"),
   protectionTitle: document.querySelector("#protectionTitle"),
   protectionRate: document.querySelector("#protectionRate"),
@@ -326,47 +389,116 @@ const elements = {
   requestBodyErrorsLabel: document.querySelector("#requestBodyErrorsLabel"),
   proxyErrors: document.querySelector("#proxyErrors"),
   requestBodyErrors: document.querySelector("#requestBodyErrors"),
+  testTitle: document.querySelector("#testTitle"),
+  runAnonymizationTestButton: document.querySelector("#runAnonymizationTestButton"),
+  testInputLabel: document.querySelector("#testInputLabel"),
+  anonymizationTestInput: document.querySelector("#anonymizationTestInput"),
+  testInputHint: document.querySelector("#testInputHint"),
+  testSummaryAnonymizedLabel: document.querySelector("#testSummaryAnonymizedLabel"),
+  testSummaryAnonymizedValue: document.querySelector("#testSummaryAnonymizedValue"),
+  testSourceTitle: document.querySelector("#testSourceTitle"),
+  testAnonymizedTitle: document.querySelector("#testAnonymizedTitle"),
+  anonymizationSourcePreview: document.querySelector("#anonymizationSourcePreview"),
+  anonymizationResultPreview: document.querySelector("#anonymizationResultPreview"),
+  testFindingsTitle: document.querySelector("#testFindingsTitle"),
+  testFindingsStatus: document.querySelector("#testFindingsStatus"),
+  anonymizationTypeSummary: document.querySelector("#anonymizationTypeSummary"),
+  anonymizationFindingsList: document.querySelector("#anonymizationFindingsList"),
+  anonymizationFindingsEmpty: document.querySelector("#anonymizationFindingsEmpty"),
 };
 
 let statsLoading = false;
 let configLoading = false;
 let configSaving = false;
 let configUnavailable = false;
+let anonymizationTestLoading = false;
 let savedProtectionOptions = cloneProtectionOptions(defaultProtectionOptions);
 let draftProtectionOptions = cloneProtectionOptions(defaultProtectionOptions);
 
 renderStaticText();
-renderProtectionOptions();
-renderProtectionCoverage();
+if (isDashboardPage) {
+  renderProtectionOptions();
+  renderProtectionCoverage();
+}
+if (isTestToolPage) {
+  renderAnonymizationTestResult(null);
+}
 
-elements.refreshButton.addEventListener("click", () => {
-  void loadDashboard();
-});
+if (elements.refreshButton) {
+  elements.refreshButton.addEventListener("click", () => {
+    void refreshCurrentPage();
+  });
+}
 
-elements.resetButton.addEventListener("click", () => {
-  void resetStats();
-});
+if (elements.resetButton) {
+  elements.resetButton.addEventListener("click", () => {
+    void resetStats();
+  });
+}
 
-elements.enableAllOptionsButton.addEventListener("click", () => {
-  updateAllDraftOptions(true);
-});
+if (elements.enableAllOptionsButton) {
+  elements.enableAllOptionsButton.addEventListener("click", () => {
+    updateAllDraftOptions(true);
+  });
+}
 
-elements.disableAllOptionsButton.addEventListener("click", () => {
-  updateAllDraftOptions(false);
-});
+if (elements.disableAllOptionsButton) {
+  elements.disableAllOptionsButton.addEventListener("click", () => {
+    updateAllDraftOptions(false);
+  });
+}
 
-elements.saveOptionsButton.addEventListener("click", () => {
-  void saveProtectionOptions();
-});
+if (elements.saveOptionsButton) {
+  elements.saveOptionsButton.addEventListener("click", () => {
+    void saveProtectionOptions();
+  });
+}
 
-void loadDashboard();
+if (elements.runAnonymizationTestButton) {
+  elements.runAnonymizationTestButton.addEventListener("click", () => {
+    void runAnonymizationTest();
+  });
+}
+
+void refreshCurrentPage();
 window.setInterval(() => {
-  void loadStats();
+  void refreshCurrentPage({ silent: true });
 }, refreshIntervalMs);
+
+async function refreshCurrentPage(options = {}) {
+  if (isDashboardPage) {
+    await loadDashboard(options);
+    return;
+  }
+  await loadConnectionStatus(options);
+}
 
 // loadDashboard refreshes stats and the saved app config as separate backend resources.
 async function loadDashboard() {
   await Promise.all([loadStats(), loadConfig()]);
+}
+
+async function loadConnectionStatus(options = {}) {
+  if (statsLoading) {
+    return;
+  }
+  statsLoading = true;
+  if (!options.silent) {
+    setStatus("loading", text.loading);
+  }
+  try {
+    const response = await fetch("/api/stats", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Stats API returned ${response.status}`);
+    }
+    await response.json();
+    setStatus("live", text.live);
+  } catch (error) {
+    console.error(error);
+    setStatus("error", text.unavailable);
+  } finally {
+    statsLoading = false;
+  }
 }
 
 async function loadStats() {
@@ -383,11 +515,13 @@ async function loadStats() {
     const summary = normalizeSummary(await response.json());
     renderSummary(summary);
     setStatus("live", text.live);
-    elements.lastUpdated.textContent = new Date().toLocaleTimeString(locale, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
+    if (elements.lastUpdated) {
+      elements.lastUpdated.textContent = new Date().toLocaleTimeString(locale, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    }
   } catch (error) {
     console.error(error);
     setStatus("error", text.unavailable);
@@ -465,7 +599,7 @@ async function resetStats() {
     if (!response.ok) {
       throw new Error(`Stats reset returned ${response.status}`);
     }
-    await loadStats();
+    await refreshCurrentPage();
   } catch (error) {
     console.error(error);
     setStatus("error", text.resetFailed);
@@ -476,43 +610,86 @@ async function resetStats() {
 
 function renderStaticText() {
   document.documentElement.lang = language;
-  document.title = text.documentTitle;
-  elements.refreshButton.textContent = text.refresh;
-  elements.resetButton.textContent = text.resetStats;
-  elements.dashboardTitle.textContent = text.dashboardTitle;
-  elements.lastUpdatedLabel.textContent = text.lastUpdated;
-  elements.lastUpdated.textContent = text.never;
-  setHeading(elements.protectionTitle, "🛡️", text.protectionTitle);
-  setHeading(elements.optionsTitle, "⚙️", text.optionsTitle);
-  setHeading(elements.exposureTitle, "⚠️", text.exposureTitle);
-  setHeading(elements.tableTitle, "🏷️", text.tableTitle);
-  setHeading(elements.pieTitle, "📊", text.pieTitle);
-  setHeading(elements.timelineTitle, "⏱️", text.timelineTitle);
-  setHeading(elements.healthTitle, "🧭", text.healthTitle);
-  elements.lowProtectionLabel.textContent = text.lowProtection;
-  elements.improvingProtectionLabel.textContent = text.improvingProtection;
-  elements.strongProtectionLabel.textContent = text.strongProtection;
-  elements.enableAllOptionsButton.textContent = text.enableAllOptions;
-  elements.disableAllOptionsButton.textContent = text.disableAllOptions;
-  elements.saveOptionsButton.textContent = text.saveChanges;
-  elements.optionsEmpty.textContent = text.noOptionsAvailable;
-  elements.typeHeader.textContent = text.typeHeader;
-  elements.countHeader.textContent = text.countHeader;
-  elements.shareHeader.textContent = text.shareHeader;
-  elements.typeEmpty.textContent = text.noTypeRecorded;
-  elements.pieEmpty.textContent = text.noAnonymizedData;
-  elements.pieLegend.setAttribute("aria-label", text.chartLegend);
-  elements.pieChart.setAttribute("aria-label", text.detectedDistribution);
-  elements.timelineEmpty.textContent = text.noActivity;
-  elements.proxyErrorsLabel.textContent = text.proxyErrors;
-  elements.requestBodyErrorsLabel.textContent = text.requestBodyErrors;
+  document.title = isTestToolPage ? text.testToolDocumentTitle : text.documentTitle;
+  setText(elements.refreshButton, text.refresh);
+  setText(elements.resetButton, text.resetStats);
+  setText(elements.testToolNavLink, text.testToolNav);
+  setText(elements.dashboardTitle, text.dashboardTitle);
+  setText(elements.testToolPageTitle, text.testToolPageTitle);
+  setText(elements.testToolPageDescription, text.testToolPageDescription);
+  setText(elements.lastUpdatedLabel, text.lastUpdated);
+  setText(elements.lastUpdated, text.never);
+  setHeadingIfPresent(elements.protectionTitle, "🛡️", text.protectionTitle);
+  setHeadingIfPresent(elements.optionsTitle, "⚙️", text.optionsTitle);
+  setHeadingIfPresent(elements.exposureTitle, "⚠️", text.exposureTitle);
+  setHeadingIfPresent(elements.tableTitle, "🏷️", text.tableTitle);
+  setHeadingIfPresent(elements.pieTitle, "📊", text.pieTitle);
+  setHeadingIfPresent(elements.timelineTitle, "⏱️", text.timelineTitle);
+  setHeadingIfPresent(elements.healthTitle, "🧭", text.healthTitle);
+  setText(elements.lowProtectionLabel, text.lowProtection);
+  setText(elements.improvingProtectionLabel, text.improvingProtection);
+  setText(elements.strongProtectionLabel, text.strongProtection);
+  setText(elements.enableAllOptionsButton, text.enableAllOptions);
+  setText(elements.disableAllOptionsButton, text.disableAllOptions);
+  setText(elements.saveOptionsButton, text.saveChanges);
+  setText(elements.optionsEmpty, text.noOptionsAvailable);
+  setText(elements.typeHeader, text.typeHeader);
+  setText(elements.countHeader, text.countHeader);
+  setText(elements.shareHeader, text.shareHeader);
+  setText(elements.typeEmpty, text.noTypeRecorded);
+  setText(elements.pieEmpty, text.noAnonymizedData);
+  setAriaLabel(elements.pieLegend, text.chartLegend);
+  setAriaLabel(elements.pieChart, text.detectedDistribution);
+  setText(elements.timelineEmpty, text.noActivity);
+  setText(elements.proxyErrorsLabel, text.proxyErrors);
+  setText(elements.requestBodyErrorsLabel, text.requestBodyErrors);
+  setHeadingIfPresent(elements.testTitle, "🧪", text.testTitle);
+  setText(elements.runAnonymizationTestButton, text.testButton);
+  setText(elements.testInputLabel, text.testInputLabel);
+  setPlaceholder(elements.anonymizationTestInput, text.testPlaceholder);
+  setText(elements.testInputHint, text.testInputHint);
+  setText(elements.testSummaryAnonymizedLabel, text.testAnonymizedFindings);
+  setText(elements.testSourceTitle, text.testSourceTitle);
+  setText(elements.testAnonymizedTitle, text.testAnonymizedTitle);
+  setText(elements.testFindingsTitle, text.testFindingsTitle);
+  setText(elements.anonymizationSourcePreview, text.testSourceEmpty);
+  setText(elements.anonymizationResultPreview, text.testResultEmpty);
+  setText(elements.anonymizationFindingsEmpty, text.testFindingsEmpty);
+  setTestStatus("idle", text.testNoResult);
 }
 
 function setHeading(element, emoji, label) {
   element.innerHTML = `<span aria-hidden="true">${emoji}</span>${escapeHtml(label)}`;
 }
 
+function setHeadingIfPresent(element, emoji, label) {
+  if (element) {
+    setHeading(element, emoji, label);
+  }
+}
+
+function setText(element, value) {
+  if (element) {
+    element.textContent = value;
+  }
+}
+
+function setPlaceholder(element, value) {
+  if (element) {
+    element.placeholder = value;
+  }
+}
+
+function setAriaLabel(element, value) {
+  if (element) {
+    element.setAttribute("aria-label", value);
+  }
+}
+
 function setStatus(status, label) {
+  if (!elements.status) {
+    return;
+  }
   elements.status.dataset.status = status;
   elements.status.textContent = label;
 }
@@ -539,6 +716,16 @@ function renderSummary(summary) {
 }
 
 function renderProtectionCoverage() {
+  if (
+    !elements.protectionRate ||
+    !elements.protectedRatio ||
+    !elements.protectionBarFill ||
+    !elements.protectionPanel ||
+    !elements.protectedBarLabel ||
+    !elements.totalBarLabel
+  ) {
+    return;
+  }
   const options = draftProtectionOptions;
   const total = options.length;
   const enabled = options.filter((option) => option.enabled).length;
@@ -595,6 +782,9 @@ function normalizeProtectionOptions(rawOptions) {
 
 // renderProtectionOptions draws protection toggles grouped into user-facing categories.
 function renderProtectionOptions() {
+  if (!elements.protectionOptionsList || !elements.optionsEmpty) {
+    return;
+  }
   const categories = groupProtectionOptions(draftProtectionOptions);
   elements.protectionOptionsList.innerHTML = "";
   elements.optionsEmpty.hidden = draftProtectionOptions.length > 0;
@@ -731,6 +921,9 @@ function updateDraftOptionsForTypes(types, enabled) {
 
 // updateOptionsState keeps the save button and status pill aligned with config state.
 function updateOptionsState() {
+  if (!elements.enableAllOptionsButton || !elements.disableAllOptionsButton || !elements.saveOptionsButton || !elements.optionsStatus) {
+    return;
+  }
   const dirty = hasOptionChanges();
   const enabledCount = draftProtectionOptions.filter((option) => option.enabled).length;
   const busy = configLoading || configSaving;
@@ -779,6 +972,9 @@ function cloneProtectionOptions(options) {
 }
 
 function renderTopExposure(summary) {
+  if (!elements.topExposureType || !elements.topExposureCount || !elements.topExposureDescription) {
+    return;
+  }
   const topType = normalizedTypeCounts(summary)[0];
   if (!topType) {
     elements.topExposureType.textContent = text.noExposureType;
@@ -793,6 +989,9 @@ function renderTopExposure(summary) {
 }
 
 function renderHealth(summary) {
+  if (!elements.proxyErrors || !elements.requestBodyErrors) {
+    return;
+  }
   renderHealthValue(elements.proxyErrors, summary.proxy_errors);
   renderHealthValue(elements.requestBodyErrors, summary.request_body_errors);
 }
@@ -803,6 +1002,9 @@ function renderHealthValue(element, value) {
 }
 
 function renderPie(summary) {
+  if (!elements.pieEmpty || !elements.pieTotal || !elements.pieUnit || !elements.pieLegend || !elements.pieChart) {
+    return;
+  }
   const typeSlices = normalizedTypeCounts(summary).map((item) => ({
     label: item.type,
     value: item.count,
@@ -884,6 +1086,9 @@ function requestFallbackSlices(summary) {
 }
 
 function renderTypeTable(summary) {
+  if (!elements.typeRows || !elements.typeEmpty) {
+    return;
+  }
   const rows = normalizedTypeCounts(summary);
   const total = rows.reduce((sum, item) => sum + item.count, 0);
 
@@ -908,6 +1113,9 @@ function renderTypeTable(summary) {
 }
 
 function renderTimeline(timeline) {
+  if (!elements.timelineRows || !elements.timelineEmpty) {
+    return;
+  }
   const buckets = timeline
     .map((bucket) => ({
       bucket: bucket.bucket,
@@ -997,8 +1205,235 @@ function safeNumber(value) {
   return Number.isFinite(Number(value)) ? Number(value) : 0;
 }
 
+async function runAnonymizationTest() {
+  if (!elements.anonymizationTestInput || !elements.runAnonymizationTestButton) {
+    return;
+  }
+  if (anonymizationTestLoading) {
+    return;
+  }
+
+  const sourceText = elements.anonymizationTestInput.value || "";
+  if (sourceText.trim() === "") {
+    renderAnonymizationTestResult(null);
+    return;
+  }
+
+  anonymizationTestLoading = true;
+  elements.runAnonymizationTestButton.disabled = true;
+  elements.runAnonymizationTestButton.textContent = text.testing;
+  setTestStatus("idle", text.testing);
+
+  try {
+    const response = await fetch("/api/anonymization/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: sourceText }),
+    });
+    if (!response.ok) {
+      throw new Error(`Anonymization test API returned ${response.status}`);
+    }
+    renderAnonymizationTestResult(normalizeAnonymizationTestResult(await response.json()));
+  } catch (error) {
+    console.error(error);
+    setTestStatus("error", text.testRequestFailed);
+  } finally {
+    anonymizationTestLoading = false;
+    elements.runAnonymizationTestButton.disabled = false;
+    elements.runAnonymizationTestButton.textContent = text.testButton;
+  }
+}
+
+function normalizeAnonymizationTestResult(result) {
+  const payload = result || {};
+  return {
+    original_text: String(payload.original_text || ""),
+    anonymized_text: String(payload.anonymized_text || ""),
+    findings: Array.isArray(payload.findings)
+      ? payload.findings
+          .map((finding) => ({
+            type: String(finding.type || text.unknown),
+            value: String(finding.value || ""),
+            token: String(finding.token || ""),
+            start: safeNumber(finding.start),
+            end: safeNumber(finding.end),
+          }))
+          .sort((left, right) => left.start - right.start || left.end - right.end)
+      : [],
+    counts_by_type: normalizeTestCounts(payload.counts_by_type),
+  };
+}
+
+function normalizeTestCounts(counts) {
+  if (!Array.isArray(counts)) {
+    return [];
+  }
+  return counts
+    .map((item) => ({ type: String(item.type || text.unknown), count: safeNumber(item.count) }))
+    .filter((item) => item.count > 0);
+}
+
+function renderAnonymizationTestResult(result) {
+  if (
+    !elements.testSummaryAnonymizedValue ||
+    !elements.anonymizationSourcePreview ||
+    !elements.anonymizationResultPreview ||
+    !elements.anonymizationTypeSummary ||
+    !elements.anonymizationFindingsList ||
+    !elements.anonymizationFindingsEmpty
+  ) {
+    return;
+  }
+  if (!result) {
+    elements.testSummaryAnonymizedValue.textContent = "0";
+    elements.anonymizationSourcePreview.textContent = text.testSourceEmpty;
+    elements.anonymizationResultPreview.textContent = text.testResultEmpty;
+    elements.anonymizationSourcePreview.classList.add("empty-preview");
+    elements.anonymizationResultPreview.classList.add("empty-preview");
+    elements.anonymizationTypeSummary.innerHTML = "";
+    elements.anonymizationFindingsList.innerHTML = "";
+    elements.anonymizationFindingsEmpty.hidden = false;
+    setTestStatus("idle", text.testReady);
+    return;
+  }
+
+  const anonymizedCount = result.findings.length;
+  elements.testSummaryAnonymizedValue.textContent = formatNumber(anonymizedCount);
+  elements.anonymizationSourcePreview.innerHTML = renderHighlightedSource(result.original_text, result.findings);
+  elements.anonymizationResultPreview.innerHTML = renderHighlightedResult(result.original_text, result.findings);
+  elements.anonymizationSourcePreview.classList.remove("empty-preview");
+  elements.anonymizationResultPreview.classList.remove("empty-preview");
+  renderAnonymizationTypeSummary(result.counts_by_type);
+  renderAnonymizationFindings(result.findings);
+  setTestStatus("success", text.testSuccessStatus(formatNumber(anonymizedCount)));
+}
+
+function renderHighlightedSource(sourceText, findings) {
+  return renderTextWithFindings(sourceText, findings, (finding) => ({
+    text: finding.value,
+    className: "preview-highlight-enabled",
+    style: styleAttributeForType(finding.type),
+  }));
+}
+
+function renderHighlightedResult(sourceText, findings) {
+  return renderTextWithFindings(sourceText, findings, (finding) => ({
+    text: finding.token,
+    className: "preview-highlight-enabled",
+    style: styleAttributeForType(finding.type),
+  }));
+}
+
+function renderTextWithFindings(sourceText, findings, mapFinding) {
+  if (findings.length === 0) {
+    return escapeHtml(sourceText);
+  }
+
+  let cursor = 0;
+  let html = "";
+  findings.forEach((finding) => {
+    html += escapeHtml(sourceText.slice(cursor, finding.start));
+    const segment = mapFinding(finding);
+    const styleAttribute = segment.style ? ` style="${segment.style}"` : "";
+    html += `<span class="preview-highlight ${segment.className}"${styleAttribute}>${escapeHtml(segment.text)}</span>`;
+    cursor = finding.end;
+  });
+  html += escapeHtml(sourceText.slice(cursor));
+  return html;
+}
+
+function renderAnonymizationTypeSummary(enabledCounts) {
+  if (!elements.anonymizationTypeSummary) {
+    return;
+  }
+  const badges = [];
+  enabledCounts.forEach((item) => {
+    badges.push(
+      `<span class="summary-badge summary-badge-enabled" style="${styleAttributeForType(item.type)}">${escapeHtml(item.type)} · ${formatNumber(item.count)}</span>`,
+    );
+  });
+  elements.anonymizationTypeSummary.innerHTML = badges.join("");
+}
+
+function renderAnonymizationFindings(findings) {
+  if (!elements.anonymizationFindingsList || !elements.anonymizationFindingsEmpty) {
+    return;
+  }
+  elements.anonymizationFindingsList.innerHTML = "";
+  elements.anonymizationFindingsEmpty.hidden = findings.length > 0;
+  findings.forEach((finding) => {
+    const item = document.createElement("article");
+    item.className = "finding-item";
+    item.innerHTML = `
+      <div class="finding-meta">
+        <span class="finding-type" style="${styleAttributeForType(finding.type)}">${escapeHtml(finding.type)}</span>
+        <span class="finding-kind finding-kind-enabled" style="${styleAttributeForType(finding.type)}">
+          ${escapeHtml(text.testFindingAnonymized)}
+        </span>
+        <span class="finding-offsets">${escapeHtml(text.testFindingOffsets(finding.start, finding.end))}</span>
+      </div>
+      <div class="finding-copy">
+        <div class="finding-values">
+          <div>
+            <strong>${escapeHtml(text.testFindingOriginal)}</strong>
+            <code>${escapeHtml(finding.value)}</code>
+          </div>
+          <div>
+            <strong>${escapeHtml(text.testFindingOutput)}</strong>
+            <code>${escapeHtml(finding.token)}</code>
+          </div>
+        </div>
+      </div>
+    `;
+    elements.anonymizationFindingsList.appendChild(item);
+  });
+}
+
+function setTestStatus(status, label) {
+  if (!elements.testFindingsStatus) {
+    return;
+  }
+  elements.testFindingsStatus.dataset.status = status;
+  elements.testFindingsStatus.textContent = label;
+}
+
 function formatNumber(value) {
   return numberFormat.format(safeNumber(value));
+}
+
+function buildTypeColorThemes(types) {
+  return Object.fromEntries(
+    types.map((type, index) => {
+      const hue = Math.round((index * 137.508) % 360);
+      const saturation = index % 2 === 0 ? 72 : 64;
+      const backgroundLightness = index % 3 === 0 ? 89 : index % 3 === 1 ? 86 : 83;
+      const borderLightness = backgroundLightness - 11;
+      const textLightness = index % 2 === 0 ? 24 : 28;
+      return [
+        type,
+        {
+          background: `hsl(${hue} ${saturation}% ${backgroundLightness}%)`,
+          border: `hsl(${hue} ${Math.max(saturation - 10, 46)}% ${borderLightness}%)`,
+          text: `hsl(${hue} ${Math.min(saturation + 6, 82)}% ${textLightness}%)`,
+        },
+      ];
+    }),
+  );
+}
+
+function themeForType(type) {
+  return typeColorThemes[type] || unknownTypeTheme;
+}
+
+function styleAttributeForType(type) {
+  const theme = themeForType(type);
+  return [
+    `--type-highlight-bg: ${theme.background}`,
+    `--type-highlight-border: ${theme.border}`,
+    `--type-highlight-text: ${theme.text}`,
+  ]
+    .map((part) => escapeHtml(part))
+    .join("; ");
 }
 
 function detectLanguage() {
