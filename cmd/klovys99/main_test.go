@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -578,6 +579,92 @@ func TestBuildApplicationConfigAPIUpdatesAnonymization(t *testing.T) {
 	}
 }
 
+func TestBuildApplicationAnonymizationTestAPIUsesConfigWithoutStatsOrLogs(t *testing.T) {
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.DebugLevel)
+
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, "https://api.anthropic.com"),
+		Logger:     &logger,
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+	logs.Reset()
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/api/anonymization/test", "application/json", strings.NewReader(`{"text":"hello alice@example.com and FR76 3000 6000 0112 3456 7890 189"}`))
+	if err != nil {
+		t.Fatalf("call anonymization test API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("anonymization test status = %d, want 200", response.StatusCode)
+	}
+
+	var preview anonymizationTestResponse
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode anonymization test response: %v", err)
+	}
+	if got, want := preview.AnonymizedText, "hello [EMAIL_1] and [IBAN_1]"; got != want {
+		t.Fatalf("anonymized text = %q, want %q", got, want)
+	}
+	if len(preview.Findings) != 2 {
+		t.Fatalf("findings = %#v, want two anonymized findings", preview.Findings)
+	}
+	if len(preview.CountsByType) != 2 {
+		t.Fatalf("counts = %#v, want two enabled counts", preview.CountsByType)
+	}
+	if got := logs.String(); got != "" {
+		t.Fatalf("logs = %q, want anonymization test endpoint to stay silent", got)
+	}
+
+	summary, err := app.statsRecorder.Summary()
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if summary.TotalRequests != 0 {
+		t.Fatalf("summary = %#v, want anonymization test to avoid stats", summary)
+	}
+
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/config", strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false},{"type":"IBAN","enabled":true}]}`))
+	if err != nil {
+		t.Fatalf("build config request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	updateResponse, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("call config update: %v", err)
+	}
+	updateResponse.Body.Close()
+
+	secondResponse, err := server.Client().Post(server.URL+"/api/anonymization/test", "application/json", strings.NewReader(`{"text":"hello alice@example.com and FR76 3000 6000 0112 3456 7890 189"}`))
+	if err != nil {
+		t.Fatalf("call anonymization test API after config update: %v", err)
+	}
+	defer secondResponse.Body.Close()
+
+	var updatedPreview anonymizationTestResponse
+	if err := json.NewDecoder(secondResponse.Body).Decode(&updatedPreview); err != nil {
+		t.Fatalf("decode updated anonymization test response: %v", err)
+	}
+	if got, want := updatedPreview.AnonymizedText, "hello alice@example.com and [IBAN_1]"; got != want {
+		t.Fatalf("anonymized text after config update = %q, want %q", got, want)
+	}
+	if len(updatedPreview.Findings) != 1 || updatedPreview.Findings[0].Type != anonymizer.EntityIBAN {
+		t.Fatalf("updated findings = %#v, want only one anonymized iban finding", updatedPreview.Findings)
+	}
+	if got := logs.String(); got != "" {
+		t.Fatalf("logs after config update = %q, want anonymization test endpoint to stay silent", got)
+	}
+}
+
 // TestBuildApplicationServesDashboardBeforeProxy verifies that the local dashboard is served by the proxy itself
 // and that missing dashboard routes are not accidentally forwarded upstream.
 func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
@@ -617,6 +704,8 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	}
 	if got := string(dashboardBody); !strings.Contains(got, "klovys99 Anonymization dashboard") ||
 		!strings.Contains(got, "Anonymization dashboard") ||
+		!strings.Contains(got, "Test tool") ||
+		!strings.Contains(got, "/dashboard/test-tool") ||
 		!strings.Contains(got, "klovys99-logo.png") ||
 		!strings.Contains(got, "icon.svg") ||
 		!strings.Contains(got, "Protection coverage") ||
@@ -629,6 +718,28 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	}
 	if upstreamHits != 0 {
 		t.Fatalf("upstreamHits = %d, want dashboard not proxied", upstreamHits)
+	}
+
+	testToolResponse, err := server.Client().Get(server.URL + "/dashboard/test-tool")
+	if err != nil {
+		t.Fatalf("call test tool page: %v", err)
+	}
+	defer testToolResponse.Body.Close()
+	if testToolResponse.StatusCode != http.StatusOK {
+		t.Fatalf("test tool status = %d, want 200", testToolResponse.StatusCode)
+	}
+	testToolBody, err := io.ReadAll(testToolResponse.Body)
+	if err != nil {
+		t.Fatalf("read test tool body: %v", err)
+	}
+	if got := string(testToolBody); !strings.Contains(got, "klovys99 Test tool") ||
+		!strings.Contains(got, "Preview how klovys99 anonymizes a prompt") ||
+		!strings.Contains(got, "Test anonymization") ||
+		!strings.Contains(got, "/dashboard/assets/dashboard.js") {
+		t.Fatalf("test tool body = %q, want embedded test tool HTML", got)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstreamHits = %d, want test tool page not proxied", upstreamHits)
 	}
 
 	cssResponse, err := server.Client().Get(server.URL + "/dashboard/assets/dashboard.css")

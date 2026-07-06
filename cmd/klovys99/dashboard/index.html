@@ -11,12 +11,15 @@
     <link rel="stylesheet" href="/dashboard/assets/dashboard.css" />
     <script defer src="/dashboard/assets/dashboard.js"></script>
   </head>
-  <body>
+  <body data-page="dashboard">
     <header class="app-header">
       <div class="container header-inner">
         <a class="brand" href="/dashboard" aria-label="klovys99 dashboard">
           <img src="/dashboard/assets/klovys99-logo.png" alt="klovys99" class="brand-logo" />
         </a>
+        <div class="header-center">
+          <a id="testToolNavLink" class="button button-success header-tool-link" href="/dashboard/test-tool">Test tool</a>
+        </div>
         <div class="header-actions">
           <span id="connectionStatus" class="status-pill" data-status="loading">Loading</span>
           <button id="refreshButton" class="button button-secondary" type="button">Refresh</button>

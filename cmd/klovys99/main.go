@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,11 +43,12 @@ const (
 	defaultConfigPath    = appconfig.DefaultPath
 )
 
-//go:embed dashboard/index.html dashboard/assets/*
+//go:embed dashboard/index.html dashboard/test-tool.html dashboard/assets/*
 var dashboardFiles embed.FS
 
 var (
 	dashboardIndexHTML = mustDashboardFile("dashboard/index.html")
+	testToolIndexHTML  = mustDashboardFile("dashboard/test-tool.html")
 	dashboardAssetsFS  = mustDashboardSubFS("dashboard/assets")
 )
 
@@ -81,6 +83,10 @@ type application struct {
 	logFile       *os.File
 	statsRecorder *statlog.Recorder
 	configStore   *appconfig.Store
+}
+
+type anonymizationPreviewer interface {
+	Preview(input string) anonymizer.PreviewResult
 }
 
 func run(ctx context.Context, config runtimeConfig) error {
@@ -207,6 +213,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	logExternalLoadStats(config.Logger, "presidio", detectorResult.Presidio)
 	config.Logger.Info().Int("detectors", len(detectorResult.Detectors)).Msg("proxy detectors loaded")
 
+	anonymizerService := anonymizer.NewServiceWithProtectionPolicy(detectorResult.Detectors, configStore)
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target: config.Target,
 		RouteTargets: map[string]*url.URL{
@@ -214,7 +221,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 			proxy.OpenAIRoutePrefix:    config.OpenAITarget,
 		},
 		Logger:        config.Logger,
-		Anonymizer:    anonymizer.NewServiceWithProtectionPolicy(detectorResult.Detectors, configStore),
+		Anonymizer:    anonymizerService,
 		StatsRecorder: statsRecorder,
 	})
 	if err != nil {
@@ -222,7 +229,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore)
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, anonymizerService)
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,
@@ -247,7 +254,23 @@ type configAPIResponse struct {
 	ProtectionOptions []appconfig.ProtectionOption `json:"protection_options"`
 }
 
-func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configStore appConfigStore) http.Handler {
+type anonymizationTestRequest struct {
+	Text string `json:"text"`
+}
+
+type anonymizationTypeCount struct {
+	Type  anonymizer.EntityType `json:"type"`
+	Count int                   `json:"count"`
+}
+
+type anonymizationTestResponse struct {
+	OriginalText   string                   `json:"original_text"`
+	AnonymizedText string                   `json:"anonymized_text"`
+	Findings       []anonymizer.Finding     `json:"findings"`
+	CountsByType   []anonymizationTypeCount `json:"counts_by_type"`
+}
+
+func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configStore appConfigStore, previewer anonymizationPreviewer) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	registerDashboardRoutes(router)
@@ -286,6 +309,22 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 			ctx.JSON(http.StatusOK, configAPIResponse{ProtectionOptions: updated})
 		})
 	}
+	if previewer != nil {
+		router.POST("/api/anonymization/test", func(ctx *gin.Context) {
+			request, err := decodeAnonymizationTestRequest(ctx.Request)
+			if err != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			preview := previewer.Preview(request.Text)
+			ctx.JSON(http.StatusOK, anonymizationTestResponse{
+				OriginalText:   request.Text,
+				AnonymizedText: preview.Anonymized,
+				Findings:       preview.Findings,
+				CountsByType:   previewCounts(preview.Stats),
+			})
+		})
+	}
 	router.NoRoute(func(ctx *gin.Context) {
 		path := ctx.Request.URL.Path
 		if path == "/api" || strings.HasPrefix(path, "/api/") {
@@ -304,6 +343,8 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 func registerDashboardRoutes(router *gin.Engine) {
 	router.GET("/dashboard", serveDashboardIndex)
 	router.GET("/dashboard/", serveDashboardIndex)
+	router.GET("/dashboard/test-tool", serveTestToolIndex)
+	router.GET("/dashboard/test-tool/", serveTestToolIndex)
 	router.StaticFS("/dashboard/assets", dashboardAssetsFS)
 }
 
@@ -325,9 +366,48 @@ func decodeConfigRequest(request *http.Request) ([]appconfig.ProtectionOption, e
 	return payload.ProtectionOptions, nil
 }
 
+func decodeAnonymizationTestRequest(request *http.Request) (anonymizationTestRequest, error) {
+	defer request.Body.Close()
+	var payload anonymizationTestRequest
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		return anonymizationTestRequest{}, fmt.Errorf("decode anonymization test request: %w", err)
+	}
+	return payload, nil
+}
+
+func previewCounts(stats map[anonymizer.EntityType]anonymizer.EntityStats) []anonymizationTypeCount {
+	if len(stats) == 0 {
+		return nil
+	}
+	entityTypes := make([]anonymizer.EntityType, 0, len(stats))
+	for entityType, entityStats := range stats {
+		if entityStats.Count <= 0 {
+			continue
+		}
+		entityTypes = append(entityTypes, entityType)
+	}
+	sort.Slice(entityTypes, func(i, j int) bool {
+		return entityTypes[i] < entityTypes[j]
+	})
+
+	counts := make([]anonymizationTypeCount, 0, len(entityTypes))
+	for _, entityType := range entityTypes {
+		counts = append(counts, anonymizationTypeCount{
+			Type:  entityType,
+			Count: stats[entityType].Count,
+		})
+	}
+	return counts
+}
+
 func serveDashboardIndex(ctx *gin.Context) {
 	ctx.Header("Cache-Control", "no-store")
 	ctx.Data(http.StatusOK, "text/html; charset=utf-8", dashboardIndexHTML)
+}
+
+func serveTestToolIndex(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
+	ctx.Data(http.StatusOK, "text/html; charset=utf-8", testToolIndexHTML)
 }
 
 func mustDashboardFile(path string) []byte {
