@@ -7,7 +7,6 @@ const colors = ["#076cd8", "#262626", "#16a34a", "#dc2626", "#9333ea", "#f59e0b"
 const translations = {
   en: {
     documentTitle: "klovys99 Anonymization dashboard",
-    proCta: "Explore klovys99 Pro",
     loading: "Loading",
     live: "Live",
     unavailable: "Unavailable",
@@ -94,7 +93,6 @@ const translations = {
   },
   fr: {
     documentTitle: "klovys99 Tableau de bord d'anonymisation",
-    proCta: "Découvrir klovys99 Pro",
     loading: "Chargement",
     live: "En direct",
     unavailable: "Indisponible",
@@ -284,7 +282,6 @@ const elements = {
   status: document.querySelector("#connectionStatus"),
   refreshButton: document.querySelector("#refreshButton"),
   resetButton: document.querySelector("#resetButton"),
-  proCtaLabel: document.querySelector("#proCtaLabel"),
   lastUpdatedLabel: document.querySelector("#lastUpdatedLabel"),
   lastUpdated: document.querySelector("#lastUpdated"),
   dashboardTitle: document.querySelector("#dashboardTitle"),
@@ -480,7 +477,6 @@ async function resetStats() {
 function renderStaticText() {
   document.documentElement.lang = language;
   document.title = text.documentTitle;
-  elements.proCtaLabel.textContent = text.proCta;
   elements.refreshButton.textContent = text.refresh;
   elements.resetButton.textContent = text.resetStats;
   elements.dashboardTitle.textContent = text.dashboardTitle;

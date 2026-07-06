@@ -624,8 +624,6 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 		!strings.Contains(got, "Enable all") ||
 		!strings.Contains(got, "Disable all") ||
 		!strings.Contains(got, "Save changes") ||
-		!strings.Contains(got, "Explore klovys99 Pro") ||
-		!strings.Contains(got, "https://klovys.fr/") ||
 		!strings.Contains(got, "/dashboard/assets/dashboard.js") {
 		t.Fatalf("dashboard body = %q, want embedded dashboard HTML", got)
 	}

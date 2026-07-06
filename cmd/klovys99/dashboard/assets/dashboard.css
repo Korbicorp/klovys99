@@ -74,7 +74,7 @@ a {
 .header-inner {
   display: grid;
   min-height: 68px;
-  grid-template-columns: minmax(160px, 1fr) auto minmax(260px, 1fr);
+  grid-template-columns: minmax(160px, 1fr) auto;
   gap: 20px;
   align-items: center;
 }
@@ -93,15 +93,12 @@ a {
 	object-fit: contain;
 }
 
-.header-cta {
-  justify-self: center;
-}
-
 .header-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
+  justify-self: end;
   gap: 10px;
 }
 
@@ -941,7 +938,6 @@ th:nth-child(3) {
     grid-template-columns: 1fr;
   }
 
-  .header-cta,
   .header-actions {
     justify-self: start;
   }
