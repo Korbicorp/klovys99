@@ -25,7 +25,6 @@
   "scripts": {
     "cli": "node npm/cli.js",
     "postinstall": "node npm/postinstall.js",
-    "test": "node --test npm/test/*.test.js",
     "test:node": "node --test npm/test/*.test.js"
   }
 }

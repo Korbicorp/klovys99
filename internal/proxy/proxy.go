@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,19 +13,47 @@ import (
 	"strings"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
-	"github.com/Korbicorp/klovys99/internal/proxy/providers"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
 
 const (
-	DefaultLogPath       = "proxy.log"
-	DefaultAnthropicURL  = "https://api.anthropic.com"
-	DefaultOpenAIURL     = "https://api.openai.com"
-	AnthropicRoutePrefix = "/anthropic"
-	OpenAIRoutePrefix    = "/openai"
+	DefaultLogPath         = "proxy.log"
+	DefaultAnthropicURL    = "https://api.anthropic.com"
+	DefaultOpenAIURL       = "https://api.openai.com"
+	AnthropicRoutePrefix   = "/anthropic"
+	OpenAIRoutePrefix      = "/openai"
+	sessionOpenTag         = "<session>"
+	sessionCloseTag        = "</session>"
+	systemReminderOpenTag  = "<system-reminder>"
+	systemReminderCloseTag = "</system-reminder>"
 )
+
+var metadataKeys = map[string]struct{}{
+	"cache_control": {},
+	"id":            {},
+	"media_type":    {},
+	"model":         {},
+	"name":          {},
+	"role":          {},
+	"tool_use_id":   {},
+	"type":          {},
+}
+
+type sessionPromptAnonymizer struct {
+	engine        TextAnonymizer
+	statsRecorder StatsRecorder
+}
+
+type promptAnonymizationRun struct {
+	anonymizer  *sessionPromptAnonymizer
+	engine      *anonymizer.Run
+	ctx         context.Context
+	logger      zerolog.Logger
+	stats       map[anonymizer.EntityType]int
+	readToolIDs map[string]struct{}
+}
 
 type TextAnonymizer interface {
 	NewRun() *anonymizer.Run
@@ -34,16 +64,12 @@ type StatsRecorder interface {
 }
 
 type Config struct {
-	Target         *url.URL
-	RouteTargets   map[string]*url.URL
-	ChatGPTTarget  *url.URL
-	Logger         *zerolog.Logger
-	Transport      http.RoundTripper
-	Anonymizer     TextAnonymizer
-	StatsRecorder  StatsRecorder
-	LogPIIFindings bool
-	Anthropic      *providers.Anthropic
-	OpenAI         *providers.OpenAI
+	Target        *url.URL
+	RouteTargets  map[string]*url.URL
+	Logger        *zerolog.Logger
+	Transport     http.RoundTripper
+	Anonymizer    TextAnonymizer
+	StatsRecorder StatsRecorder
 }
 
 func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
@@ -70,48 +96,9 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	}
 
 	logger := *config.Logger
-	anthropicProvider := config.Anthropic
-	if anthropicProvider == nil {
-		var err error
-		anthropicProvider, err = providers.NewAnthropic(providers.AnthropicConfig{
-			RoutePrefix:    AnthropicRoutePrefix,
-			Anonymizer:     config.Anonymizer,
-			LogPIIFindings: config.LogPIIFindings,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	openAIProvider := config.OpenAI
-	if openAIProvider == nil {
-		openAITarget := config.RouteTargets[OpenAIRoutePrefix]
-		if openAITarget == nil {
-			parsedOpenAI, err := url.Parse(DefaultOpenAIURL)
-			if err != nil {
-				return nil, err
-			}
-			openAITarget = parsedOpenAI
-		}
-		httpClient := http.DefaultClient
-		if config.Transport != nil {
-			httpClient = &http.Client{Transport: config.Transport}
-		}
-		var err error
-		openAIProvider, err = providers.NewOpenAI(providers.OpenAIConfig{
-			APITarget:      openAITarget,
-			ChatGPTTarget:  config.ChatGPTTarget,
-			HTTPClient:     httpClient,
-			Anonymizer:     config.Anonymizer,
-			Logger:         config.Logger,
-			StatsRecorder:  config.StatsRecorder,
-			LogPIIFindings: config.LogPIIFindings,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
+	promptAnonymizer := newSessionPromptAnonymizer(config.Anonymizer, config.StatsRecorder)
 	proxy := httputil.NewSingleHostReverseProxy(config.Target)
-	proxy.Director = newDirector(config.Target, config.RouteTargets, openAIProvider)
+	proxy.Director = newDirector(config.Target, config.RouteTargets)
 	if config.Transport != nil {
 		proxy.Transport = config.Transport
 	}
@@ -122,14 +109,6 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	}
 
 	return func(ctx *gin.Context) {
-		if openAIProvider.MatchWebSocket(ctx.Request) {
-			openAIProvider.HandleWebSocket(ctx.Writer, ctx.Request)
-			return
-		}
-		if openAIProvider.HandleModelsHTTP(ctx.Writer, ctx.Request) {
-			return
-		}
-
 		requestBody, err := readBody(ctx.Request.Body)
 		if err != nil {
 			recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
@@ -139,33 +118,35 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 		}
 
 		logTrafficRequest(logger, "before_anonymization", string(requestBody))
-		if openAIProvider.ShouldAnonymizeHTTP(ctx.Request) {
-			outcome, err := openAIProvider.AnonymizeHTTPRequest(ctx.Request, requestBody)
-			if err != nil {
-				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.Stats))
-			if len(outcome.Stats) > 0 {
-				logAnonymizedStats(logger, outcome.Stats, outcome.Findings, config.LogPIIFindings)
-			}
-			requestBody = outcome.Body
-		} else if anthropicProvider.ShouldAnonymizeHTTP(ctx.Request) {
-			outcome, err := anthropicProvider.AnonymizeHTTPRequest(ctx.Request.Context(), logger, requestBody)
-			if err != nil {
-				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.Stats))
-			requestBody = outcome.Body
+		if shouldAnonymizeRequest(ctx.Request) {
+			outcome := promptAnonymizer.anonymizeWithStats(ctx.Request.Context(), logger, string(requestBody))
+			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.stats))
+			requestBody = []byte(outcome.body)
 		}
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
 		logTrafficRequest(logger, "after_anonymization", string(requestBody))
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
+}
+
+func shouldAnonymizeRequest(request *http.Request) bool {
+	if request.Method != http.MethodPost {
+		return false
+	}
+	switch anthropicRequestPath(request.URL.Path) {
+	case "/v1/messages", "/v1/messages/count_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func anthropicRequestPath(path string) string {
+	if path == AnthropicRoutePrefix {
+		return "/"
+	}
+	return strings.TrimPrefix(path, AnthropicRoutePrefix)
 }
 
 func validateTarget(target *url.URL) error {
@@ -178,13 +159,10 @@ func validateTarget(target *url.URL) error {
 	return nil
 }
 
-func newDirector(defaultTarget *url.URL, routeTargets map[string]*url.URL, openAIProvider *providers.OpenAI) func(*http.Request) {
+func newDirector(defaultTarget *url.URL, routeTargets map[string]*url.URL) func(*http.Request) {
 	routes := compileTargetRoutes(routeTargets)
 	return func(request *http.Request) {
-		target, requestPath, ok := openAIProvider.ResolveHTTPRoute(request)
-		if !ok {
-			target, requestPath = resolveTarget(request.URL.Path, defaultTarget, routes)
-		}
+		target, requestPath := resolveTarget(request.URL.Path, defaultTarget, routes)
 		request.URL.Path = joinURLPath(target.Path, requestPath)
 		request.Host = target.Host
 		request.URL.Host = target.Host
@@ -268,13 +246,291 @@ func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
 		Msg("traffic body")
 }
 
-func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]int, findings []anonymizer.Finding, includePII bool) {
+func newSessionPromptAnonymizer(engine TextAnonymizer, statsRecorders ...StatsRecorder) *sessionPromptAnonymizer {
+	var statsRecorder StatsRecorder
+	if len(statsRecorders) > 0 {
+		statsRecorder = statsRecorders[0]
+	}
+	return &sessionPromptAnonymizer{
+		engine:        engine,
+		statsRecorder: statsRecorder,
+	}
+}
+
+func (a *sessionPromptAnonymizer) anonymize(ctx context.Context, logger zerolog.Logger, body string) string {
+	return a.anonymizeWithStats(ctx, logger, body).body
+}
+
+type anonymizationOutcome struct {
+	body  string
+	stats map[anonymizer.EntityType]int
+}
+
+func (a *sessionPromptAnonymizer) anonymizeWithStats(ctx context.Context, logger zerolog.Logger, body string) anonymizationOutcome {
+	var payload any
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return anonymizationOutcome{body: body}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return anonymizationOutcome{body: body}
+	}
+
+	run := a.newRun(ctx, logger)
+	run.readToolIDs = collectReadToolIDs(payload)
+	anonymized, changed := run.anonymizeRequestValue(payload, anonymizationContext{})
+	if !changed {
+		return anonymizationOutcome{body: body, stats: run.stats}
+	}
+	logAnonymizedStats(logger, run.stats)
+
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(anonymized); err != nil {
+		return anonymizationOutcome{body: body}
+	}
+	return anonymizationOutcome{
+		body:  strings.TrimSuffix(output.String(), "\n"),
+		stats: run.stats,
+	}
+}
+
+func (a *sessionPromptAnonymizer) newRun(ctx context.Context, logger zerolog.Logger) *promptAnonymizationRun {
+	return &promptAnonymizationRun{
+		anonymizer: a,
+		engine:     a.engine.NewRun(),
+		ctx:        ctx,
+		logger:     logger,
+		stats:      make(map[anonymizer.EntityType]int),
+	}
+}
+
+type anonymizationContext struct {
+	conversationContent     bool
+	textValue               bool
+	preserveSystemReminders bool
+}
+
+func (r *promptAnonymizationRun) anonymizeRequestValue(value any, context anonymizationContext) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		return r.anonymizeString(typed, context)
+	case []any:
+		changed := false
+		for index, item := range typed {
+			anonymized, itemChanged := r.anonymizeRequestValue(item, context)
+			if itemChanged {
+				typed[index] = anonymized
+				changed = true
+			}
+		}
+		return typed, changed
+	case map[string]any:
+		changed := false
+		for key, item := range typed {
+			if isMetadataKey(key) {
+				continue
+			}
+
+			itemContext := r.childContext(key, typed, context)
+			anonymized, itemChanged := r.anonymizeRequestValue(item, itemContext)
+			if itemChanged {
+				typed[key] = anonymized
+				changed = true
+			}
+		}
+		return typed, changed
+	default:
+		return value, false
+	}
+}
+
+func isMetadataKey(key string) bool {
+	_, ok := metadataKeys[key]
+	return ok
+}
+
+func (r *promptAnonymizationRun) childContext(key string, parent map[string]any, context anonymizationContext) anonymizationContext {
+	if key == "content" && isConversationMessage(parent) {
+		return anonymizationContext{
+			conversationContent:     true,
+			textValue:               isStringContent(parent, key),
+			preserveSystemReminders: isStringContent(parent, key),
+		}
+	}
+
+	if key == "source" {
+		return anonymizationContext{
+			conversationContent: context.conversationContent,
+		}
+	}
+
+	if key == "content" && stringMapValue(parent, "type") == "tool_result" {
+		return anonymizationContext{
+			conversationContent: context.conversationContent,
+			textValue:           r.isReadToolResult(parent),
+		}
+	}
+
+	if key == "text" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent:     true,
+			textValue:               true,
+			preserveSystemReminders: true,
+		}
+	}
+
+	if key == "thinking" && stringMapValue(parent, "type") == "thinking" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
+	}
+
+	if key == "data" && stringMapValue(parent, "type") == "text" && context.conversationContent {
+		return anonymizationContext{
+			conversationContent: true,
+			textValue:           true,
+		}
+	}
+
+	return anonymizationContext{
+		conversationContent: context.conversationContent,
+		textValue:           context.textValue && !isMetadataKey(key),
+	}
+}
+
+func isConversationMessage(value map[string]any) bool {
+	switch stringMapValue(value, "role") {
+	case "user", "assistant":
+		return true
+	default:
+		return false
+	}
+}
+
+func stringMapValue(value map[string]any, key string) string {
+	typed, _ := value[key].(string)
+	return typed
+}
+
+func isStringContent(value map[string]any, key string) bool {
+	_, ok := value[key].(string)
+	return ok
+}
+
+func (r *promptAnonymizationRun) isReadToolResult(value map[string]any) bool {
+	toolUseID := stringMapValue(value, "tool_use_id")
+	if toolUseID == "" {
+		return false
+	}
+	_, ok := r.readToolIDs[toolUseID]
+	return ok
+}
+
+func collectReadToolIDs(value any) map[string]struct{} {
+	ids := make(map[string]struct{})
+	collectReadToolIDsInto(value, ids)
+	return ids
+}
+
+func collectReadToolIDsInto(value any, ids map[string]struct{}) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			collectReadToolIDsInto(item, ids)
+		}
+	case map[string]any:
+		if stringMapValue(typed, "type") == "tool_use" && isFileReadToolName(stringMapValue(typed, "name")) {
+			if id := stringMapValue(typed, "id"); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for _, item := range typed {
+			collectReadToolIDsInto(item, ids)
+		}
+	}
+}
+
+func isFileReadToolName(name string) bool {
+	switch strings.ToLower(name) {
+	case "read", "notebookread", "glob", "grep", "ls":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *promptAnonymizationRun) anonymizeString(value string, context anonymizationContext) (string, bool) {
+	if !context.textValue {
+		return value, false
+	}
+	if context.preserveSystemReminders {
+		return r.anonymizeTextValuePreservingSystemReminders(value)
+	}
+	return r.anonymizeTextValue(value)
+}
+
+func (r *promptAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
+	anonymized, result := r.anonymizeText(value)
+	if len(result.Stats) == 0 {
+		return value, false
+	}
+	r.addStats(result)
+	return anonymized, true
+}
+
+func (r *promptAnonymizationRun) anonymizeTextValuePreservingSystemReminders(value string) (string, bool) {
+	if !strings.Contains(value, systemReminderOpenTag) {
+		return r.anonymizeTextValue(value)
+	}
+
+	var output strings.Builder
+	changed := false
+	remaining := value
+	for {
+		openIndex := strings.Index(remaining, systemReminderOpenTag)
+		if openIndex < 0 {
+			anonymized, segmentChanged := r.anonymizeTextValue(remaining)
+			output.WriteString(anonymized)
+			return output.String(), changed || segmentChanged
+		}
+
+		closeSearchStart := openIndex + len(systemReminderOpenTag)
+		closeIndex := strings.Index(remaining[closeSearchStart:], systemReminderCloseTag)
+		if closeIndex < 0 {
+			anonymized, segmentChanged := r.anonymizeTextValue(remaining)
+			output.WriteString(anonymized)
+			return output.String(), changed || segmentChanged
+		}
+
+		anonymized, segmentChanged := r.anonymizeTextValue(remaining[:openIndex])
+		output.WriteString(anonymized)
+		changed = changed || segmentChanged
+
+		closeEnd := closeSearchStart + closeIndex + len(systemReminderCloseTag)
+		output.WriteString(remaining[openIndex:closeEnd])
+		remaining = remaining[closeEnd:]
+	}
+}
+
+func (r *promptAnonymizationRun) anonymizeText(value string) (string, anonymizer.Result) {
+	return r.engine.Anonymize(value)
+}
+
+func (r *promptAnonymizationRun) addStats(result anonymizer.Result) {
+	for entityType, entityStats := range result.Stats {
+		r.stats[entityType] += entityStats.Count
+	}
+}
+
+func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]int) {
 	event := logger.Info()
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
-	}
-	if includePII {
-		event = event.Interface("pii_findings", providers.PIILogFindings(findings))
 	}
 	event.Msg("request body anonymized")
 }
