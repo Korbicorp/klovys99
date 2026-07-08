@@ -31,16 +31,18 @@ const (
 	anthropicTargetEnv = "KLOVIS_ANTHROPIC_TARGET_URL"
 	openaiTargetEnv    = "KLOVIS_OPENAI_TARGET_URL"
 	proxyDebugEnv      = "KLOVIS_PROXY_DEBUG"
+	logPIIFindingsEnv  = "KLOVIS_LOG_PII_FINDINGS"
 	logToFileEnv       = "KLOVIS_LOG_TO_FILE"
 )
 
 const (
-	defaultProxyAdr      = "127.0.0.1:8080"
-	defaultDebug         = false
-	defaultLogToFile     = false
-	defaultStatsPath     = statlog.DefaultPath
-	defaultStatsMaxBytes = statlog.DefaultMaxBytes
-	defaultConfigPath    = appconfig.DefaultPath
+	defaultProxyAdr       = "127.0.0.1:8080"
+	defaultDebug          = false
+	defaultLogPIIFindings = false
+	defaultLogToFile      = false
+	defaultStatsPath      = statlog.DefaultPath
+	defaultStatsMaxBytes  = statlog.DefaultMaxBytes
+	defaultConfigPath     = appconfig.DefaultPath
 )
 
 //go:embed dashboard/index.html dashboard/test-tool.html dashboard/assets/*
@@ -69,6 +71,7 @@ type runtimeConfig struct {
 	OpenAITarget    *url.URL
 	Logger          *zerolog.Logger
 	DebugTrafficLog bool
+	LogPIIFindings  bool
 	LogToFile       bool
 	Detectors       detectors.Config
 	StatsPath       string
@@ -220,9 +223,10 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 			proxy.AnthropicRoutePrefix: config.AnthropicTarget,
 			proxy.OpenAIRoutePrefix:    config.OpenAITarget,
 		},
-		Logger:        config.Logger,
-		Anonymizer:    anonymizerService,
-		StatsRecorder: statsRecorder,
+		Logger:         config.Logger,
+		Anonymizer:     anonymizerService,
+		StatsRecorder:  statsRecorder,
+		LogPIIFindings: config.LogPIIFindings,
 	})
 	if err != nil {
 		closeLogFile(logFile)
@@ -458,6 +462,10 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	logPIIFindings, err := envBoolWithDefault(logPIIFindingsEnv, defaultLogPIIFindings)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	logToFile, err := envBoolWithDefault(logToFileEnv, defaultLogToFile)
 	if err != nil {
 		return runtimeConfig{}, err
@@ -468,6 +476,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		AnthropicTarget: anthropicTarget,
 		OpenAITarget:    openaiTarget,
 		DebugTrafficLog: debugTrafficLog,
+		LogPIIFindings:  logPIIFindings,
 		LogToFile:       logToFile,
 		Detectors:       detectors.DefaultConfig(),
 		StatsPath:       defaultStatsPath,
