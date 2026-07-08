@@ -236,6 +236,7 @@ Klovys99 runtime is configured with environment variables.
 | `KLOVIS_ANTHROPIC_TARGET_URL` | `https://api.anthropic.com` | Upstream used by `/anthropic/...` routes. |
 | `KLOVIS_OPENAI_TARGET_URL` | `https://api.openai.com` | Upstream used by `/openai/...` routes. |
 | `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic body logging when set to `true`. |
+| `KLOVIS_LOG_PII_FINDINGS` | `false` | Adds the original values replaced by anonymization to `request body anonymized` logs without logging the full body. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
 
 The npm wrapper also honors:
@@ -268,6 +269,16 @@ KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true npx klovys99 start
 Use debug mode carefully, because it records both the original incoming request
 body and the anonymized upstream request body in whichever log destination is
 configured.
+
+To inspect only the values that were replaced during anonymization, enable PII
+finding logs:
+
+```sh
+KLOVIS_LOG_PII_FINDINGS=true npx klovys99 start
+```
+
+Use this mode carefully too, because it records the original sensitive values
+that were replaced, even though it does not record the full request body.
 
 ## Detectors
 

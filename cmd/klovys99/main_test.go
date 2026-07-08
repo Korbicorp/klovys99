@@ -184,6 +184,7 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	t.Setenv(anthropicTargetEnv, "https://api.anthropic.com")
 	t.Setenv(openaiTargetEnv, "https://api.openai.com")
 	t.Setenv(proxyDebugEnv, "true")
+	t.Setenv(logPIIFindingsEnv, "true")
 	t.Setenv(logToFileEnv, "true")
 
 	config, err := runtimeConfigFromEnv()
@@ -193,6 +194,9 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 
 	if !config.DebugTrafficLog {
 		t.Fatal("DebugTrafficLog = false, want true")
+	}
+	if !config.LogPIIFindings {
+		t.Fatal("LogPIIFindings = false, want true")
 	}
 	if !config.LogToFile {
 		t.Fatal("LogToFile = false, want true")
