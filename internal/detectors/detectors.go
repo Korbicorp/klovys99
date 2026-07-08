@@ -345,23 +345,31 @@ func emailDetector() anonymizer.Detector {
 }
 
 func ipDetector() anonymizer.Detector {
+	const (
+		ipLeftDelimiter   = `(?:^|[^0-9A-Za-z_.-])`
+		ipv4RightBoundary = `(?=$|[^0-9A-Za-z_.-])`
+		ipv6RightBoundary = `(?=$|[^0-9A-Za-z_:.-])`
+		ipv4Pattern       = `(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)`
+		// Keep compressed IPv6 forms, but exclude bare "::" to avoid code-path false positives.
+		ipv6Pattern = `(?:` +
+			`(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|` +
+			`(?:[0-9a-fA-F]{1,4}:){1,7}:|` +
+			`(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|` +
+			`(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|` +
+			`(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|` +
+			`(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|` +
+			`(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|` +
+			`[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})|` +
+			`:(?::[0-9a-fA-F]{1,4}){1,7}` +
+			`)`
+	)
+
 	return regexDetector{
 		entityType:   anonymizer.EntityIP,
 		priority:     priorityHigh,
-		captureGroup: 0,
+		captureGroup: 1,
 		pattern: regexp2.MustCompile(
-			`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b|`+
-				`\b(?:`+
-				`(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|`+
-				`(?:[0-9a-fA-F]{1,4}:){1,7}:|`+
-				`(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|`+
-				`(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|`+
-				`(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|`+
-				`(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|`+
-				`(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|`+
-				`[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})|`+
-				`:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)`+
-				`)\b`,
+			ipLeftDelimiter+`(`+ipv4Pattern+ipv4RightBoundary+`|`+ipv6Pattern+ipv6RightBoundary+`)`,
 			regexp2.RE2,
 		),
 		normalizerPolicy: normalizerPolicyFold,
