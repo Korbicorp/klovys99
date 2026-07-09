@@ -2,130 +2,85 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-klovys99 is a local reverse proxy that anonymizes sensitive prompt data before
-forwarding requests to Anthropic or OpenAI APIs.
-
-It is designed to sit between coding clients such as Claude Code or Codex and
-their upstream API, replacing detected personal or sensitive values with stable
-pseudonym tokens before the request leaves the machine.
+- Compatible with
+  <img src="claude.webp" alt="Claude" width="16" />
+  Claude Code,
+  <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI / ChatGPT / Codex" width="16" />
+  Codex, and other
+  <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI-compatible" width="16" />
+  OpenAI-compatible clients.
+- Anonymizes sensitive values before they leave the machine, sends only tokenized
+  payloads upstream, then restores the original values locally in responses.
+- Includes a local dashboard and test tool, powered by
+  <img src="docs/readme-assets/logos/presidio.svg" alt="Presidio" width="16" />
+  Presidio,
+  <img src="docs/readme-assets/logos/gitleaks.svg" alt="Gitleaks" width="16" />
+  Gitleaks, a local NER engine, and
+  <img src="docs/readme-assets/logos/sqlite.svg" alt="SQLite" width="16" />
+  SQLite for stable anonymization and de-anonymization round-trips.
 
 ## Architecture At A Glance
 
-<table>
-  <tr>
-    <td align="center" width="22%">
-      <img src="docs/readme-assets/logos/vscode.svg" alt="VS Code" width="58" /><br />
-      <strong>VS Code clients</strong><br />
-      Claude extension<br />
-      Codex extension
-    </td>
-    <td align="center" width="10%">
-      <strong>local HTTP / WS</strong><br />
-      &#10132;
-    </td>
-    <td align="center" width="36%">
-      <img src="klovys99.png" alt="klovys99" width="104" /><br />
-      <strong>klovys99 local proxy</strong><br />
-      Sits on the developer machine and anonymizes prompts before they leave the box
-    </td>
-    <td align="center" width="10%">
-      <strong>anonymized traffic</strong><br />
-      &#10132;
-    </td>
-    <td align="center" width="22%">
-      <img src="docs/readme-assets/logos/anthropic.svg" alt="Anthropic / Claude" width="46" />
-      <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI / Codex" width="46" /><br />
-      <strong>Remote APIs</strong><br />
-      Claude / Anthropic<br />
-      Codex / OpenAI-compatible
-    </td>
-  </tr>
-</table>
+```mermaid
+flowchart LR
+    vscode["VS Code clients<br/>Claude extension / Codex extension"]
+    proxy["klovys99 local proxy"]
+    apis["Remote APIs<br/>Anthropic / OpenAI-compatible"]
 
-Klovys99 sits locally between the editor client and the upstream API so only
-anonymized prompt content is sent to the remote model.
+    vscode -->|"1. raw prompt / request"| proxy
+    proxy -->|"2. anonymized request only"| apis
+    apis -->|"3. provider response"| proxy
+    proxy -->|"4. restored response"| vscode
 
-<table>
-  <tr>
-    <td align="center" width="22%">
-      <img src="klovys99.png" alt="klovys99" width="96" /><br />
-      <strong>klovys99 runtime</strong><br />
-      Starts local web surfaces alongside the proxy
-    </td>
-    <td align="center" width="8%">
-      <strong>spawns</strong><br />
-      &#10132;
-    </td>
-    <td align="center" width="28%">
-      <strong>Admin UI</strong><br />
-      Dashboard<br />
-      Stats, controls, anonymization preview
-    </td>
-    <td align="center" width="8%">
-      <strong>spawns</strong><br />
-      &#10132;
-    </td>
-    <td align="center" width="34%">
-      <strong>User chat UI</strong><br />
-      <img src="docs/readme-assets/logos/gemini.svg" alt="Google Gemini" width="30" />
-      <img src="docs/readme-assets/logos/anthropic.svg" alt="Claude" width="30" />
-      <img src="docs/readme-assets/logos/openai.svg" alt="ChatGPT" width="30" />
-      <img src="docs/readme-assets/logos/mistralai.svg" alt="Mistral AI" width="30" /><br />
-      Gemini / Claude / ChatGPT / Mistral AI<br />
-      API key based today, OAuth sign-in in progress
-    </td>
-  </tr>
-</table>
+    classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
+    class proxy klovys;
+```
 
-<table>
-  <tr>
-    <td align="center" width="15%">
-      <strong>Prompt in</strong><br />
-      clear-text source
-    </td>
-    <td align="center" width="8%">
-      &#10132;
-    </td>
-    <td align="center" width="39%">
-      <strong>Parallel detection engine</strong><br />
-      regex core<br />
-      <img src="docs/readme-assets/logos/presidio.svg" alt="Presidio" width="88" />
-      <img src="docs/readme-assets/logos/gitleaks.svg" alt="Gitleaks" width="36" /><br />
-      Microsoft Presidio rules + Gitleaks rules + open-source NER
-    </td>
-    <td align="center" width="8%">
-      &#8646;
-    </td>
-    <td align="center" width="30%">
-      <img src="docs/readme-assets/logos/sqlite.svg" alt="SQLite" width="44" /><br />
-      <strong>SQLite token store</strong><br />
-      Stable anon/de-anon mapping for request and response round-trips
-    </td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2">
-      &nbsp;
-    </td>
-    <td align="center">
-      <strong>Output</strong><br />
-      anonymized request upstream
-    </td>
-    <td align="center">
-      &#10132;
-    </td>
-    <td align="center">
-      <strong>Return path</strong><br />
-      restored response back to the local client
-    </td>
-  </tr>
-</table>
+```mermaid
+flowchart LR
+    client["Local client or web UI"]
+    input["Prompt / tool output / text payload"]
+    engine["klovys99 anonymization engine"]
+    regex["Regex detectors"]
+    presidio["Presidio rules"]
+    gitleaks["Gitleaks rules"]
+    ner["Open-source NER"]
+    sqlite["SQLite mapping store"]
+    upstream["LLM provider"]
+    restore["Response de-anonymization"]
 
-<p align="center">
-  <img src="docs/readme-assets/logos/gemini.svg" alt="Google Gemini" width="38" />
-  <img src="docs/readme-assets/logos/anthropic.svg" alt="Claude" width="38" />
-  <img src="docs/readme-assets/logos/openai.svg" alt="ChatGPT / Codex" width="38" />
-  <img src="docs/readme-assets/logos/mistralai.svg" alt="Mistral AI" width="38" />
-</p>
+    client --> input
+    input --> engine
+    engine --> regex
+    engine --> presidio
+    engine --> gitleaks
+    engine --> ner
+    engine <-->|"stable token map"| sqlite
+    engine -->|"anonymized text only"| upstream
+    upstream -->|"tokenized response"| restore
+    sqlite --> restore
+    restore -->|"clear response restored locally"| client
+
+    classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
+    class engine,restore klovys;
+```
+
+```mermaid
+flowchart LR
+    runtime["klovys99 process"]
+    admin["Admin web UI<br/>dashboard, stats, controls, test tool"]
+    chat["User web UI<br/>Gemini / Claude / ChatGPT / Mistral AI"]
+    auth["OAuth login<br/>work in progress"]
+    keys["Current auth mode<br/>user enters API keys"]
+
+    runtime --> admin
+    runtime --> chat
+    chat --> keys
+    chat -. planned .-> auth
+
+    classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
+    class runtime klovys;
+```
 
 ## Get Started
 
