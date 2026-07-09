@@ -16,6 +16,7 @@ import (
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/rs/zerolog"
@@ -221,6 +222,180 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	}
 	if config.ConfigPath != appconfig.DefaultPath {
 		t.Fatalf("ConfigPath = %q, want default config path", config.ConfigPath)
+	}
+}
+
+func TestEnvGLiNERMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      *string
+		enabled   *string
+		want      string
+		wantError string
+	}{
+		{name: "defaults to off", want: ner.ModeOff},
+		{name: "full mode", mode: stringPtr(ner.ModeFull), want: ner.ModeFull},
+		{name: "off mode", mode: stringPtr(ner.ModeOff), want: ner.ModeOff},
+		{name: "legacy enabled true maps to full", enabled: stringPtr("true"), want: ner.ModeFull},
+		{name: "legacy enabled false maps to off", enabled: stringPtr("false"), want: ner.ModeOff},
+		{name: "mode wins over enabled", mode: stringPtr(ner.ModeFull), enabled: stringPtr("false"), want: ner.ModeFull},
+		{name: "invalid mode rejected", mode: stringPtr("fast"), wantError: "KLOVIS_GLINER_MODE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setEnv(t, glinerModeEnv, tt.mode)
+			setEnv(t, glinerEnabledEnv, tt.enabled)
+			got, err := envGLiNERMode()
+			assertErrorContains(t, err, tt.wantError)
+			if tt.wantError == "" && got != tt.want {
+				t.Fatalf("envGLiNERMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildApplicationStatusExposesGLiNERMode(t *testing.T) {
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, "https://api.anthropic.com"),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+		NERMode:    ner.ModeFull,
+		NERAnalyzer: staticNERAnalyzer{
+			status: ner.Status{Enabled: true, State: "ready", Mode: ner.ModeFull, Model: "test/model", ModelRevision: "abc123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	statusResponse := httptest.NewRecorder()
+	app.handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", statusResponse.Code)
+	}
+	var payload struct {
+		NER ner.Status `json:"ner"`
+	}
+	if err := json.NewDecoder(statusResponse.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode status payload: %v", err)
+	}
+	if payload.NER.Mode != ner.ModeFull || !payload.NER.Enabled || payload.NER.State != "ready" {
+		t.Fatalf("status payload = %#v, want ready full mode", payload.NER)
+	}
+
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyResponse := httptest.NewRecorder()
+	app.handler.ServeHTTP(readyResponse, readyRequest)
+	if readyResponse.Code != http.StatusOK {
+		t.Fatalf("readyz status = %d, want 200", readyResponse.Code)
+	}
+}
+
+func TestBuildApplicationStatusExposesGLiNEROffMode(t *testing.T) {
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, "https://api.anthropic.com"),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+		NERMode:    ner.ModeOff,
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	statusResponse := httptest.NewRecorder()
+	app.handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", statusResponse.Code)
+	}
+	var payload struct {
+		NER ner.Status `json:"ner"`
+	}
+	if err := json.NewDecoder(statusResponse.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode status payload: %v", err)
+	}
+	if payload.NER.Mode != ner.ModeOff || payload.NER.Enabled || payload.NER.State != "disabled" {
+		t.Fatalf("status payload = %#v, want disabled off mode", payload.NER)
+	}
+}
+
+func TestBuildApplicationReadyzFailsWhenGLiNERModeIsUnavailable(t *testing.T) {
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, "https://api.anthropic.com"),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+		NERMode:    ner.ModeFull,
+		NERAnalyzer: staticNERAnalyzer{
+			status: ner.Status{Enabled: true, State: "unavailable", Mode: ner.ModeFull, Model: "test/model", ModelRevision: "abc123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyResponse := httptest.NewRecorder()
+	app.handler.ServeHTTP(readyResponse, readyRequest)
+	if readyResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status = %d, want 503", readyResponse.Code)
+	}
+	var payload struct {
+		NER ner.Status `json:"ner"`
+	}
+	if err := json.NewDecoder(readyResponse.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode ready payload: %v", err)
+	}
+	if payload.NER.Mode != ner.ModeFull || payload.NER.State != "unavailable" {
+		t.Fatalf("ready payload = %#v, want unavailable full mode", payload.NER)
+	}
+}
+
+func TestBuildApplicationAnonymizationPreviewUsesFullNERMatches(t *testing.T) {
+	app, err := buildApplication(context.Background(), runtimeConfig{
+		Target:     mustParseURL(t, "https://api.anthropic.com"),
+		Logger:     ptrLogger(zerolog.Nop()),
+		Detectors:  noExternalDetectorsConfig(),
+		StatsPath:  t.TempDir() + "/stats.jsonl",
+		ConfigPath: testConfigPath(t),
+		NERMode:    ner.ModeFull,
+		NERAnalyzer: staticNERAnalyzer{
+			status: ner.Status{Enabled: true, State: "ready", Mode: ner.ModeFull, Model: "test/model", ModelRevision: "abc123"},
+			matches: [][]anonymizer.Match{{
+				{Start: 20, End: 26, Type: anonymizer.EntityOrganization, Priority: ner.DefaultPriority, Normalized: "sanofi"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildApplication returned error: %v", err)
+	}
+	defer app.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "/api/anonymization/test", strings.NewReader(`{"text":"John Smith works at Sanofi in Lyon."}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200", response.Code)
+	}
+	var preview anonymizationTestResponse
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if got, want := preview.AnonymizedText, "John Smith works at [ORGANIZATION_1] in Lyon."; got != want {
+		t.Fatalf("anonymized text = %q, want %q", got, want)
+	}
+	if len(preview.Findings) != 1 || preview.Findings[0].Type != anonymizer.EntityOrganization {
+		t.Fatalf("findings = %#v, want one organization finding", preview.Findings)
 	}
 }
 
@@ -600,16 +775,12 @@ func TestBuildApplicationAnonymizationTestAPIUsesConfigWithoutStatsOrLogs(t *tes
 	defer app.Close()
 	logs.Reset()
 
-	server := httptest.NewServer(app.handler)
-	defer server.Close()
-
-	response, err := server.Client().Post(server.URL+"/api/anonymization/test", "application/json", strings.NewReader(`{"text":"hello alice@example.com and FR76 3000 6000 0112 3456 7890 189"}`))
-	if err != nil {
-		t.Fatalf("call anonymization test API: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("anonymization test status = %d, want 200", response.StatusCode)
+	request := httptest.NewRequest(http.MethodPost, "/api/anonymization/test", strings.NewReader(`{"text":"hello alice@example.com and FR76 3000 6000 0112 3456 7890 189"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("anonymization test status = %d, want 200", response.Code)
 	}
 
 	var preview anonymizationTestResponse
@@ -637,22 +808,21 @@ func TestBuildApplicationAnonymizationTestAPIUsesConfigWithoutStatsOrLogs(t *tes
 		t.Fatalf("summary = %#v, want anonymization test to avoid stats", summary)
 	}
 
-	request, err := http.NewRequest(http.MethodPut, server.URL+"/api/config", strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false},{"type":"IBAN","enabled":true}]}`))
-	if err != nil {
-		t.Fatalf("build config request: %v", err)
+	updateRequest := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"protection_options":[{"type":"EMAIL","enabled":false},{"type":"IBAN","enabled":true}]}`))
+	updateRequest.Header.Set("Content-Type", "application/json")
+	updateResponse := httptest.NewRecorder()
+	app.handler.ServeHTTP(updateResponse, updateRequest)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("config update status = %d, want 200", updateResponse.Code)
 	}
-	request.Header.Set("Content-Type", "application/json")
-	updateResponse, err := server.Client().Do(request)
-	if err != nil {
-		t.Fatalf("call config update: %v", err)
-	}
-	updateResponse.Body.Close()
 
-	secondResponse, err := server.Client().Post(server.URL+"/api/anonymization/test", "application/json", strings.NewReader(`{"text":"hello alice@example.com and FR76 3000 6000 0112 3456 7890 189"}`))
-	if err != nil {
-		t.Fatalf("call anonymization test API after config update: %v", err)
+	secondRequest := httptest.NewRequest(http.MethodPost, "/api/anonymization/test", strings.NewReader(`{"text":"hello alice@example.com and FR76 3000 6000 0112 3456 7890 189"}`))
+	secondRequest.Header.Set("Content-Type", "application/json")
+	secondResponse := httptest.NewRecorder()
+	app.handler.ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusOK {
+		t.Fatalf("updated anonymization test status = %d, want 200", secondResponse.Code)
 	}
-	defer secondResponse.Body.Close()
 
 	var updatedPreview anonymizationTestResponse
 	if err := json.NewDecoder(secondResponse.Body).Decode(&updatedPreview); err != nil {
@@ -867,6 +1037,26 @@ func optionEnabled(options []appconfig.ProtectionOption, entityType anonymizer.E
 		}
 	}
 	return false
+}
+
+type staticNERAnalyzer struct {
+	status  ner.Status
+	matches [][]anonymizer.Match
+	err     error
+}
+
+func (s staticNERAnalyzer) AnalyzeBatch(context.Context, []string) ([][]anonymizer.Match, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.matches != nil {
+		return s.matches, nil
+	}
+	return [][]anonymizer.Match{{}}, nil
+}
+
+func (s staticNERAnalyzer) Status() ner.Status {
+	return s.status
 }
 
 func noExternalDetectorsConfig() detectors.Config {

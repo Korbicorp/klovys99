@@ -45,14 +45,12 @@ function runGLiNER(args) {
 }
 
 function runStart(args) {
-  const glinerIndex = args.indexOf("--gliner");
-  if (glinerIndex < 0) {
-    return runBinary(args);
+  const settings = gliner.resolveStartSettings(args);
+  if (settings.mode === gliner.MODE_OFF) {
+    return runBinary(settings.binaryArgs, settings.env);
   }
-  const binaryArgs = args.slice(0, glinerIndex);
-  const settings = gliner.resolveSettings(args.slice(glinerIndex + 1));
   const env = gliner.start(settings, packageRoot);
-  return runBinary(binaryArgs, env);
+  return runBinary(settings.binaryArgs, env);
 }
 
 function runConfigure(args) {
@@ -135,7 +133,8 @@ function printHelp() {
 Usage:
   klovys99 start
   klovys99 gliner install --model MODEL --revision COMMIT_SHA
-  klovys99 start --gliner --model MODEL --revision COMMIT_SHA
+  klovys99 start [--gliner-mode full|off]
+  klovys99 start --gliner-model MODEL --gliner-revision COMMIT_SHA
   klovys99 configure codex [--base-url http://127.0.0.1:8080]
   klovys99 configure claude [--base-url http://127.0.0.1:8080]
   klovys99 configure both [--base-url http://127.0.0.1:8080]

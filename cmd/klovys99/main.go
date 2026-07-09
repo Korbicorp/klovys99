@@ -35,6 +35,7 @@ const (
 	logPIIFindingsEnv        = "KLOVIS_LOG_PII_FINDINGS"
 	logToFileEnv             = "KLOVIS_LOG_TO_FILE"
 	glinerEnabledEnv         = "KLOVIS_GLINER_ENABLED"
+	glinerModeEnv            = "KLOVIS_GLINER_MODE"
 	glinerURLEnv             = "KLOVIS_GLINER_URL"
 	glinerModelEnv           = "KLOVIS_GLINER_MODEL"
 	glinerRevisionEnv        = "KLOVIS_GLINER_MODEL_REVISION"
@@ -88,7 +89,7 @@ type runtimeConfig struct {
 	StatsPath       string
 	StatsMaxBytes   int64
 	ConfigPath      string
-	NEREnabled      bool
+	NERMode         string
 	NERConfig       ner.Config
 	NERAnalyzer     ner.Analyzer
 }
@@ -190,6 +191,9 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if config.NERMode == "" {
+		config.NERMode = ner.ModeOff
+	}
 	if strings.TrimSpace(config.Addr) == "" {
 		config.Addr = defaultProxyAdr
 	}
@@ -264,7 +268,8 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 
 	anonymizerService := anonymizer.NewServiceWithProtectionPolicy(detectorResult.Detectors, configStore)
 	nerAnalyzer := config.NERAnalyzer
-	if config.NEREnabled && nerAnalyzer == nil {
+	if config.NERMode != ner.ModeOff && nerAnalyzer == nil {
+		config.NERConfig.Mode = config.NERMode
 		nerAnalyzer, err = ner.NewClient(config.NERConfig)
 		if err != nil {
 			closeLogFile(logFile)
@@ -564,7 +569,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	glinerEnabled, err := envBoolWithDefault(glinerEnabledEnv, false)
+	glinerMode, err := envGLiNERMode()
 	if err != nil {
 		return runtimeConfig{}, err
 	}
@@ -604,8 +609,9 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		StatsPath:       defaultStatsPath,
 		StatsMaxBytes:   defaultStatsMaxBytes,
 		ConfigPath:      defaultConfigPath,
-		NEREnabled:      glinerEnabled,
+		NERMode:         glinerMode,
 		NERConfig: ner.Config{
+			Mode:           glinerMode,
 			URL:            envStringWithDefault(glinerURLEnv, ner.DefaultURL),
 			Model:          strings.TrimSpace(os.Getenv(glinerModelEnv)),
 			ModelRevision:  strings.TrimSpace(os.Getenv(glinerRevisionEnv)),
@@ -617,6 +623,28 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 			MaxBatchChars:  glinerBatchChars,
 		},
 	}, nil
+}
+
+func envGLiNERMode() (string, error) {
+	rawMode := strings.TrimSpace(os.Getenv(glinerModeEnv))
+	if rawMode != "" {
+		mode := ner.NormalizeMode(rawMode)
+		if mode == "" {
+			return "", fmt.Errorf("parse %s: value must be full or off", glinerModeEnv)
+		}
+		return mode, nil
+	}
+	if _, ok := os.LookupEnv(glinerEnabledEnv); ok {
+		enabled, err := envBoolWithDefault(glinerEnabledEnv, false)
+		if err != nil {
+			return "", err
+		}
+		if enabled {
+			return ner.ModeFull, nil
+		}
+		return ner.ModeOff, nil
+	}
+	return ner.ModeOff, nil
 }
 
 func envURLWithDefault(name, def string) (*url.URL, error) {

@@ -27,6 +27,8 @@ const (
 	DefaultMaxQueue       = 16
 	DefaultMaxBatchChars  = 32768
 	DefaultPriority       = 650
+	ModeOff               = "off"
+	ModeFull              = "full"
 )
 
 var (
@@ -41,6 +43,7 @@ type Analyzer interface {
 }
 
 type Config struct {
+	Mode           string
 	URL            string
 	Model          string
 	ModelRevision  string
@@ -56,6 +59,7 @@ type Config struct {
 type Status struct {
 	Enabled       bool      `json:"enabled"`
 	State         string    `json:"state"`
+	Mode          string    `json:"mode,omitempty"`
 	Model         string    `json:"model,omitempty"`
 	ModelRevision string    `json:"model_revision,omitempty"`
 	LastSuccess   time.Time `json:"last_success,omitempty"`
@@ -68,6 +72,8 @@ type Client struct {
 	readyEndpoint  *url.URL
 	model          string
 	revision       string
+	mode           string
+	labels         []string
 	timeout        time.Duration
 	threshold      float64
 	labelThreshold map[string]float64
@@ -124,7 +130,25 @@ func Labels() []string {
 	}
 }
 
+func NormalizeMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", ModeFull:
+		return ModeFull
+	case ModeOff:
+		return ModeOff
+	default:
+		return ""
+	}
+}
+
 func NewClient(config Config) (*Client, error) {
+	config.Mode = NormalizeMode(config.Mode)
+	if config.Mode == "" {
+		return nil, fmt.Errorf("GLiNER mode must be one of %q or %q", ModeFull, ModeOff)
+	}
+	if config.Mode == ModeOff {
+		return nil, fmt.Errorf("GLiNER off mode should not create a client")
+	}
 	if config.URL == "" {
 		config.URL = DefaultURL
 	}
@@ -161,6 +185,8 @@ func NewClient(config Config) (*Client, error) {
 		readyEndpoint:  &readyEndpoint,
 		model:          strings.TrimSpace(config.Model),
 		revision:       strings.TrimSpace(config.ModelRevision),
+		mode:           config.Mode,
+		labels:         Labels(),
 		timeout:        config.Timeout,
 		threshold:      config.Threshold,
 		labelThreshold: config.LabelThreshold,
@@ -171,6 +197,7 @@ func NewClient(config Config) (*Client, error) {
 		status: Status{
 			Enabled:       true,
 			State:         "unavailable",
+			Mode:          config.Mode,
 			Model:         strings.TrimSpace(config.Model),
 			ModelRevision: strings.TrimSpace(config.ModelRevision),
 		},
@@ -212,7 +239,7 @@ func (c *Client) Probe(ctx context.Context) error {
 }
 
 func DisabledStatus() Status {
-	return Status{Enabled: false, State: "disabled"}
+	return Status{Enabled: false, State: "disabled", Mode: ModeOff}
 }
 
 func (c *Client) AnalyzeBatch(ctx context.Context, texts []string) ([][]anonymizer.Match, error) {
@@ -249,7 +276,7 @@ func (c *Client) AnalyzeBatch(ctx context.Context, texts []string) ([][]anonymiz
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	payload, err := json.Marshal(analyzeRequest{
-		Texts: texts, Labels: Labels(), Threshold: c.threshold,
+		Texts: texts, Labels: c.labels, Threshold: c.threshold,
 		LabelThreshold: c.labelThreshold, Model: c.model, ModelRevision: c.revision,
 	})
 	if err != nil {

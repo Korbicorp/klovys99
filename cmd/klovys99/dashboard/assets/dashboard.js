@@ -13,9 +13,9 @@ const translations = {
     testToolDocumentTitle: "klovys99 Test tool",
     loading: "Loading",
     live: "Live",
-    nerReady: "Context protection ready",
-    nerDisabled: "Regex protection ready",
-    nerDegraded: "Context protection degraded",
+    nerReady: (mode) => `Context protection ready (${mode})`,
+    nerDisabled: "Context protection off",
+    nerDegraded: (mode) => `Context protection degraded (${mode})`,
     unavailable: "Unavailable",
     resetFailed: "Reset failed",
     refresh: "Refresh",
@@ -127,9 +127,9 @@ const translations = {
     testToolDocumentTitle: "klovys99 Outil de test",
     loading: "Chargement",
     live: "En direct",
-    nerReady: "Protection contextuelle prête",
-    nerDisabled: "Protection regex prête",
-    nerDegraded: "Protection contextuelle dégradée",
+    nerReady: (mode) => `Protection contextuelle prête (${mode})`,
+    nerDisabled: "Protection contextuelle désactivée",
+    nerDegraded: (mode) => `Protection contextuelle dégradée (${mode})`,
     unavailable: "Indisponible",
     resetFailed: "Échec du reset",
     refresh: "Actualiser",
@@ -515,12 +515,13 @@ async function loadNERStatus() {
 
 function renderNERStatus(payload) {
   const ner = payload && payload.ner ? payload.ner : { enabled: false, state: "disabled" };
+  const mode = String(ner.mode || "off").toLowerCase();
   if (!ner.enabled) {
     setStatus("live", text.nerDisabled);
   } else if (ner.state === "ready") {
-    setStatus("live", text.nerReady);
+    setStatus("live", text.nerReady(mode));
   } else if (ner.state === "degraded") {
-    setStatus("loading", text.nerDegraded);
+    setStatus("loading", text.nerDegraded(mode));
   } else {
     setStatus("error", text.unavailable);
   }

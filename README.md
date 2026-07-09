@@ -73,8 +73,8 @@ Supported values are `codex`, `claude`, and `both`.
   and architecture and exposes a `klovys99` command.
 - Client configuration helpers for Codex and Claude Code.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
-- Optional local GLiNER sidecar for contextual names, organizations, locations,
-  employers, schools, addresses, and healthcare institutions.
+- Local GLiNER sidecar enabled by default through the standard `klovys99 start`
+  flow, with explicit `full` and `off` modes.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
   rule sources.
 - Stable pseudonym tokens for the lifetime of the proxy process.
@@ -89,7 +89,8 @@ Supported values are `codex`, `claude`, and `both`.
   rule sources.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
   client you route through Klovys99.
-- Docker Desktop or Docker Engine only when the optional GLiNER mode is used.
+- Docker Desktop or Docker Engine when you use the standard GLiNER-backed
+  startup flow.
 
 Go 1.25 or newer is only required if you work from a source checkout or build
 release binaries yourself.
@@ -242,34 +243,59 @@ Klovys99 runtime is configured with environment variables.
 | `KLOVIS_LOG_PII_FINDINGS` | `false` | Deprecated and ignored for privacy; raw findings are never logged. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
 
-### Optional contextual GLiNER protection
+### Contextual GLiNER protection modes
 
-GLiNER is disabled by default and the regex-only proxy continues to work
-without Docker. Model installation is always explicit. Choose a model only
-after evaluation and pin `REVISION` to its immutable Hugging Face commit SHA:
+The standard `klovys99 start` flow now starts with GLiNER in `full` mode by
+default. The raw Go binary keeps `off` unless you set `KLOVIS_GLINER_MODE`
+yourself. Two modes are available and explicit:
+
+- `full`: all configured contextual labels.
+- `off`: regex-only mode without contextual GLiNER analysis.
+
+The default pinned model identity is:
+
+- model: `urchade/gliner_multi_pii-v1`
+- revision: `1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d`
+
+You can pre-install or refresh the pinned model explicitly:
 
 ```sh
 npx klovys99 gliner install \
   --model urchade/gliner_multi_pii-v1 \
-  --revision REVISION
-npx klovys99 start --gliner \
-  --model urchade/gliner_multi_pii-v1 \
-  --revision REVISION
+  --revision 1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d
 ```
 
-The first command builds the CPU image, downloads the pinned model, and writes
-a SHA-256 manifest atomically under `~/.klovys99/gliner`. The start command
-uses that local image and model with `--no-build`; user requests never download
-models. The sidecar is published only on `127.0.0.1:8091`.
+The standard startup commands are:
+
+```sh
+npx klovys99 start
+npx klovys99 start --gliner-mode off
+```
+
+When `full` is selected, the npm wrapper ensures that the pinned model is
+installed locally under `~/.klovys99/gliner`, starts the local sidecar on
+`127.0.0.1:8091`, and then launches the Go proxy. `off` skips the sidecar
+entirely and runs the regex-only proxy.
+
+The `full` mode requests:
+
+- `person name`
+- `organization`
+- `location`
+- `employer`
+- `school or educational institution`
+- `medical provider or healthcare institution`
+- `street address`
 
 A sample direct sidecar latency benchmark is available in [docs/benchmarks/gliner-benchmark.md](docs/benchmarks/gliner-benchmark.md).
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `KLOVIS_GLINER_ENABLED` | `false` | Enables contextual detection. |
+| `KLOVIS_GLINER_MODE` | `off` | Explicit contextual mode for the raw Go binary: `full` or `off`. The npm `klovys99 start` wrapper injects `full` by default. |
+| `KLOVIS_GLINER_ENABLED` | deprecated | Legacy bool compatibility shim. Prefer `KLOVIS_GLINER_MODE`. |
 | `KLOVIS_GLINER_URL` | `http://127.0.0.1:8091` | Loopback sidecar URL; non-loopback URLs are rejected. |
-| `KLOVIS_GLINER_MODEL` | none | Exact model identifier; required when enabled. |
-| `KLOVIS_GLINER_MODEL_REVISION` | none | Immutable revision/digest; required when enabled. |
+| `KLOVIS_GLINER_MODEL` | `urchade/gliner_multi_pii-v1` | Exact model identifier used by the npm wrapper or direct env config. |
+| `KLOVIS_GLINER_MODEL_REVISION` | `1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d` | Immutable revision/digest used by the npm wrapper or direct env config. |
 | `KLOVIS_GLINER_TIMEOUT` | `5s` | Per-batch deadline. |
 | `KLOVIS_GLINER_THRESHOLD` | `0.50` | Global confidence threshold. |
 | `KLOVIS_GLINER_LABEL_THRESHOLDS` | `{}` | JSON object overriding thresholds for fixed labels. |
@@ -278,10 +304,12 @@ A sample direct sidecar latency benchmark is available in [docs/benchmarks/gline
 | `KLOVIS_GLINER_FAILURE_POLICY` | `fail-closed` | Only supported policy in V1. |
 | `KLOVIS_GLINER_DATA_DIR` | `~/.klovys99/gliner` | npm lifecycle model directory. |
 
-When enabled, a timeout, unavailable sidecar, saturated queue, malformed span,
-or model identity mismatch returns `503` and makes zero upstream calls.
+When `full` is active, a timeout, unavailable sidecar, saturated queue,
+malformed span, or model identity mismatch returns `503` and makes zero
+upstream calls. If the npm wrapper cannot build, install, or start GLiNER, the
+startup command exits with an explicit error instead of silently falling back.
 `/healthz` reports Go liveness, `/readyz` includes contextual readiness, and
-`/api/status` exposes only sanitized model/status metadata.
+`/api/status` exposes sanitized metadata including the active GLiNER mode.
 
 The npm wrapper also honors:
 

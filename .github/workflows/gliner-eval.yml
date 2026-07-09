@@ -24,7 +24,7 @@ jobs:
       KLOVIS_GLINER_MODEL_REVISION: ${{ inputs.revision || vars.KLOVIS_GLINER_MODEL_REVISION }}
       KLOVIS_GLINER_DATA_DIR: /tmp/klovis-gliner
       KLOVIS_GLINER_URL: http://127.0.0.1:8091
-      KLOVIS_GLINER_ENABLED: "true"
+      KLOVIS_GLINER_MODE: full
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -50,4 +50,3 @@ jobs:
           path: gliner-eval.json
       - if: always()
         run: docker compose -f sidecar/gliner/compose.yaml down
-
