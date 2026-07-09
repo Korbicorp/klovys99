@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,13 @@ type Config struct {
 	Anthropic      *providers.Anthropic
 	OpenAI         *providers.OpenAI
 	NERAnalyzer    ner.Analyzer
+}
+
+type responseTransformContextKey struct{}
+
+type responseTransformContext struct {
+	mapping   *providers.ResponseRestoreMapping
+	transform func(*providers.ResponseRestoreMapping, *http.Response) error
 }
 
 func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
@@ -121,6 +129,13 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 	if config.Transport != nil {
 		proxy.Transport = config.Transport
 	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		transform, ok := responseTransformFromRequest(response.Request)
+		if !ok || transform.mapping == nil || transform.transform == nil {
+			return nil
+		}
+		return transform.transform(transform.mapping, response)
+	}
 	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
 		recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventProxyError})
 		logger.Error().Err(err).Msg("proxy error")
@@ -144,6 +159,8 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			return
 		}
 
+		logTrafficRequest(logger, "before_anonymization", string(requestBody))
+		var responseTransform responseTransformContext
 		if openAIProvider.ShouldAnonymizeHTTP(ctx.Request) {
 			outcome, err := openAIProvider.AnonymizeHTTPRequest(ctx.Request, requestBody)
 			if err != nil {
@@ -156,8 +173,12 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 				logAnonymizedStats(logger, outcome.Stats, outcome.Findings, config.LogPIIFindings)
 			}
 			requestBody = outcome.Body
+			responseTransform = responseTransformContext{
+				mapping:   outcome.RestoreMapping,
+				transform: openAIProvider.DeanonymizeHTTPResponse,
+			}
 		} else if anthropicProvider.ShouldAnonymizeHTTP(ctx.Request) {
-			outcome, err := anthropicProvider.AnonymizeHTTPRequest(ctx.Request.Context(), logger, requestBody)
+			outcome, err := anthropicProvider.AnonymizeHTTPRequest(ctx.Request, logger, requestBody)
 			if err != nil {
 				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
 				writeAnonymizationError(ctx, err)
@@ -165,11 +186,34 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			}
 			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.Stats))
 			requestBody = outcome.Body
+			responseTransform = responseTransformContext{
+				mapping:   outcome.RestoreMapping,
+				transform: anthropicProvider.DeanonymizeHTTPResponse,
+			}
 		}
 		ctx.Request.Body = io.NopCloser(bytes.NewReader(requestBody))
 		ctx.Request.ContentLength = int64(len(requestBody))
+		if responseTransform.mapping != nil && responseTransform.transform != nil {
+			ctx.Request.Header.Del("Accept-Encoding")
+			ctx.Request = ctx.Request.WithContext(
+				contextWithResponseTransform(ctx.Request.Context(), responseTransform),
+			)
+		}
+		logTrafficRequest(logger, "after_anonymization", string(requestBody))
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
+}
+
+func contextWithResponseTransform(ctx context.Context, transform responseTransformContext) context.Context {
+	return context.WithValue(ctx, responseTransformContextKey{}, transform)
+}
+
+func responseTransformFromRequest(request *http.Request) (responseTransformContext, bool) {
+	if request == nil {
+		return responseTransformContext{}, false
+	}
+	transform, ok := request.Context().Value(responseTransformContextKey{}).(responseTransformContext)
+	return transform, ok
 }
 
 func validateTarget(target *url.URL) error {
@@ -275,6 +319,10 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	_ = findings
 	_ = includePII
 	event.Msg("request body anonymized")
+}
+
+func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
+	logger.Debug().Str("stage", stage).Str("body", body).Msg("request traffic")
 }
 
 func writeAnonymizationError(ctx *gin.Context, err error) {

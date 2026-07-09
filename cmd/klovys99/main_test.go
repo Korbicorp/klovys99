@@ -184,6 +184,7 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	t.Setenv(targetEnv, "https://gateway.example.com")
 	t.Setenv(anthropicTargetEnv, "https://api.anthropic.com")
 	t.Setenv(openaiTargetEnv, "https://api.openai.com")
+	t.Setenv(tokenStorePathEnv, "/tmp/klovys-test-tokens.sqlite")
 	t.Setenv(proxyDebugEnv, "true")
 	t.Setenv(logPIIFindingsEnv, "true")
 	t.Setenv(logToFileEnv, "true")
@@ -222,6 +223,9 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	}
 	if config.ConfigPath != appconfig.DefaultPath {
 		t.Fatalf("ConfigPath = %q, want default config path", config.ConfigPath)
+	}
+	if config.TokenStorePath != "/tmp/klovys-test-tokens.sqlite" {
+		t.Fatalf("TokenStorePath = %q, want custom token store path", config.TokenStorePath)
 	}
 }
 
@@ -505,10 +509,11 @@ func TestBuildApplicationSetsGlobalLoggerToRuntimeFile(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:     mustParseURL(t, upstream.URL),
-		LogToFile:  true,
-		Detectors:  noExternalDetectorsConfig(),
-		ConfigPath: testConfigPath(t),
+		Target:         mustParseURL(t, upstream.URL),
+		LogToFile:      true,
+		Detectors:      noExternalDetectorsConfig(),
+		ConfigPath:     testConfigPath(t),
+		TokenStorePath: testTokenStorePath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -542,12 +547,13 @@ func TestBuildApplicationComposesServices(t *testing.T) {
 	logger := zerolog.New(&logs)
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Addr:       ":9090",
-		Target:     mustParseURL(t, upstream.URL),
-		Logger:     &logger,
-		Detectors:  noExternalDetectorsConfig(),
-		StatsPath:  t.TempDir() + "/stats.jsonl",
-		ConfigPath: testConfigPath(t),
+		Addr:           ":9090",
+		Target:         mustParseURL(t, upstream.URL),
+		Logger:         &logger,
+		Detectors:      noExternalDetectorsConfig(),
+		StatsPath:      t.TempDir() + "/stats.jsonl",
+		ConfigPath:     testConfigPath(t),
+		TokenStorePath: testTokenStorePath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -587,11 +593,12 @@ func TestBuildApplicationServesStatsAPIBeforeProxy(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:     mustParseURL(t, upstream.URL),
-		Logger:     ptrLogger(zerolog.Nop()),
-		Detectors:  noExternalDetectorsConfig(),
-		StatsPath:  t.TempDir() + "/stats.jsonl",
-		ConfigPath: testConfigPath(t),
+		Target:         mustParseURL(t, upstream.URL),
+		Logger:         ptrLogger(zerolog.Nop()),
+		Detectors:      noExternalDetectorsConfig(),
+		StatsPath:      t.TempDir() + "/stats.jsonl",
+		ConfigPath:     testConfigPath(t),
+		TokenStorePath: testTokenStorePath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -679,11 +686,12 @@ func TestBuildApplicationConfigAPIUpdatesAnonymization(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:     mustParseURL(t, upstream.URL),
-		Logger:     ptrLogger(zerolog.Nop()),
-		Detectors:  noExternalDetectorsConfig(),
-		StatsPath:  t.TempDir() + "/stats.jsonl",
-		ConfigPath: testConfigPath(t),
+		Target:         mustParseURL(t, upstream.URL),
+		Logger:         ptrLogger(zerolog.Nop()),
+		Detectors:      noExternalDetectorsConfig(),
+		StatsPath:      t.TempDir() + "/stats.jsonl",
+		ConfigPath:     testConfigPath(t),
+		TokenStorePath: testTokenStorePath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -763,11 +771,12 @@ func TestBuildApplicationAnonymizationTestAPIUsesConfigWithoutStatsOrLogs(t *tes
 	logger := zerolog.New(&logs).Level(zerolog.DebugLevel)
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:     mustParseURL(t, "https://api.anthropic.com"),
-		Logger:     &logger,
-		Detectors:  noExternalDetectorsConfig(),
-		StatsPath:  t.TempDir() + "/stats.jsonl",
-		ConfigPath: testConfigPath(t),
+		Target:         mustParseURL(t, "https://api.anthropic.com"),
+		Logger:         &logger,
+		Detectors:      noExternalDetectorsConfig(),
+		StatsPath:      t.TempDir() + "/stats.jsonl",
+		ConfigPath:     testConfigPath(t),
+		TokenStorePath: testTokenStorePath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -850,11 +859,12 @@ func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
 	defer upstream.Close()
 
 	app, err := buildApplication(context.Background(), runtimeConfig{
-		Target:     mustParseURL(t, upstream.URL),
-		Logger:     ptrLogger(zerolog.Nop()),
-		Detectors:  noExternalDetectorsConfig(),
-		StatsPath:  t.TempDir() + "/stats.jsonl",
-		ConfigPath: testConfigPath(t),
+		Target:         mustParseURL(t, upstream.URL),
+		Logger:         ptrLogger(zerolog.Nop()),
+		Detectors:      noExternalDetectorsConfig(),
+		StatsPath:      t.TempDir() + "/stats.jsonl",
+		ConfigPath:     testConfigPath(t),
+		TokenStorePath: testTokenStorePath(t),
 	})
 	if err != nil {
 		t.Fatalf("buildApplication returned error: %v", err)
@@ -1070,6 +1080,11 @@ func noExternalDetectorsConfig() detectors.Config {
 func testConfigPath(t *testing.T) string {
 	t.Helper()
 	return t.TempDir() + "/klovys99_config.json"
+}
+
+func testTokenStorePath(t *testing.T) string {
+	t.Helper()
+	return t.TempDir() + "/klovys99_tokens.sqlite"
 }
 
 func stringPtr(value string) *string {

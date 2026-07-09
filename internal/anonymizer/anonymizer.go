@@ -1,7 +1,7 @@
 package anonymizer
 
 import (
-	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -12,14 +12,13 @@ type Service struct {
 	// detectors is the ordered set of regex-based detectors used for each call.
 	detectors        []Detector
 	protectionPolicy ProtectionPolicy
+	tokenStore       TokenStoreFactory
 }
 
 type Run struct {
-	service *Service
-	// tokens stores stable pseudonyms by entity type and normalized value.
-	tokens map[EntityType]map[string]string
-	// nextID tracks the next numeric suffix to allocate for each entity type.
-	nextID map[EntityType]int
+	service  *Service
+	store    RunTokenStore
+	fallback *memoryRunTokenStore
 	// logMatches controls whether raw detector matches are emitted in debug logs.
 	logMatches bool
 }
@@ -30,6 +29,8 @@ type allowAllProtectionPolicy struct{}
 type ProtectionPolicy interface {
 	IsTypeEnabled(entityType EntityType) bool
 }
+
+var tokenPattern = regexp.MustCompile(`\[[A-Z_]+_[0-9]+\]`)
 
 // IsTypeEnabled keeps every type enabled when no external policy is configured.
 func (allowAllProtectionPolicy) IsTypeEnabled(EntityType) bool {
@@ -43,12 +44,23 @@ func NewService(detectors []Detector) *Service {
 
 // NewServiceWithProtectionPolicy creates an anonymizer that filters matches through a runtime policy.
 func NewServiceWithProtectionPolicy(detectors []Detector, protectionPolicy ProtectionPolicy) *Service {
+	return NewServiceWithProtectionPolicyAndTokenStore(detectors, protectionPolicy, nil)
+}
+
+// NewServiceWithTokenStore creates an anonymizer that persists token mappings in the provided store.
+func NewServiceWithTokenStore(detectors []Detector, tokenStore TokenStoreFactory) *Service {
+	return NewServiceWithProtectionPolicyAndTokenStore(detectors, nil, tokenStore)
+}
+
+// NewServiceWithProtectionPolicyAndTokenStore creates an anonymizer with a runtime policy and token store.
+func NewServiceWithProtectionPolicyAndTokenStore(detectors []Detector, protectionPolicy ProtectionPolicy, tokenStore TokenStoreFactory) *Service {
 	if protectionPolicy == nil {
 		protectionPolicy = allowAllProtectionPolicy{}
 	}
 	return &Service{
 		detectors:        detectors,
 		protectionPolicy: protectionPolicy,
+		tokenStore:       tokenStore,
 	}
 }
 
@@ -59,10 +71,16 @@ func (a *Service) NewRun() *Run {
 }
 
 func (a *Service) newRun(logMatches bool) *Run {
+	store, err := newRunTokenStore(a.tokenStore)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to initialize token store, falling back to in-memory mappings")
+		store = newMemoryRunTokenStore()
+	}
+
 	return &Run{
 		service:    a,
-		tokens:     make(map[EntityType]map[string]string),
-		nextID:     make(map[EntityType]int),
+		store:      store,
+		fallback:   newMemoryRunTokenStore(),
 		logMatches: logMatches,
 	}
 }
@@ -104,6 +122,64 @@ func (r *Run) PreviewWithMatches(input string, extraMatches []Match) PreviewResu
 	}
 }
 
+// Deanonymize replaces known anonymization tokens with their original values.
+func (r *Run) Deanonymize(input string) (string, bool) {
+	indices := tokenPattern.FindAllStringIndex(input, -1)
+	if len(indices) == 0 {
+		return input, false
+	}
+
+	var output strings.Builder
+	output.Grow(len(input))
+
+	last := 0
+	replaced := false
+	for _, index := range indices {
+		output.WriteString(input[last:index[0]])
+
+		token := input[index[0]:index[1]]
+		if value, ok := r.ValueForToken(token); ok {
+			output.WriteString(value)
+			replaced = true
+		} else {
+			output.WriteString(token)
+		}
+
+		last = index[1]
+	}
+
+	output.WriteString(input[last:])
+	return output.String(), replaced
+}
+
+// ValueForToken resolves one anonymization token to its original value when known.
+func (r *Run) ValueForToken(token string) (string, bool) {
+	if r == nil || r.store == nil {
+		return "", false
+	}
+
+	value, ok, err := r.store.ValueForToken(token)
+	if err != nil {
+		log.Error().Err(err).Str("token", token).Msg("Failed to resolve anonymization token")
+		if r.fallback == nil {
+			return "", false
+		}
+		value, ok, _ = r.fallback.ValueForToken(token)
+		return value, ok
+	}
+
+	return value, ok
+}
+
+// Close releases resources associated with the run store.
+func (r *Run) Close() error {
+	if r == nil || r.store == nil {
+		return nil
+	}
+
+	return r.store.Close()
+}
+
 func (r *Run) anonymizeResolvedMatches(input string, matches []Match) (string, Result) {
 	if r.logMatches && len(matches) > 0 {
 		log.Debug().Int("match_count", len(matches)).Msg("Secret and PII found")
@@ -119,7 +195,7 @@ func (r *Run) anonymizeResolvedMatches(input string, matches []Match) (string, R
 
 		value := input[match.Start:match.End]
 		key := normalizedKey(match, value)
-		token := r.tokenFor(match.Type, key)
+		token := r.tokenFor(match.Type, key, value)
 		output.WriteString(token)
 		updateStats(result.Stats, match.Type)
 		result.Findings = append(result.Findings, Finding{
@@ -249,18 +325,13 @@ func overlapsAny(candidate Match, selected []Match) bool {
 	return false
 }
 
-func (r *Run) tokenFor(entityType EntityType, key string) string {
-	if r.tokens[entityType] == nil {
-		r.tokens[entityType] = make(map[string]string)
-	}
-	if token, ok := r.tokens[entityType][key]; ok {
-		return token
+func (r *Run) tokenFor(entityType EntityType, key string, value string) string {
+	token, err := r.store.TokenFor(entityType, key, value)
+	if err != nil {
+		log.Error().Err(err).Str("entity_type", string(entityType)).Msg("Failed to persist anonymization token, using in-memory fallback")
+		token, _ = r.fallback.TokenFor(entityType, key, value)
 	}
 
-	// Tokens are stable for the lifetime of the run.
-	r.nextID[entityType]++
-	token := fmt.Sprintf("[%s_%d]", entityType, r.nextID[entityType])
-	r.tokens[entityType][key] = token
 	return token
 }
 
