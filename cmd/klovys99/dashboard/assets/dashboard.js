@@ -98,6 +98,7 @@ const translations = {
     unchangedRequests: "Unchanged requests",
     unchangedRequestsDescription: "Requests processed without a detected sensitive replacement.",
     testToolNav: "Test tool",
+    aiWorkspaceNav: "AI workspace",
     testToolPageTitle: "Test tool",
     testToolPageDescription: "Preview how klovys99 anonymizes a prompt with your current protection options.",
     testTitle: "Test anonymization",
@@ -212,6 +213,7 @@ const translations = {
     unchangedRequests: "Requêtes inchangées",
     unchangedRequestsDescription: "Requêtes traitées sans remplacement sensible détecté.",
     testToolNav: "Outil de test",
+    aiWorkspaceNav: "Espace IA",
     testToolPageTitle: "Outil de test",
     testToolPageDescription: "Prévisualisez comment klovys99 anonymise un prompt avec les options de protection actuellement actives.",
     testTitle: "Test anonymisation",
@@ -343,6 +345,7 @@ const elements = {
   refreshButton: document.querySelector("#refreshButton"),
   resetButton: document.querySelector("#resetButton"),
   testToolNavLink: document.querySelector("#testToolNavLink"),
+  aiWorkspaceNavLink: document.querySelector("#aiWorkspaceNavLink"),
   lastUpdatedLabel: document.querySelector("#lastUpdatedLabel"),
   lastUpdated: document.querySelector("#lastUpdated"),
   dashboardTitle: document.querySelector("#dashboardTitle"),
@@ -640,6 +643,8 @@ function renderStaticText() {
   setText(elements.refreshButton, text.refresh);
   setText(elements.resetButton, text.resetStats);
   setText(elements.testToolNavLink, text.testToolNav);
+  setText(elements.aiWorkspaceNavLink, text.aiWorkspaceNav);
+  setHref(elements.aiWorkspaceNavLink, buildAIWorkspaceURL(window.location));
   setText(elements.dashboardTitle, text.dashboardTitle);
   setText(elements.testToolPageTitle, text.testToolPageTitle);
   setText(elements.testToolPageDescription, text.testToolPageDescription);
@@ -684,6 +689,12 @@ function renderStaticText() {
   setTestStatus("idle", text.testNoResult);
 }
 
+function buildAIWorkspaceURL(locationObject) {
+  const protocol = locationObject.protocol || "http:";
+  const hostname = locationObject.hostname || "127.0.0.1";
+  return `${protocol}//${hostname}:3001/`;
+}
+
 function setHeading(element, emoji, label) {
   element.innerHTML = `<span aria-hidden="true">${emoji}</span>${escapeHtml(label)}`;
 }
@@ -709,6 +720,12 @@ function setPlaceholder(element, value) {
 function setAriaLabel(element, value) {
   if (element) {
     element.setAttribute("aria-label", value);
+  }
+}
+
+function setHref(element, value) {
+  if (element) {
+    element.setAttribute("href", value);
   }
 }
 

@@ -135,6 +135,21 @@ Klovys99 listens on `http://127.0.0.1:8080` by default and exposes:
 The historical unprefixed route also still exists and forwards to
 `KLOVIS_TARGET_URL`, which defaults to `https://api.anthropic.com`.
 
+4. Optional: launch the AI workspace UI, a chat interface that anonymizes your
+   prompt before sending it to a provider you configure with your own API key.
+
+```sh
+npm run ui:ai-workspace
+```
+
+This starts a local Vite dev server at `http://127.0.0.1:3001` that proxies
+`/api` and `/dashboard` requests to the running proxy on port 8080. The
+dashboard header and the `AI workspace` link both point here. See
+[AI Workspace](#ai-workspace) for details.
+
+If you installed the published npm package instead of cloning this repository,
+use the same flow with `npx klovys99`:
+
 3. Point your client at the proxy manually — see
    [Client Configuration](#client-configuration) below, since the
    `configure` CLI helper is part of the currently broken npm flow.
@@ -150,6 +165,10 @@ The historical unprefixed route also still exists and forwards to
 - Structured logs with anonymization counters instead of raw prompt values.
 - Disk cache for downloaded external rules to avoid repeated network fetches on
   every startup.
+- A dashboard for live anonymization stats and a manual anonymization test
+  tool.
+- An AI workspace UI for chatting with Claude, Gemini, OpenAI, or Mistral
+  using an anonymized prompt, without leaving the anonymization boundary.
 
 ## Requirements
 
@@ -267,6 +286,42 @@ requests handled by that process.
 When matches overlap, the detector with the highest priority wins. If priorities
 are equal, the longest match wins.
 
+## Dashboard
+
+While the proxy is running, a built-in dashboard is available at
+`http://127.0.0.1:8080/dashboard`. It shows live anonymization stats and links
+to a test tool at `/dashboard/test-tool` for previewing how a prompt is
+anonymized without sending it upstream.
+
+## AI Workspace
+
+The AI workspace is a separate chat UI, at `frontend/ai-workspace`, for
+talking to a model directly from the anonymized side of the boundary instead
+of through a coding client. Start it with `npm run ui:ai-workspace` (see
+[Get Started](#get-started)) while the proxy is running, then open
+`http://127.0.0.1:3001` or use the `AI workspace` link in the dashboard header.
+
+How it works:
+
+- Your prompt is anonymized through the same detectors as the proxy, and the
+  anonymized preview is shown before you send anything.
+- Only the anonymized prompt is sent to the provider you pick, directly with
+  the API key you configure, not through the `/anthropic` or `/openai` proxy
+  routes.
+- Supported providers are Claude, Gemini, OpenAI, and Mistral, configured with
+  a per-provider API key from the `Settings` panel in the UI.
+- Conversations are persisted locally by the Go backend, in plain JSON, under
+  the OS user config directory (`klovys99/ai-workspace`, override with
+  `KLOVYS99_AI_WORKSPACE_DIR`).
+- Saved API keys are only written to disk (encrypted) when
+  `KLOVYS99_AI_WORKSPACE_KEY` is set. Without it, `Settings > Save` is a no-op
+  and a key you type only lasts for the current browser tab, resent with each
+  request.
+
+The frontend dev server proxies `/api` and `/dashboard` to the proxy on
+`127.0.0.1:8080`, and the backend only accepts cross-origin requests from
+`http://127.0.0.1:3001` / `http://localhost:3001`.
+
 ## Configuration
 
 Klovys99 runtime is configured with environment variables.
@@ -280,6 +335,8 @@ Klovys99 runtime is configured with environment variables.
 | `KLOVIS_PROXY_DEBUG` | `false` | Enables additional sanitized diagnostic logging. Raw traffic is never logged. |
 | `KLOVIS_LOG_PII_FINDINGS` | `false` | Deprecated and ignored for privacy; raw findings are never logged. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
+| `KLOVYS99_AI_WORKSPACE_DIR` | OS user config dir + `klovys99/ai-workspace` | Storage directory for AI workspace conversations and credentials. |
+| `KLOVYS99_AI_WORKSPACE_KEY` | unset | Encryption secret used to persist AI workspace provider API keys to disk. Without it, saved keys are not written to disk. |
 
 ### Contextual GLiNER protection modes
 
@@ -414,6 +471,16 @@ Run the proxy locally:
 
 ```sh
 ./scripts/dev-start.sh
+```
+
+The AI workspace frontend lives in `frontend/ai-workspace` as its own Node
+project (installed separately from `npm install` at the repository root).
+Install its dependencies once, then use the root scripts to run or build it:
+
+```sh
+npm --prefix frontend/ai-workspace install
+npm run ui:ai-workspace       # dev server on http://127.0.0.1:3001
+npm run ui:ai-workspace:build # production build into frontend/ai-workspace/dist
 ```
 
 Format Go code before submitting changes:

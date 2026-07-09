@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Korbicorp/klovys99/internal/aiworkspace"
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
@@ -115,6 +116,15 @@ type anonymizationPreviewer interface {
 type contextualPreviewer interface {
 	PreviewContext(context.Context, string) (anonymizer.PreviewResult, error)
 	NERStatus() ner.Status
+}
+
+type aiWorkspaceService interface {
+	Metadata() []aiworkspace.ProviderDescriptor
+	ListConversations() ([]aiworkspace.ConversationSummary, error)
+	CreateConversation() (aiworkspace.ConversationDetail, error)
+	GetConversation(id string) (aiworkspace.ConversationDetail, error)
+	Complete(ctx context.Context, request aiworkspace.CompletionRequest) (aiworkspace.CompletionResponse, error)
+	SaveCredentials(providerID string, request aiworkspace.SaveCredentialsRequest) (aiworkspace.ProviderDescriptor, error)
 }
 
 type previewService struct {
@@ -310,7 +320,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer})
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewService())
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,
@@ -352,7 +362,7 @@ type anonymizationTestResponse struct {
 	CountsByType   []anonymizationTypeCount `json:"counts_by_type"`
 }
 
-func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configStore appConfigStore, previewer anonymizationPreviewer) http.Handler {
+func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configStore appConfigStore, previewer anonymizationPreviewer, aiService aiWorkspaceService) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.GET("/healthz", func(ctx *gin.Context) {
@@ -369,6 +379,7 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 	router.GET("/api/status", func(ctx *gin.Context) {
 		ctx.JSON(http.StatusOK, gin.H{"ner": previewNERStatus(previewer)})
 	})
+	router.Use(localDevCORSMiddleware())
 	registerDashboardRoutes(router)
 	if statsStore != nil {
 		router.GET("/api/stats", func(ctx *gin.Context) {
@@ -429,6 +440,81 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 			})
 		})
 	}
+	if aiService != nil {
+		router.GET("/api/ai-workspace/providers", func(ctx *gin.Context) {
+			ctx.JSON(http.StatusOK, gin.H{"providers": aiService.Metadata()})
+		})
+		router.GET("/api/ai-workspace/conversations", func(ctx *gin.Context) {
+			conversations, err := aiService.ListConversations()
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				if typedErr, ok := err.(interface{ GetStatusCode() int }); ok {
+					statusCode = typedErr.GetStatusCode()
+				}
+				ctx.JSON(statusCode, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, gin.H{"conversations": conversations})
+		})
+		router.POST("/api/ai-workspace/conversations", func(ctx *gin.Context) {
+			conversation, err := aiService.CreateConversation()
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				if typedErr, ok := err.(interface{ GetStatusCode() int }); ok {
+					statusCode = typedErr.GetStatusCode()
+				}
+				ctx.JSON(statusCode, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusCreated, conversation)
+		})
+		router.GET("/api/ai-workspace/conversations/:id", func(ctx *gin.Context) {
+			conversation, err := aiService.GetConversation(ctx.Param("id"))
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				if typedErr, ok := err.(interface{ GetStatusCode() int }); ok {
+					statusCode = typedErr.GetStatusCode()
+				}
+				ctx.JSON(statusCode, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, conversation)
+		})
+		router.POST("/api/ai-workspace/providers/:id/credentials", func(ctx *gin.Context) {
+			var request aiworkspace.SaveCredentialsRequest
+			if err := ctx.ShouldBindJSON(&request); err != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode credentials request: %v", err)})
+				return
+			}
+			provider, err := aiService.SaveCredentials(ctx.Param("id"), request)
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				if typedErr, ok := err.(interface{ GetStatusCode() int }); ok {
+					statusCode = typedErr.GetStatusCode()
+				}
+				ctx.JSON(statusCode, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, gin.H{"provider": provider})
+		})
+		router.POST("/api/ai-workspace/complete", func(ctx *gin.Context) {
+			var request aiworkspace.CompletionRequest
+			if err := ctx.ShouldBindJSON(&request); err != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode completion request: %v", err)})
+				return
+			}
+			response, err := aiService.Complete(ctx.Request.Context(), request)
+			if err != nil {
+				statusCode := http.StatusBadGateway
+				if typedErr, ok := err.(interface{ GetStatusCode() int }); ok {
+					statusCode = typedErr.GetStatusCode()
+				}
+				ctx.JSON(statusCode, gin.H{"error": err.Error()})
+				return
+			}
+			ctx.JSON(http.StatusOK, response)
+		})
+	}
 	router.NoRoute(func(ctx *gin.Context) {
 		path := ctx.Request.URL.Path
 		if path == "/api" || strings.HasPrefix(path, "/api/") {
@@ -456,6 +542,27 @@ func previewNERStatus(previewer anonymizationPreviewer) ner.Status {
 		return contextual.NERStatus()
 	}
 	return ner.DisabledStatus()
+}
+func localDevCORSMiddleware() gin.HandlerFunc {
+	allowedOrigins := map[string]struct{}{
+		"http://127.0.0.1:3001": {},
+		"http://localhost:3001": {},
+	}
+	return func(ctx *gin.Context) {
+		origin := strings.TrimSpace(ctx.GetHeader("Origin"))
+		if _, ok := allowedOrigins[origin]; ok {
+			ctx.Header("Access-Control-Allow-Origin", origin)
+			ctx.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			ctx.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			ctx.Header("Vary", "Origin")
+		}
+		if ctx.Request.Method == http.MethodOptions {
+			ctx.Status(http.StatusNoContent)
+			ctx.Abort()
+			return
+		}
+		ctx.Next()
+	}
 }
 
 func registerDashboardRoutes(router *gin.Engine) {
