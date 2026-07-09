@@ -19,6 +19,7 @@ import (
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
@@ -27,14 +28,25 @@ import (
 )
 
 const (
-	proxyAddrEnv       = "KLOVIS_ADDR"
-	targetEnv          = "KLOVIS_TARGET_URL"
-	anthropicTargetEnv = "KLOVIS_ANTHROPIC_TARGET_URL"
-	openaiTargetEnv    = "KLOVIS_OPENAI_TARGET_URL"
-	tokenStorePathEnv  = "KLOVIS_TOKEN_STORE_PATH"
-	proxyDebugEnv      = "KLOVIS_PROXY_DEBUG"
-	logPIIFindingsEnv  = "KLOVIS_LOG_PII_FINDINGS"
-	logToFileEnv       = "KLOVIS_LOG_TO_FILE"
+	proxyAddrEnv             = "KLOVIS_ADDR"
+	targetEnv                = "KLOVIS_TARGET_URL"
+	anthropicTargetEnv       = "KLOVIS_ANTHROPIC_TARGET_URL"
+	openaiTargetEnv          = "KLOVIS_OPENAI_TARGET_URL"
+	tokenStorePathEnv        = "KLOVIS_TOKEN_STORE_PATH"
+	proxyDebugEnv            = "KLOVIS_PROXY_DEBUG"
+	logPIIFindingsEnv        = "KLOVIS_LOG_PII_FINDINGS"
+	logToFileEnv             = "KLOVIS_LOG_TO_FILE"
+	glinerEnabledEnv         = "KLOVIS_GLINER_ENABLED"
+	glinerModeEnv            = "KLOVIS_GLINER_MODE"
+	glinerURLEnv             = "KLOVIS_GLINER_URL"
+	glinerModelEnv           = "KLOVIS_GLINER_MODEL"
+	glinerRevisionEnv        = "KLOVIS_GLINER_MODEL_REVISION"
+	glinerTimeoutEnv         = "KLOVIS_GLINER_TIMEOUT"
+	glinerThresholdEnv       = "KLOVIS_GLINER_THRESHOLD"
+	glinerLabelThresholdsEnv = "KLOVIS_GLINER_LABEL_THRESHOLDS"
+	glinerConcurrencyEnv     = "KLOVIS_GLINER_MAX_CONCURRENCY"
+	glinerBatchCharsEnv      = "KLOVIS_GLINER_MAX_BATCH_CHARS"
+	glinerFailurePolicyEnv   = "KLOVIS_GLINER_FAILURE_POLICY"
 )
 
 const (
@@ -80,6 +92,9 @@ type runtimeConfig struct {
 	StatsPath       string
 	StatsMaxBytes   int64
 	ConfigPath      string
+	NERMode         string
+	NERConfig       ner.Config
+	NERAnalyzer     ner.Analyzer
 	TokenStorePath  string
 }
 
@@ -95,6 +110,38 @@ type application struct {
 
 type anonymizationPreviewer interface {
 	Preview(input string) anonymizer.PreviewResult
+}
+
+type contextualPreviewer interface {
+	PreviewContext(context.Context, string) (anonymizer.PreviewResult, error)
+	NERStatus() ner.Status
+}
+
+type previewService struct {
+	service  *anonymizer.Service
+	analyzer ner.Analyzer
+}
+
+func (p previewService) Preview(input string) anonymizer.PreviewResult {
+	return p.service.Preview(input)
+}
+
+func (p previewService) PreviewContext(ctx context.Context, input string) (anonymizer.PreviewResult, error) {
+	if p.analyzer == nil {
+		return p.service.Preview(input), nil
+	}
+	results, err := p.analyzer.AnalyzeBatch(ctx, []string{input})
+	if err != nil {
+		return anonymizer.PreviewResult{}, fmt.Errorf("%w: %v", ner.ErrAnalysis, err)
+	}
+	return p.service.PreviewWithMatches(input, results[0]), nil
+}
+
+func (p previewService) NERStatus() ner.Status {
+	if p.analyzer == nil {
+		return ner.DisabledStatus()
+	}
+	return p.analyzer.Status()
 }
 
 func run(ctx context.Context, config runtimeConfig) error {
@@ -148,6 +195,9 @@ func dashboardURLFromAddr(addr string) string {
 func buildApplication(ctx context.Context, config runtimeConfig) (*application, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if config.NERMode == "" {
+		config.NERMode = ner.ModeOff
 	}
 	if strings.TrimSpace(config.Addr) == "" {
 		config.Addr = defaultProxyAdr
@@ -228,6 +278,19 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	logExternalLoadStats(config.Logger, "presidio", detectorResult.Presidio)
 	config.Logger.Info().Int("detectors", len(detectorResult.Detectors)).Msg("proxy detectors loaded")
 
+	nerAnalyzer := config.NERAnalyzer
+	if config.NERMode != ner.ModeOff && nerAnalyzer == nil {
+		config.NERConfig.Mode = config.NERMode
+		nerAnalyzer, err = ner.NewClient(config.NERConfig)
+		if err != nil {
+			_ = tokenStore.Close()
+			closeLogFile(logFile)
+			return nil, err
+		}
+		if client, ok := nerAnalyzer.(*ner.Client); ok {
+			_ = client.Probe(ctx)
+		}
+	}
 	anonymizerService := anonymizer.NewServiceWithProtectionPolicyAndTokenStore(detectorResult.Detectors, configStore, tokenStore)
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target: config.Target,
@@ -239,6 +302,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		Anonymizer:     anonymizerService,
 		StatsRecorder:  statsRecorder,
 		LogPIIFindings: config.LogPIIFindings,
+		NERAnalyzer:    nerAnalyzer,
 	})
 	if err != nil {
 		_ = tokenStore.Close()
@@ -246,7 +310,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, anonymizerService)
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer})
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,
@@ -291,6 +355,20 @@ type anonymizationTestResponse struct {
 func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configStore appConfigStore, previewer anonymizationPreviewer) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+	router.GET("/healthz", func(ctx *gin.Context) {
+		ctx.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	router.GET("/readyz", func(ctx *gin.Context) {
+		status := previewNERStatus(previewer)
+		if status.Enabled && status.State != "ready" {
+			ctx.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "ner": status})
+			return
+		}
+		ctx.JSON(http.StatusOK, gin.H{"status": "ready", "ner": status})
+	})
+	router.GET("/api/status", func(ctx *gin.Context) {
+		ctx.JSON(http.StatusOK, gin.H{"ner": previewNERStatus(previewer)})
+	})
 	registerDashboardRoutes(router)
 	if statsStore != nil {
 		router.GET("/api/stats", func(ctx *gin.Context) {
@@ -334,7 +412,15 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
-			preview := previewer.Preview(request.Text)
+			preview, err := previewWithContext(ctx.Request.Context(), previewer, request.Text)
+			if err != nil {
+				message := "Local contextual protection is unavailable; the preview was not processed."
+				if strings.HasPrefix(strings.ToLower(ctx.GetHeader("Accept-Language")), "fr") {
+					message = "La protection contextuelle locale est indisponible ; la prévisualisation n’a pas été traitée."
+				}
+				ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": message})
+				return
+			}
 			ctx.JSON(http.StatusOK, anonymizationTestResponse{
 				OriginalText:   request.Text,
 				AnonymizedText: preview.Anonymized,
@@ -356,6 +442,20 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 		proxyHandler(ctx)
 	})
 	return router
+}
+
+func previewWithContext(ctx context.Context, previewer anonymizationPreviewer, input string) (anonymizer.PreviewResult, error) {
+	if contextual, ok := previewer.(contextualPreviewer); ok {
+		return contextual.PreviewContext(ctx, input)
+	}
+	return previewer.Preview(input), nil
+}
+
+func previewNERStatus(previewer anonymizationPreviewer) ner.Status {
+	if contextual, ok := previewer.(contextualPreviewer); ok {
+		return contextual.NERStatus()
+	}
+	return ner.DisabledStatus()
 }
 
 func registerDashboardRoutes(router *gin.Engine) {
@@ -487,6 +587,34 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	glinerMode, err := envGLiNERMode()
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	glinerTimeout, err := envDurationWithDefault(glinerTimeoutEnv, ner.DefaultTimeout)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	glinerConcurrency, err := envIntWithDefault(glinerConcurrencyEnv, ner.DefaultMaxConcurrency)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	glinerBatchChars, err := envIntWithDefault(glinerBatchCharsEnv, ner.DefaultMaxBatchChars)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	glinerThreshold, err := envFloatWithDefault(glinerThresholdEnv, ner.DefaultThreshold)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	failurePolicy := envStringWithDefault(glinerFailurePolicyEnv, "fail-closed")
+	if failurePolicy != "fail-closed" {
+		return runtimeConfig{}, fmt.Errorf("parse %s: only fail-closed is supported", glinerFailurePolicyEnv)
+	}
+	labelThresholds, err := envLabelThresholds(glinerLabelThresholdsEnv)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	return runtimeConfig{
 		Addr:            envStringWithDefault(proxyAddrEnv, defaultProxyAdr),
 		Target:          target,
@@ -499,8 +627,43 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		StatsPath:       defaultStatsPath,
 		StatsMaxBytes:   defaultStatsMaxBytes,
 		ConfigPath:      defaultConfigPath,
-		TokenStorePath:  envStringWithDefault(tokenStorePathEnv, defaultTokenStorePath),
+		NERMode:         glinerMode,
+		NERConfig: ner.Config{
+			Mode:           glinerMode,
+			URL:            envStringWithDefault(glinerURLEnv, ner.DefaultURL),
+			Model:          strings.TrimSpace(os.Getenv(glinerModelEnv)),
+			ModelRevision:  strings.TrimSpace(os.Getenv(glinerRevisionEnv)),
+			Timeout:        glinerTimeout,
+			Threshold:      glinerThreshold,
+			LabelThreshold: labelThresholds,
+			MaxConcurrency: glinerConcurrency,
+			MaxQueue:       ner.DefaultMaxQueue,
+			MaxBatchChars:  glinerBatchChars,
+		},
+		TokenStorePath: envStringWithDefault(tokenStorePathEnv, defaultTokenStorePath),
 	}, nil
+}
+
+func envGLiNERMode() (string, error) {
+	rawMode := strings.TrimSpace(os.Getenv(glinerModeEnv))
+	if rawMode != "" {
+		mode := ner.NormalizeMode(rawMode)
+		if mode == "" {
+			return "", fmt.Errorf("parse %s: value must be full or off", glinerModeEnv)
+		}
+		return mode, nil
+	}
+	if _, ok := os.LookupEnv(glinerEnabledEnv); ok {
+		enabled, err := envBoolWithDefault(glinerEnabledEnv, false)
+		if err != nil {
+			return "", err
+		}
+		if enabled {
+			return ner.ModeFull, nil
+		}
+		return ner.ModeOff, nil
+	}
+	return ner.ModeOff, nil
 }
 
 func envURLWithDefault(name, def string) (*url.URL, error) {
@@ -603,4 +766,37 @@ func envIntWithDefault(name string, def int) (int, error) {
 		return 0, fmt.Errorf("parse %s: value must be greater than zero", name)
 	}
 	return parsed, nil
+}
+
+func envFloatWithDefault(name string, def float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return def, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 || parsed > 1 {
+		return 0, fmt.Errorf("parse %s: value must be greater than zero and at most one", name)
+	}
+	return parsed, nil
+}
+
+func envLabelThresholds(name string) (map[string]float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return nil, nil
+	}
+	var thresholds map[string]float64
+	if err := json.Unmarshal([]byte(value), &thresholds); err != nil {
+		return nil, fmt.Errorf("parse %s: expected a JSON object", name)
+	}
+	allowed := make(map[string]struct{})
+	for _, label := range ner.Labels() {
+		allowed[label] = struct{}{}
+	}
+	for label, threshold := range thresholds {
+		if _, ok := allowed[label]; !ok || threshold <= 0 || threshold > 1 {
+			return nil, fmt.Errorf("parse %s: invalid label or threshold", name)
+		}
+	}
+	return thresholds, nil
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
@@ -62,6 +63,7 @@ type OpenAIConfig struct {
 	Logger         *zerolog.Logger
 	StatsRecorder  StatsRecorder
 	LogPIIFindings bool
+	NERAnalyzer    ner.Analyzer
 }
 
 type OpenAI struct {
@@ -72,6 +74,7 @@ type OpenAI struct {
 	logger            zerolog.Logger
 	statsRecorder     StatsRecorder
 	logPIIFindings    bool
+	nerAnalyzer       ner.Analyzer
 	responseMappings  map[string]*ResponseRestoreMapping
 	responseMappingsM sync.RWMutex
 }
@@ -83,28 +86,11 @@ type AnonymizeResult struct {
 	Findings       []anonymizer.Finding
 }
 
-type PIILogFinding struct {
-	Type  string `json:"type"`
-	Value string `json:"value"`
-	Token string `json:"token"`
-}
-
-func PIILogFindings(findings []anonymizer.Finding) []PIILogFinding {
-	logFindings := make([]PIILogFinding, 0, len(findings))
-	for _, finding := range findings {
-		logFindings = append(logFindings, PIILogFinding{
-			Type:  string(finding.Type),
-			Value: finding.Value,
-			Token: finding.Token,
-		})
-	}
-	return logFindings
-}
-
 type openAIAnonymizationRun struct {
-	engine   *anonymizer.Run
-	stats    map[anonymizer.EntityType]int
-	findings []anonymizer.Finding
+	engine     *anonymizer.Run
+	stats      map[anonymizer.EntityType]int
+	findings   []anonymizer.Finding
+	nerMatches ner.MatchSet
 }
 
 type webSocketMappingState struct {
@@ -157,6 +143,7 @@ func NewOpenAI(config OpenAIConfig) (*OpenAI, error) {
 		logger:           logger,
 		statsRecorder:    config.StatsRecorder,
 		logPIIFindings:   config.LogPIIFindings,
+		nerAnalyzer:      config.NERAnalyzer,
 		responseMappings: make(map[string]*ResponseRestoreMapping),
 	}, nil
 }
@@ -199,9 +186,9 @@ func (p *OpenAI) AnonymizeHTTPRequest(request *http.Request, body []byte) (Anony
 	path := NormalizeOpenAIPath(request.URL.Path)
 	switch {
 	case isCodexResponsesPath(path):
-		return p.anonymizeResponsesBody(body)
+		return p.anonymizeResponsesBody(request.Context(), body)
 	case path == "/v1/chat/completions":
-		return p.anonymizeChatCompletionsBody(body)
+		return p.anonymizeChatCompletionsBody(request.Context(), body)
 	default:
 		return AnonymizeResult{Body: body}, nil
 	}
@@ -286,7 +273,6 @@ func (p *OpenAI) HandleWebSocket(writer http.ResponseWriter, request *http.Reque
 		p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 		return
 	}
-	p.logTrafficFrame("request", "after_anonymization", firstMessage)
 	p.recordAnonymizedStats(stats, findings)
 
 	upstreamURL, upstreamHeaders := p.upstreamWebSocket(request)
@@ -360,14 +346,6 @@ func (p *OpenAI) relayUpstreamToClient(mappingState *webSocketMappingState, clie
 	}
 }
 
-func (p *OpenAI) logTrafficFrame(direction, stage string, body []byte) {
-	p.logger.Debug().
-		Str("direction", direction).
-		Str("stage", stage).
-		Str("body", string(body)).
-		Msg("traffic body")
-}
-
 func (p *OpenAI) closeWebSocket(conn *websocket.Conn, code int, reason string) {
 	_ = conn.WriteControl(
 		websocket.CloseMessage,
@@ -391,7 +369,11 @@ func (p *OpenAI) anonymizeWebSocketFrame(mapping *ResponseRestoreMapping, messag
 	if err != nil {
 		return mapping, nil, nil, nil, err
 	}
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(context.Background(), p.nerAnalyzer, message)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	run := p.newRun(matches)
 	statsBefore := cloneEntityCountMap(run.stats)
 	findingsBefore := len(run.findings)
 	if response, ok := payload["response"]; ok {
@@ -433,12 +415,16 @@ func (p *OpenAI) deanonymizeWebSocketFrame(mapping *ResponseRestoreMapping, mess
 	return output, nil
 }
 
-func (p *OpenAI) anonymizeResponsesBody(body []byte) (AnonymizeResult, error) {
+func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (AnonymizeResult, error) {
 	payload, err := decodeJSONObject(body)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
+	run := p.newRun(matches)
 	restoreMapping := p.mappingForPayload(previousResponseIDFromPayload(payload))
 	anonymized, changed := run.anonymizeResponsesValue(payload, responsesContext{})
 	output := body
@@ -459,7 +445,7 @@ func (p *OpenAI) anonymizeResponsesBody(body []byte) (AnonymizeResult, error) {
 	return AnonymizeResult{Body: output, RestoreMapping: restoreMapping, Stats: run.stats, Findings: run.findings}, nil
 }
 
-func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, error) {
+func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) (AnonymizeResult, error) {
 	payload, err := decodeJSONObject(body)
 	if err != nil {
 		return AnonymizeResult{}, err
@@ -468,7 +454,11 @@ func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, err
 	if !ok {
 		return AnonymizeResult{}, fmt.Errorf("chat completions messages must be an array")
 	}
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
+	run := p.newRun(matches)
 	changed := false
 	for index, message := range messages {
 		messageMap, ok := message.(map[string]any)
@@ -498,10 +488,11 @@ func (p *OpenAI) DeanonymizeHTTPResponse(mapping *ResponseRestoreMapping, respon
 	return nil
 }
 
-func (p *OpenAI) newRun() *openAIAnonymizationRun {
+func (p *OpenAI) newRun(matches ner.MatchSet) *openAIAnonymizationRun {
 	return &openAIAnonymizationRun{
-		engine: p.anonymizer.NewRun(),
-		stats:  make(map[anonymizer.EntityType]int),
+		engine:     p.anonymizer.NewRun(),
+		stats:      make(map[anonymizer.EntityType]int),
+		nerMatches: matches,
 	}
 }
 
@@ -514,11 +505,17 @@ func (p *OpenAI) recordAnonymizedStats(stats map[anonymizer.EntityType]int, find
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
 	}
-	if p.logPIIFindings {
-		event = event.Interface("pii_findings", PIILogFindings(findings))
-	}
+	_ = findings
 	event.Msg("request body anonymized")
 	recordStatsEvent(p.logger, p.statsRecorder, requestProcessedEvent(stats))
+}
+
+func (p *OpenAI) logTrafficFrame(direction string, stage string, payload []byte) {
+	p.logger.Debug().
+		Str("direction", direction).
+		Str("stage", stage).
+		Bytes("body", payload).
+		Msg("websocket traffic")
 }
 
 type responsesContext struct {
@@ -665,7 +662,7 @@ func (r *openAIAnonymizationRun) anonymizeToolCalls(value any) (any, bool) {
 }
 
 func (r *openAIAnonymizationRun) anonymizeString(value string) (string, bool) {
-	anonymized, result := r.engine.Anonymize(value)
+	anonymized, result := r.engine.AnonymizeWithMatches(value, r.nerMatches[value])
 	if len(result.Stats) == 0 {
 		return value, false
 	}

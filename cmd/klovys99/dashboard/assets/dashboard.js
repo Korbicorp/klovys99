@@ -13,6 +13,9 @@ const translations = {
     testToolDocumentTitle: "klovys99 Test tool",
     loading: "Loading",
     live: "Live",
+    nerReady: (mode) => `Context protection ready (${mode})`,
+    nerDisabled: "Context protection off",
+    nerDegraded: (mode) => `Context protection degraded (${mode})`,
     unavailable: "Unavailable",
     resetFailed: "Reset failed",
     refresh: "Refresh",
@@ -124,6 +127,9 @@ const translations = {
     testToolDocumentTitle: "klovys99 Outil de test",
     loading: "Chargement",
     live: "En direct",
+    nerReady: (mode) => `Protection contextuelle prête (${mode})`,
+    nerDisabled: "Protection contextuelle désactivée",
+    nerDegraded: (mode) => `Protection contextuelle dégradée (${mode})`,
     unavailable: "Indisponible",
     resetFailed: "Échec du reset",
     refresh: "Actualiser",
@@ -234,12 +240,10 @@ const translations = {
 
 const typeDescriptions = {
   en: {
-    EMAIL: "Email addresses detected in prompts or context.",
+    EMAIL: "Email addresses.",
     IP: "IP addresses, network endpoints, or infrastructure identifiers.",
     PHONE: "Phone numbers that can identify a person or organization contact.",
     NIR: "French social security identifiers.",
-    FIRST_NAME: "First names detected as personal information.",
-    LAST_NAME: "Last names detected as personal information.",
     ADDRESS: "Postal addresses or address-like location details.",
     IBAN: "Bank account identifiers.",
     CREDIT_CARD: "Payment card numbers.",
@@ -249,8 +253,7 @@ const typeDescriptions = {
     GENERIC_ID: "Generic internal identifiers, account IDs, UUIDs, or labeled IDs.",
     NUMERIC_ID: "Numeric identifiers that may refer to users, tickets, orders, or records.",
     REFERENCE_ID: "Business references, case IDs, tickets, invoices, or tracking IDs.",
-    NAME: "Names detected when first and last name boundaries are ambiguous.",
-    PERSON_NAME: "Full person names.",
+    NAME: "Person names.",
     LOCATION: "Locations, cities, countries, or place names.",
     ORGANIZATION: "Company, institution, or organization names.",
     CONTEXT_IDENTIFIER: "Context-specific identifiers extracted from nearby labels.",
@@ -269,8 +272,6 @@ const typeDescriptions = {
     IP: "Adresses IP, endpoints réseau ou identifiants d'infrastructure.",
     PHONE: "Numéros de téléphone pouvant identifier une personne ou un contact d'organisation.",
     NIR: "Identifiants français de sécurité sociale.",
-    FIRST_NAME: "Prénoms détectés comme données personnelles.",
-    LAST_NAME: "Noms de famille détectés comme données personnelles.",
     ADDRESS: "Adresses postales ou informations de localisation similaires.",
     IBAN: "Identifiants de compte bancaire.",
     CREDIT_CARD: "Numéros de carte de paiement.",
@@ -280,8 +281,7 @@ const typeDescriptions = {
     GENERIC_ID: "Identifiants internes génériques, comptes, UUID ou IDs étiquetés.",
     NUMERIC_ID: "Identifiants numériques pouvant référencer des utilisateurs, tickets, commandes ou dossiers.",
     REFERENCE_ID: "Références métier, dossiers, tickets, factures ou IDs de suivi.",
-    NAME: "Noms détectés quand les limites prénom/nom sont ambiguës.",
-    PERSON_NAME: "Noms complets de personnes.",
+    NAME: "Noms de personnes détectés par regex ou NER contextuel.",
     LOCATION: "Lieux, villes, pays ou noms d'emplacements.",
     ORGANIZATION: "Noms d'entreprises, institutions ou organisations.",
     CONTEXT_IDENTIFIER: "Identifiants propres au contexte extraits autour de libellés.",
@@ -315,7 +315,7 @@ const defaultProtectionOptions = Object.keys(typeDescriptions.en).map((type) => 
 const categoryDefinitions = [
   {
     id: "identityContact",
-    types: ["FIRST_NAME", "LAST_NAME", "NAME", "PERSON_NAME", "EMAIL", "PHONE", "ADDRESS", "LOCATION"],
+    types: ["NAME", "EMAIL", "PHONE", "ADDRESS", "LOCATION"],
   },
   {
     id: "idsReferences",
@@ -475,7 +475,7 @@ async function refreshCurrentPage(options = {}) {
 
 // loadDashboard refreshes stats and the saved app config as separate backend resources.
 async function loadDashboard() {
-  await Promise.all([loadStats(), loadConfig()]);
+  await Promise.all([loadStats(), loadConfig(), loadNERStatus()]);
 }
 
 async function loadConnectionStatus(options = {}) {
@@ -487,17 +487,43 @@ async function loadConnectionStatus(options = {}) {
     setStatus("loading", text.loading);
   }
   try {
-    const response = await fetch("/api/stats", { cache: "no-store" });
+    const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Stats API returned ${response.status}`);
     }
-    await response.json();
-    setStatus("live", text.live);
+    renderNERStatus(await response.json());
   } catch (error) {
     console.error(error);
     setStatus("error", text.unavailable);
   } finally {
     statsLoading = false;
+  }
+}
+
+async function loadNERStatus() {
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Status API returned ${response.status}`);
+    }
+    renderNERStatus(await response.json());
+  } catch (error) {
+    console.error(error);
+    setStatus("error", text.unavailable);
+  }
+}
+
+function renderNERStatus(payload) {
+  const ner = payload && payload.ner ? payload.ner : { enabled: false, state: "disabled" };
+  const mode = String(ner.mode || "off").toLowerCase();
+  if (!ner.enabled) {
+    setStatus("live", text.nerDisabled);
+  } else if (ner.state === "ready") {
+    setStatus("live", text.nerReady(mode));
+  } else if (ner.state === "degraded") {
+    setStatus("loading", text.nerDegraded(mode));
+  } else {
+    setStatus("error", text.unavailable);
   }
 }
 
@@ -762,18 +788,23 @@ function normalizeConfig(config) {
 // normalizeProtectionOptions keeps only usable toggle entries and falls back to defaults.
 function normalizeProtectionOptions(rawOptions) {
   if (Array.isArray(rawOptions)) {
-    const options = rawOptions
-      .map((option) => {
-        const type = String(option.type || option.name || option.id || "").trim();
-        if (type === "") {
-          return null;
-        }
-        return {
-          type,
-          enabled: Boolean(option.enabled ?? option.active ?? option.is_enabled),
-        };
-      })
-      .filter(Boolean);
+    const merged = new Map();
+    rawOptions.forEach((option) => {
+      const rawType = String(option.type || option.name || option.id || "").trim();
+      if (rawType === "") {
+        return;
+      }
+      const type = rawType === "PERSON_NAME" ? "NAME" : rawType;
+      const enabled = Boolean(option.enabled ?? option.active ?? option.is_enabled);
+      if (merged.has(type)) {
+        merged.set(type, merged.get(type) && enabled);
+        return;
+      }
+      merged.set(type, enabled);
+    });
+    const options = Array.from(merged.entries())
+      .filter(([type]) => knownTypes.includes(type))
+      .map(([type, enabled]) => ({ type, enabled }));
     return options.length > 0 ? options : cloneProtectionOptions(defaultProtectionOptions);
   }
 

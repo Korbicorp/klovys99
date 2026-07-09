@@ -66,7 +66,8 @@ func NewServiceWithProtectionPolicyAndTokenStore(detectors []Detector, protectio
 
 // NewRun creates an isolated anonymization run with stable tokens across calls.
 func (a *Service) NewRun() *Run {
-	return a.newRun(true)
+	// Raw matches must never be logged: this run is used on production prompts.
+	return a.newRun(false)
 }
 
 func (a *Service) newRun(logMatches bool) *Run {
@@ -181,7 +182,7 @@ func (r *Run) Close() error {
 
 func (r *Run) anonymizeResolvedMatches(input string, matches []Match) (string, Result) {
 	if r.logMatches && len(matches) > 0 {
-		log.Debug().Interface("pii", matches).Msg("Secret and PII found")
+		log.Debug().Int("match_count", len(matches)).Msg("Secret and PII found")
 	}
 
 	result := Result{Stats: make(map[EntityType]EntityStats)}

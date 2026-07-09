@@ -268,7 +268,7 @@ func TestAnonymizeResolvesOverlapsByPriorityThenLength(t *testing.T) {
 	engine := NewService([]Detector{
 		staticDetector{
 			matches: []Match{
-				{Start: 5, End: 16, Type: EntityLastName, Priority: 10, Normalized: "example.com"},
+				{Start: 5, End: 16, Type: EntityName, Priority: 10, Normalized: "example.com"},
 			},
 		},
 		staticDetector{
@@ -283,7 +283,7 @@ func TestAnonymizeResolvesOverlapsByPriorityThenLength(t *testing.T) {
 	if got, want := output, "[EMAIL_1]"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if _, ok := result.Stats[EntityLastName]; ok {
+	if _, ok := result.Stats[EntityName]; ok {
 		t.Fatal("lower priority overlapping match should not be counted")
 	}
 }

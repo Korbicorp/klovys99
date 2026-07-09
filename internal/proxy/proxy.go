@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy/providers"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
@@ -24,6 +26,7 @@ const (
 	DefaultOpenAIURL     = "https://api.openai.com"
 	AnthropicRoutePrefix = "/anthropic"
 	OpenAIRoutePrefix    = "/openai"
+	maxRequestBodyBytes  = 8 << 20
 )
 
 type TextAnonymizer interface {
@@ -45,6 +48,7 @@ type Config struct {
 	LogPIIFindings bool
 	Anthropic      *providers.Anthropic
 	OpenAI         *providers.OpenAI
+	NERAnalyzer    ner.Analyzer
 }
 
 type responseTransformContextKey struct{}
@@ -85,6 +89,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			RoutePrefix:    AnthropicRoutePrefix,
 			Anonymizer:     config.Anonymizer,
 			LogPIIFindings: config.LogPIIFindings,
+			NERAnalyzer:    config.NERAnalyzer,
 		})
 		if err != nil {
 			return nil, err
@@ -113,6 +118,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			Logger:         config.Logger,
 			StatsRecorder:  config.StatsRecorder,
 			LogPIIFindings: config.LogPIIFindings,
+			NERAnalyzer:    config.NERAnalyzer,
 		})
 		if err != nil {
 			return nil, err
@@ -159,7 +165,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			outcome, err := openAIProvider.AnonymizeHTTPRequest(ctx.Request, requestBody)
 			if err != nil {
 				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				writeAnonymizationError(ctx, err)
 				return
 			}
 			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.Stats))
@@ -175,7 +181,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			outcome, err := anthropicProvider.AnonymizeHTTPRequest(ctx.Request, logger, requestBody)
 			if err != nil {
 				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				writeAnonymizationError(ctx, err)
 				return
 			}
 			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.Stats))
@@ -291,23 +297,18 @@ func readBody(body io.ReadCloser) ([]byte, error) {
 		return nil, nil
 	}
 
-	content, err := io.ReadAll(body)
+	content, err := io.ReadAll(io.LimitReader(body, maxRequestBodyBytes+1))
 	if closeErr := body.Close(); err == nil && closeErr != nil {
 		err = closeErr
 	}
 	if err != nil {
 		return nil, err
 	}
+	if len(content) > maxRequestBodyBytes {
+		return nil, fmt.Errorf("request body exceeds %d bytes", maxRequestBodyBytes)
+	}
 
 	return content, nil
-}
-
-func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
-	logger.Debug().
-		Str("direction", "request").
-		Str("stage", stage).
-		Str("body", body).
-		Msg("traffic body")
 }
 
 func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]int, findings []anonymizer.Finding, includePII bool) {
@@ -315,10 +316,25 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
 	}
-	if includePII {
-		event = event.Interface("pii_findings", providers.PIILogFindings(findings))
-	}
+	_ = findings
+	_ = includePII
 	event.Msg("request body anonymized")
+}
+
+func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
+	logger.Debug().Str("stage", stage).Str("body", body).Msg("request traffic")
+}
+
+func writeAnonymizationError(ctx *gin.Context, err error) {
+	if errors.Is(err, ner.ErrAnalysis) {
+		message := "Local contextual protection is unavailable; the request was not sent."
+		if strings.HasPrefix(strings.ToLower(ctx.GetHeader("Accept-Language")), "fr") {
+			message = "La protection contextuelle locale est indisponible ; la requête n’a pas été envoyée."
+		}
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": message})
+		return
+	}
+	ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 }
 
 func sortedEntityTypes(stats map[anonymizer.EntityType]int) []anonymizer.EntityType {

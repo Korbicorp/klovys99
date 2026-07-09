@@ -106,8 +106,6 @@ func Default(includeExtra bool) []anonymizer.Detector {
 		ipDetector(),
 		nirDetector(),
 		phoneDetector(),
-		firstNameDetector(),
-		lastNameDetector(),
 		ContextualNameDetector(),
 		FrenchAddressDetector(),
 		birthDateDetector(),
@@ -403,34 +401,6 @@ func phoneDetector() anonymizer.Detector {
 	}
 }
 
-func firstNameDetector() anonymizer.Detector {
-	return regexDetector{
-		entityType:   anonymizer.EntityFirstName,
-		priority:     priorityName,
-		captureGroup: 2,
-		spanPolicy:   spanPolicyTrimConservative,
-		pattern: regexp2.MustCompile(
-			`(?i)\b(pr[ée]nom|first[ -]?name)\s*[:=]\s*([A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ' -]{1,60})`,
-			regexp2.RE2,
-		),
-		normalizerPolicy: normalizerPolicyFold,
-	}
-}
-
-func lastNameDetector() anonymizer.Detector {
-	return regexDetector{
-		entityType:   anonymizer.EntityLastName,
-		priority:     priorityName,
-		captureGroup: 2,
-		spanPolicy:   spanPolicyTrimConservative,
-		pattern: regexp2.MustCompile(
-			`(?i)\b(nom|last[ -]?name|surname)\s*[:=]\s*([A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ' -]{1,80})`,
-			regexp2.RE2,
-		),
-		normalizerPolicy: normalizerPolicyFold,
-	}
-}
-
 func ContextualNameDetector() anonymizer.Detector {
 	// Keep the detector compatible with regexp2 by capturing the contextual prefix
 	// plus the name span, instead of relying on a variable-length lookbehind.
@@ -682,9 +652,6 @@ func trimConservativeValueSpan(text string, start, end int) (int, int) {
 		" nom",
 		" prénom",
 		" prenom",
-		" first name",
-		" last name",
-		" surname",
 		" date de naissance",
 		" date of birth",
 		" birth date",

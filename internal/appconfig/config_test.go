@@ -165,3 +165,47 @@ func TestMissingTypesDefaultToEnabled(t *testing.T) {
 		t.Fatal("missing SECRET should default to enabled")
 	}
 }
+
+func TestLegacyPersonNameConfigMigratesToName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "klovys99_config.json")
+	content := []byte(`{"protection_options":{"types":{"NAME":true,"PERSON_NAME":false}}}`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	store, err := NewStore(path, []anonymizer.EntityType{anonymizer.EntityName, anonymizer.EntitySecret})
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+	if store.IsTypeEnabled(anonymizer.EntityName) {
+		t.Fatal("NAME should inherit a legacy PERSON_NAME disable")
+	}
+	if !store.IsTypeEnabled(anonymizer.EntitySecret) {
+		t.Fatal("missing SECRET should default to enabled")
+	}
+	if got := store.ProtectionOptions(); len(got) != 2 || got[0].Type != anonymizer.EntityName {
+		t.Fatalf("options = %#v, want NAME without PERSON_NAME", got)
+	}
+}
+
+func TestUpdateProtectionOptionsAcceptsLegacyPersonNameAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "klovys99_config.json")
+	store, err := NewStore(path, []anonymizer.EntityType{anonymizer.EntityName})
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+
+	options, err := store.UpdateProtectionOptions([]ProtectionOption{
+		{Type: anonymizer.EntityName, Enabled: true},
+		{Type: anonymizer.EntityPersonName, Enabled: false},
+	})
+	if err != nil {
+		t.Fatalf("UpdateProtectionOptions returned error: %v", err)
+	}
+	if len(options) != 1 || options[0].Type != anonymizer.EntityName || options[0].Enabled {
+		t.Fatalf("options = %#v, want one disabled NAME option", options)
+	}
+	if store.IsTypeEnabled(anonymizer.EntityName) {
+		t.Fatal("NAME should be disabled when legacy PERSON_NAME alias is disabled")
+	}
+}

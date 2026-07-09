@@ -7,8 +7,6 @@ const (
 	EntityIP                EntityType = "IP"
 	EntityPhone             EntityType = "PHONE"
 	EntityNIR               EntityType = "NIR"
-	EntityFirstName         EntityType = "FIRST_NAME"
-	EntityLastName          EntityType = "LAST_NAME"
 	EntityAddress           EntityType = "ADDRESS"
 	EntityIBAN              EntityType = "IBAN"
 	EntityCreditCard        EntityType = "CREDIT_CARD"
@@ -41,8 +39,6 @@ func KnownEntityTypes() []EntityType {
 		EntityIP,
 		EntityPhone,
 		EntityNIR,
-		EntityFirstName,
-		EntityLastName,
 		EntityAddress,
 		EntityIBAN,
 		EntityCreditCard,
@@ -53,7 +49,6 @@ func KnownEntityTypes() []EntityType {
 		EntityNumericID,
 		EntityReferenceID,
 		EntityName,
-		EntityPersonName,
 		EntityLocation,
 		EntityOrganization,
 		EntityContextIdentifier,

@@ -1,6 +1,5 @@
 {
   "entities": [
-    { "type": "FIRST_NAME", "value": "Sophie" },
     { "type": "DATE", "value": "July 5th, 2026" },
     { "type": "EMAIL", "value": "finance@korbicorp.fr" }
   ]

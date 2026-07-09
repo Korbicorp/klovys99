@@ -9,6 +9,7 @@ const {
   configureClients,
   normalizeBaseUrl,
 } = require("./lib/configure");
+const gliner = require("./lib/gliner");
 
 const packageRoot = path.resolve(__dirname, "..");
 
@@ -17,9 +18,11 @@ function main(argv) {
   switch (command) {
     case "configure":
       return runConfigure(rest);
+    case "gliner":
+      return runGLiNER(rest);
     case "start":
     case "serve":
-      return runBinary(rest);
+      return runStart(rest);
     case "help":
     case "--help":
     case "-h":
@@ -28,6 +31,26 @@ function main(argv) {
     default:
       return runBinary([command, ...rest]);
   }
+}
+
+function runGLiNER(args) {
+  const [action, ...rest] = args;
+  if (action !== "install") {
+    throw new Error("expected `klovys99 gliner install --model ... --revision ...`");
+  }
+  const settings = gliner.resolveSettings(rest);
+  gliner.install(settings, packageRoot);
+  process.stdout.write("GLiNER image and pinned model installed locally.\n");
+  return 0;
+}
+
+function runStart(args) {
+  const settings = gliner.resolveStartSettings(args);
+  if (settings.mode === gliner.MODE_OFF) {
+    return runBinary(settings.binaryArgs, settings.env);
+  }
+  const env = gliner.start(settings, packageRoot);
+  return runBinary(settings.binaryArgs, env);
 }
 
 function runConfigure(args) {
@@ -77,12 +100,12 @@ function parseConfigureArgs(args) {
   };
 }
 
-function runBinary(args) {
+function runBinary(args, env = process.env) {
   const binaryPath = resolveBinaryPath();
   const result = spawnSync(binaryPath, args, {
     cwd: process.cwd(),
     stdio: "inherit",
-    env: process.env,
+    env,
   });
 
   if (result.error) {
@@ -109,6 +132,9 @@ function printHelp() {
 
 Usage:
   klovys99 start
+  klovys99 gliner install --model MODEL --revision COMMIT_SHA
+  klovys99 start [--gliner-mode full|off]
+  klovys99 start --gliner-model MODEL --gliner-revision COMMIT_SHA
   klovys99 configure codex [--base-url http://127.0.0.1:8080]
   klovys99 configure claude [--base-url http://127.0.0.1:8080]
   klovys99 configure both [--base-url http://127.0.0.1:8080]

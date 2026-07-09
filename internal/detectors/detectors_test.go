@@ -46,7 +46,6 @@ func TestDefaultDetectorsAnonymizeCoreEntities(t *testing.T) {
 		"[PHONE_1]",
 		"[PHONE_2]",
 		"[NIR_1]",
-		"[FIRST_NAME_1]",
 		"[NAME_1]",
 		"[NAME_2]",
 		"[DATE_1]",
