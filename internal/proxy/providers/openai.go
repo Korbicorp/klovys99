@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
@@ -60,6 +61,7 @@ type OpenAIConfig struct {
 	Logger         *zerolog.Logger
 	StatsRecorder  StatsRecorder
 	LogPIIFindings bool
+	NERAnalyzer    ner.Analyzer
 }
 
 type OpenAI struct {
@@ -70,6 +72,7 @@ type OpenAI struct {
 	logger         zerolog.Logger
 	statsRecorder  StatsRecorder
 	logPIIFindings bool
+	nerAnalyzer    ner.Analyzer
 }
 
 type AnonymizeResult struct {
@@ -78,28 +81,11 @@ type AnonymizeResult struct {
 	Findings []anonymizer.Finding
 }
 
-type PIILogFinding struct {
-	Type  string `json:"type"`
-	Value string `json:"value"`
-	Token string `json:"token"`
-}
-
-func PIILogFindings(findings []anonymizer.Finding) []PIILogFinding {
-	logFindings := make([]PIILogFinding, 0, len(findings))
-	for _, finding := range findings {
-		logFindings = append(logFindings, PIILogFinding{
-			Type:  string(finding.Type),
-			Value: finding.Value,
-			Token: finding.Token,
-		})
-	}
-	return logFindings
-}
-
 type openAIAnonymizationRun struct {
-	engine   *anonymizer.Run
-	stats    map[anonymizer.EntityType]int
-	findings []anonymizer.Finding
+	engine     *anonymizer.Run
+	stats      map[anonymizer.EntityType]int
+	findings   []anonymizer.Finding
+	nerMatches ner.MatchSet
 }
 
 func NewOpenAI(config OpenAIConfig) (*OpenAI, error) {
@@ -131,6 +117,7 @@ func NewOpenAI(config OpenAIConfig) (*OpenAI, error) {
 		logger:         logger,
 		statsRecorder:  config.StatsRecorder,
 		logPIIFindings: config.LogPIIFindings,
+		nerAnalyzer:    config.NERAnalyzer,
 	}, nil
 }
 
@@ -172,9 +159,9 @@ func (p *OpenAI) AnonymizeHTTPRequest(request *http.Request, body []byte) (Anony
 	path := NormalizeOpenAIPath(request.URL.Path)
 	switch {
 	case isCodexResponsesPath(path):
-		return p.anonymizeResponsesBody(body)
+		return p.anonymizeResponsesBody(request.Context(), body)
 	case path == "/v1/chat/completions":
-		return p.anonymizeChatCompletionsBody(body)
+		return p.anonymizeChatCompletionsBody(request.Context(), body)
 	default:
 		return AnonymizeResult{Body: body}, nil
 	}
@@ -253,13 +240,11 @@ func (p *OpenAI) HandleWebSocket(writer http.ResponseWriter, request *http.Reque
 		p.closeWebSocket(clientConn, websocket.CloseUnsupportedData, "first frame must be text")
 		return
 	}
-	p.logTrafficFrame("request", "before_anonymization", firstMessage)
-	firstMessage, stats, findings, err := p.anonymizeWebSocketFrame(firstMessage)
+	firstMessage, stats, findings, err := p.anonymizeWebSocketFrame(request.Context(), firstMessage)
 	if err != nil {
 		p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 		return
 	}
-	p.logTrafficFrame("request", "after_anonymization", firstMessage)
 	p.recordAnonymizedStats(stats, findings)
 
 	upstreamURL, upstreamHeaders := p.upstreamWebSocket(request)
@@ -294,13 +279,11 @@ func (p *OpenAI) relayClientToUpstream(clientConn, upstreamConn *websocket.Conn,
 			p.closeWebSocket(clientConn, websocket.CloseUnsupportedData, "client frames must be text")
 			return
 		}
-		p.logTrafficFrame("request", "before_anonymization", message)
-		anonymized, stats, findings, err := p.anonymizeWebSocketFrame(message)
+		anonymized, stats, findings, err := p.anonymizeWebSocketFrame(context.Background(), message)
 		if err != nil {
 			p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 			return
 		}
-		p.logTrafficFrame("request", "after_anonymization", anonymized)
 		p.recordAnonymizedStats(stats, findings)
 		if err := upstreamConn.WriteMessage(websocket.TextMessage, anonymized); err != nil {
 			return
@@ -315,21 +298,10 @@ func (p *OpenAI) relayUpstreamToClient(clientConn, upstreamConn *websocket.Conn,
 		if err != nil {
 			return
 		}
-		if messageType == websocket.TextMessage {
-			p.logTrafficFrame("response", "raw", message)
-		}
 		if err := clientConn.WriteMessage(messageType, message); err != nil {
 			return
 		}
 	}
-}
-
-func (p *OpenAI) logTrafficFrame(direction, stage string, body []byte) {
-	p.logger.Debug().
-		Str("direction", direction).
-		Str("stage", stage).
-		Str("body", string(body)).
-		Msg("traffic body")
 }
 
 func (p *OpenAI) closeWebSocket(conn *websocket.Conn, code int, reason string) {
@@ -350,12 +322,16 @@ func (p *OpenAI) upstreamWebSocket(request *http.Request) (string, http.Header) 
 	return joinWebSocketURL(p.apiTarget, "/v1/responses"), upstreamHeaders
 }
 
-func (p *OpenAI) anonymizeWebSocketFrame(message []byte) ([]byte, map[anonymizer.EntityType]int, []anonymizer.Finding, error) {
+func (p *OpenAI) anonymizeWebSocketFrame(ctx context.Context, message []byte) ([]byte, map[anonymizer.EntityType]int, []anonymizer.Finding, error) {
 	payload, err := decodeJSONObject(message)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, message)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	run := p.newRun(matches)
 	if response, ok := payload["response"]; ok {
 		anonymized, changed := run.anonymizeResponsesValue(response, responsesContext{})
 		if changed {
@@ -374,12 +350,16 @@ func (p *OpenAI) anonymizeWebSocketFrame(message []byte) ([]byte, map[anonymizer
 	return output, run.stats, run.findings, nil
 }
 
-func (p *OpenAI) anonymizeResponsesBody(body []byte) (AnonymizeResult, error) {
+func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (AnonymizeResult, error) {
 	payload, err := decodeJSONObject(body)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
+	run := p.newRun(matches)
 	anonymized, changed := run.anonymizeResponsesValue(payload, responsesContext{})
 	if !changed {
 		return AnonymizeResult{Body: body, Stats: run.stats, Findings: run.findings}, nil
@@ -391,7 +371,7 @@ func (p *OpenAI) anonymizeResponsesBody(body []byte) (AnonymizeResult, error) {
 	return AnonymizeResult{Body: output, Stats: run.stats, Findings: run.findings}, nil
 }
 
-func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, error) {
+func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) (AnonymizeResult, error) {
 	payload, err := decodeJSONObject(body)
 	if err != nil {
 		return AnonymizeResult{}, err
@@ -400,7 +380,11 @@ func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, err
 	if !ok {
 		return AnonymizeResult{}, fmt.Errorf("chat completions messages must be an array")
 	}
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
+	run := p.newRun(matches)
 	changed := false
 	for index, message := range messages {
 		messageMap, ok := message.(map[string]any)
@@ -420,10 +404,11 @@ func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, err
 	return AnonymizeResult{Body: output, Stats: run.stats, Findings: run.findings}, nil
 }
 
-func (p *OpenAI) newRun() *openAIAnonymizationRun {
+func (p *OpenAI) newRun(matches ner.MatchSet) *openAIAnonymizationRun {
 	return &openAIAnonymizationRun{
-		engine: p.anonymizer.NewRun(),
-		stats:  make(map[anonymizer.EntityType]int),
+		engine:     p.anonymizer.NewRun(),
+		stats:      make(map[anonymizer.EntityType]int),
+		nerMatches: matches,
 	}
 }
 
@@ -436,9 +421,7 @@ func (p *OpenAI) recordAnonymizedStats(stats map[anonymizer.EntityType]int, find
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
 	}
-	if p.logPIIFindings {
-		event = event.Interface("pii_findings", PIILogFindings(findings))
-	}
+	_ = findings
 	event.Msg("request body anonymized")
 	recordStatsEvent(p.logger, p.statsRecorder, requestProcessedEvent(stats))
 }
@@ -587,7 +570,7 @@ func (r *openAIAnonymizationRun) anonymizeToolCalls(value any) (any, bool) {
 }
 
 func (r *openAIAnonymizationRun) anonymizeString(value string) (string, bool) {
-	anonymized, result := r.engine.Anonymize(value)
+	anonymized, result := r.engine.AnonymizeWithMatches(value, r.nerMatches[value])
 	if len(result.Stats) == 0 {
 		return value, false
 	}

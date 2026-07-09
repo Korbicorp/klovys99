@@ -42,6 +42,13 @@ type Store struct {
 	config     Config
 }
 
+func canonicalProtectionType(entityType anonymizer.EntityType) anonymizer.EntityType {
+	if entityType == anonymizer.EntityPersonName {
+		return anonymizer.EntityName
+	}
+	return entityType
+}
+
 // NewStore loads the global config file or creates it with all known types enabled.
 func NewStore(path string, knownTypes []anonymizer.EntityType) (*Store, error) {
 	path = strings.TrimSpace(path)
@@ -255,6 +262,7 @@ func normalizeConfig(config Config, knownTypes []anonymizer.EntityType) Config {
 	if config.ProtectionOptions.Types == nil {
 		config.ProtectionOptions.Types = make(map[anonymizer.EntityType]bool, len(knownTypes))
 	}
+	mergeLegacyPersonNameType(config.ProtectionOptions.Types)
 	for _, entityType := range knownTypes {
 		if entityType == "" {
 			continue
@@ -264,6 +272,18 @@ func normalizeConfig(config Config, knownTypes []anonymizer.EntityType) Config {
 		}
 	}
 	return config
+}
+
+func mergeLegacyPersonNameType(types map[anonymizer.EntityType]bool) {
+	enabled, hasName := types[anonymizer.EntityName]
+	legacyEnabled, hasLegacy := types[anonymizer.EntityPersonName]
+	switch {
+	case hasName && hasLegacy:
+		types[anonymizer.EntityName] = enabled && legacyEnabled
+	case !hasName && hasLegacy:
+		types[anonymizer.EntityName] = legacyEnabled
+	}
+	delete(types, anonymizer.EntityPersonName)
 }
 
 // copyConfig makes a deep copy so callers cannot mutate store state.
@@ -299,20 +319,25 @@ func optionsToTypeMap(options []ProtectionOption, knownTypes []anonymizer.Entity
 		known[entityType] = struct{}{}
 	}
 	result := make(map[anonymizer.EntityType]bool, len(knownTypes))
-	seen := make(map[anonymizer.EntityType]struct{}, len(options))
+	seen := make(map[anonymizer.EntityType]anonymizer.EntityType, len(options))
 	for _, option := range options {
 		entityType := anonymizer.EntityType(strings.TrimSpace(string(option.Type)))
 		if entityType == "" {
 			return nil, fmt.Errorf("protection option type is required")
 		}
-		if _, ok := known[entityType]; !ok {
+		canonicalType := canonicalProtectionType(entityType)
+		if _, ok := known[canonicalType]; !ok {
 			return nil, fmt.Errorf("unknown protection option type %q", entityType)
 		}
-		if _, ok := seen[entityType]; ok {
+		if previous, ok := seen[canonicalType]; ok {
+			if entityType == anonymizer.EntityPersonName || previous == anonymizer.EntityPersonName {
+				result[canonicalType] = result[canonicalType] && option.Enabled
+				continue
+			}
 			return nil, fmt.Errorf("duplicate protection option type %q", entityType)
 		}
-		seen[entityType] = struct{}{}
-		result[entityType] = option.Enabled
+		seen[canonicalType] = entityType
+		result[canonicalType] = option.Enabled
 	}
 	for _, entityType := range knownTypes {
 		if _, ok := result[entityType]; !ok {

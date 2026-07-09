@@ -73,6 +73,8 @@ Supported values are `codex`, `claude`, and `both`.
   and architecture and exposes a `klovys99` command.
 - Client configuration helpers for Codex and Claude Code.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
+- Optional local GLiNER sidecar for contextual names, organizations, locations,
+  employers, schools, addresses, and healthcare institutions.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
   rule sources.
 - Stable pseudonym tokens for the lifetime of the proxy process.
@@ -87,6 +89,7 @@ Supported values are `codex`, `claude`, and `both`.
   rule sources.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
   client you route through Klovys99.
+- Docker Desktop or Docker Engine only when the optional GLiNER mode is used.
 
 Go 1.25 or newer is only required if you work from a source checkout or build
 release binaries yourself.
@@ -235,9 +238,50 @@ Klovys99 runtime is configured with environment variables.
 | `KLOVIS_TARGET_URL` | `https://api.anthropic.com` | Upstream used by legacy unprefixed routes such as `/v1/messages`. |
 | `KLOVIS_ANTHROPIC_TARGET_URL` | `https://api.anthropic.com` | Upstream used by `/anthropic/...` routes. |
 | `KLOVIS_OPENAI_TARGET_URL` | `https://api.openai.com` | Upstream used by `/openai/...` routes. |
-| `KLOVIS_PROXY_DEBUG` | `false` | Enables debug traffic body logging when set to `true`. |
-| `KLOVIS_LOG_PII_FINDINGS` | `false` | Adds the original values replaced by anonymization to `request body anonymized` logs without logging the full body. |
+| `KLOVIS_PROXY_DEBUG` | `false` | Enables additional sanitized diagnostic logging. Raw traffic is never logged. |
+| `KLOVIS_LOG_PII_FINDINGS` | `false` | Deprecated and ignored for privacy; raw findings are never logged. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
+
+### Optional contextual GLiNER protection
+
+GLiNER is disabled by default and the regex-only proxy continues to work
+without Docker. Model installation is always explicit. Choose a model only
+after evaluation and pin `REVISION` to its immutable Hugging Face commit SHA:
+
+```sh
+npx klovys99 gliner install \
+  --model urchade/gliner_multi_pii-v1 \
+  --revision REVISION
+npx klovys99 start --gliner \
+  --model urchade/gliner_multi_pii-v1 \
+  --revision REVISION
+```
+
+The first command builds the CPU image, downloads the pinned model, and writes
+a SHA-256 manifest atomically under `~/.klovys99/gliner`. The start command
+uses that local image and model with `--no-build`; user requests never download
+models. The sidecar is published only on `127.0.0.1:8091`.
+
+A sample direct sidecar latency benchmark is available in [docs/benchmarks/gliner-benchmark.md](docs/benchmarks/gliner-benchmark.md).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `KLOVIS_GLINER_ENABLED` | `false` | Enables contextual detection. |
+| `KLOVIS_GLINER_URL` | `http://127.0.0.1:8091` | Loopback sidecar URL; non-loopback URLs are rejected. |
+| `KLOVIS_GLINER_MODEL` | none | Exact model identifier; required when enabled. |
+| `KLOVIS_GLINER_MODEL_REVISION` | none | Immutable revision/digest; required when enabled. |
+| `KLOVIS_GLINER_TIMEOUT` | `5s` | Per-batch deadline. |
+| `KLOVIS_GLINER_THRESHOLD` | `0.50` | Global confidence threshold. |
+| `KLOVIS_GLINER_LABEL_THRESHOLDS` | `{}` | JSON object overriding thresholds for fixed labels. |
+| `KLOVIS_GLINER_MAX_CONCURRENCY` | `2` | Maximum concurrent inference calls. |
+| `KLOVIS_GLINER_MAX_BATCH_CHARS` | `32768` | Maximum Unicode characters per request batch. |
+| `KLOVIS_GLINER_FAILURE_POLICY` | `fail-closed` | Only supported policy in V1. |
+| `KLOVIS_GLINER_DATA_DIR` | `~/.klovys99/gliner` | npm lifecycle model directory. |
+
+When enabled, a timeout, unavailable sidecar, saturated queue, malformed span,
+or model identity mismatch returns `503` and makes zero upstream calls.
+`/healthz` reports Go liveness, `/readyz` includes contextual readiness, and
+`/api/status` exposes only sanitized model/status metadata.
 
 The npm wrapper also honors:
 
@@ -260,25 +304,9 @@ Klovys99 writes structured application logs to stdout by default. To write logs 
 KLOVIS_LOG_TO_FILE=true npx klovys99 start
 ```
 
-To inspect request bodies before and after anonymization, enable debug logging:
-
-```sh
-KLOVIS_LOG_TO_FILE=true KLOVIS_PROXY_DEBUG=true npx klovys99 start
-```
-
-Use debug mode carefully, because it records both the original incoming request
-body and the anonymized upstream request body in whichever log destination is
-configured.
-
-To inspect only the values that were replaced during anonymization, enable PII
-finding logs:
-
-```sh
-KLOVIS_LOG_PII_FINDINGS=true npx klovys99 start
-```
-
-Use this mode carefully too, because it records the original sensitive values
-that were replaced, even though it does not record the full request body.
+Debug and file logging remain available, but request bodies, detected values,
+token mappings, credentials, and model inputs are never logged. The historical
+`KLOVIS_LOG_PII_FINDINGS` setting is ignored.
 
 ## Detectors
 
@@ -301,8 +329,6 @@ External rule payloads are cached for 24 hours in the user cache directory under
 | `CRYPTO` | Presidio | 600 | Cryptocurrency wallet identifiers loaded from supported Presidio recognizers. |
 | `ADDRESS` | Built-in | 900 / 700 | French postal addresses and labelled addresses. |
 | `NAME` | Built-in | 900 | Contextual names following strong French or English cues and form labels. |
-| `FIRST_NAME` | Built-in | 500 | Conservatively labelled first names. |
-| `LAST_NAME` | Built-in | 500 | Conservatively labelled last names. |
 | `NUMERIC_ID` | Built-in | 100 | Generic long numeric IDs. |
 | `REFERENCE_ID` | Built-in | 100 | Labelled alphanumeric references requiring letters and digits. |
 

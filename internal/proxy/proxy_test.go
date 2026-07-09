@@ -15,12 +15,60 @@ import (
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy/providers"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 )
+
+type failingNER struct{}
+
+func (failingNER) AnalyzeBatch(context.Context, []string) ([][]anonymizer.Match, error) {
+	return nil, fmt.Errorf("simulated failure containing no input")
+}
+
+func (failingNER) Status() ner.Status {
+	return ner.Status{Enabled: true, State: "unavailable"}
+}
+
+func TestProxyFailsClosedWithoutUpstreamCallWhenNERFails(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamCalls++
+	}))
+	defer upstream.Close()
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	handler, err := NewProxyHandler(Config{
+		Target:       mustParseURL(t, upstream.URL),
+		RouteTargets: map[string]*url.URL{OpenAIRoutePrefix: mustParseURL(t, upstream.URL)},
+		Logger:       &logger,
+		Anonymizer:   newTestAnonymizer(),
+		NERAnalyzer:  failingNER{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+	secret := "Alice Morgan alice@example.com"
+	response, err := http.Post(server.URL+"/openai/v1/responses", "application/json", strings.NewReader(`{"input":"`+secret+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", response.StatusCode)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want zero", upstreamCalls)
+	}
+	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "alice@example.com") {
+		t.Fatalf("raw input leaked in logs: %s", logs.String())
+	}
+}
 
 func TestProxyForwardsRequestAndResponse(t *testing.T) {
 	var upstreamMethod string
@@ -553,25 +601,15 @@ func TestProxyForwardsAnonymizedSessionPrompts(t *testing.T) {
 	}
 
 	logOutput := logs.String()
-	if !strings.Contains(logOutput, `"stage":"before_anonymization"`) {
-		t.Fatalf("logs = %q, want pre-anonymization request body", logOutput)
-	}
-	if !strings.Contains(logOutput, "alice@example.com") || !strings.Contains(logOutput, "FR76 3000 6000 0112 3456 7890 189") {
-		t.Fatalf("logs = %q, want original request values before anonymization", logOutput)
-	}
-	if !strings.Contains(logOutput, `"stage":"after_anonymization"`) {
-		t.Fatalf("logs = %q, want post-anonymization request body", logOutput)
-	}
-	if !strings.Contains(logOutput, `<session>Email: [EMAIL_1]</session>`) || !strings.Contains(logOutput, `IBAN [IBAN_1]`) {
-		t.Fatalf("logs = %q, want anonymized request body after anonymization", logOutput)
-	}
-	if strings.Contains(logOutput, `"direction":"response"`) || strings.Contains(logOutput, "visible response") {
-		t.Fatalf("logs = %q, want no response traffic log", logOutput)
-	}
 	if !strings.Contains(logOutput, `"EMAIL":1`) || !strings.Contains(logOutput, `"IBAN":1`) {
 		t.Fatalf("logs = %q, want anonymized stats", logOutput)
 	}
-	for _, unexpected := range []string{"request.", "response.", "upstream.", "prompt_original", "prompt_anonymized"} {
+	for _, unexpected := range []string{
+		"alice@example.com", "FR76 3000 6000 0112 3456 7890 189",
+		"[EMAIL_1]", "[IBAN_1]", "visible response", `"body":`,
+		`"stage":"before_anonymization"`, `"stage":"after_anonymization"`,
+		"request.", "response.", "upstream.", "prompt_original", "prompt_anonymized",
+	} {
 		if strings.Contains(logOutput, unexpected) {
 			t.Fatalf("logs = %q, did not want %q", logOutput, unexpected)
 		}
@@ -720,17 +758,13 @@ func TestProxyLogsOpenAIPIIFindingsWhenEnabled(t *testing.T) {
 	if !strings.Contains(logOutput, `"message":"request body anonymized"`) {
 		t.Fatalf("logs = %q, want anonymized log", logOutput)
 	}
-	if !strings.Contains(logOutput, `"pii_findings":[`) {
-		t.Fatalf("logs = %q, want pii findings", logOutput)
-	}
-	if !strings.Contains(logOutput, `"type":"EMAIL"`) || !strings.Contains(logOutput, `"value":"email-value-1"`) || !strings.Contains(logOutput, `"token":"[EMAIL_1]"`) {
-		t.Fatalf("logs = %q, want email finding with original value and token", logOutput)
-	}
-	if !strings.Contains(logOutput, `"type":"PHONE"`) || !strings.Contains(logOutput, `"value":"phone-value-1"`) || !strings.Contains(logOutput, `"token":"[PHONE_1]"`) {
-		t.Fatalf("logs = %q, want phone finding with original value and token", logOutput)
-	}
-	if strings.Contains(logOutput, `"body":`) || strings.Contains(logOutput, `"stage":"before_anonymization"`) || strings.Contains(logOutput, `"stage":"after_anonymization"`) {
-		t.Fatalf("logs = %q, want findings without full traffic bodies", logOutput)
+	for _, unexpected := range []string{
+		"pii_findings", "email-value-1", "phone-value-1", "[EMAIL_1]", "[PHONE_1]",
+		`"body":`, `"stage":"before_anonymization"`, `"stage":"after_anonymization"`,
+	} {
+		if strings.Contains(logOutput, unexpected) {
+			t.Fatalf("logs = %q, did not want %q even when legacy flag is enabled", logOutput, unexpected)
+		}
 	}
 }
 

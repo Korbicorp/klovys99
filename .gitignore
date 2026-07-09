@@ -1,11 +1,28 @@
 .vscode/
+
+# Build outputs
 dist/
 node_modules/
-output.txt
-proxy.log
+__debug_bin*
+
+# Local environment and runtime state
 .env
+proxy.log
+output.txt
 anonymization_stats*.jsonl
 klovys99_config.json
 klovys99_config.json.tmp
-cmd/klovis/__debug_bin*
 fake_secret_context.txt
+
+# Python sidecar artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+# Local packaging and test artifacts
+npm-pack.json
+gliner-eval.json

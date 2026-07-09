@@ -1,0 +1,8 @@
+{"id":"en-person-org","language":"en","text":"Alice Morgan works at Northwind Labs.","spans":[{"start":0,"end":12,"type":"NAME"},{"start":22,"end":36,"type":"EMPLOYER"}],"critical":true}
+{"id":"fr-person-location","language":"fr","text":"Élodie Martin habite à Lyon.","spans":[{"start":0,"end":14,"type":"NAME"},{"start":24,"end":28,"type":"LOCATION"}],"critical":true}
+{"id":"en-negative-code","language":"en","text":"Run `go test ./...` and return the exit code.","spans":[],"critical":false}
+{"id":"fr-negative-markdown","language":"fr","text":"Résume ce document en trois points.","spans":[],"critical":false}
+{"id":"en-school-json","language":"en","text":"{\"school\":\"Redwood Academy\",\"status\":\"open\"}","spans":[{"start":11,"end":27,"type":"SCHOOL"}],"critical":false}
+{"id":"fr-medical-tool","language":"fr","text":"tool_output: rendez-vous à la Clinique des Lilas","spans":[{"start":29,"end":47,"type":"MEDICAL_PROVIDER"}],"critical":true}
+{"id":"en-unicode-emoji","language":"en","text":"😀 Send the file to Bob Stone in Montréal.","spans":[{"start":22,"end":31,"type":"NAME"},{"start":35,"end":44,"type":"LOCATION"}],"critical":false}
+{"id":"fr-overlap-address","language":"fr","text":"Livrer à 10 rue de la Paix, Paris.","spans":[{"start":10,"end":27,"type":"ADDRESS"},{"start":29,"end":34,"type":"LOCATION"}],"critical":true}

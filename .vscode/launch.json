@@ -10,6 +10,11 @@
       "program": "${workspaceFolder}/cmd/klovys99",
       "cwd": "${workspaceFolder}",
       "console": "internalConsole",
+      "env": {
+        "KLOVIS_GLINER_ENABLED": "true",
+        "KLOVIS_GLINER_MODEL": "urchade/gliner_multi_pii-v1",
+        "KLOVIS_GLINER_MODEL_REVISION": "1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d" // last SHA revision
+      },
       "args": ["--stats"]
     }
   ]

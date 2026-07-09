@@ -1,7 +1,5 @@
 {
   "entities": [
-    { "type": "FIRST_NAME", "value": "Liam" },
-    { "type": "LAST_NAME", "value": "Wilson" },
     { "type": "EMAIL", "value": "liam.wilson@example.dev" },
     { "type": "PHONE", "value": "+33 6 55 44 33 22" },
     { "type": "ADDRESS", "value": "3 avenue Kleber, 75116 Paris" }

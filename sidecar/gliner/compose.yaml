@@ -1,0 +1,23 @@
+services:
+  gliner:
+    build:
+      context: .
+    image: klovys99-gliner:local
+    restart: unless-stopped
+    environment:
+      GLINER_HOST: 0.0.0.0
+      GLINER_PORT: 8091
+      GLINER_MODEL: ${KLOVIS_GLINER_MODEL:?KLOVIS_GLINER_MODEL is required}
+      GLINER_MODEL_REVISION: ${KLOVIS_GLINER_MODEL_REVISION:?KLOVIS_GLINER_MODEL_REVISION is required}
+      GLINER_MODEL_DIR: /models/current
+      GLINER_MAX_BATCH_CHARS: ${KLOVIS_GLINER_MAX_BATCH_CHARS:-32768}
+    ports:
+      - "127.0.0.1:8091:8091"
+    volumes:
+      - ${KLOVIS_GLINER_DATA_DIR:?KLOVIS_GLINER_DATA_DIR is required}/model:/models/current:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 60s

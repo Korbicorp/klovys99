@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/rs/zerolog"
 )
 
@@ -34,12 +35,14 @@ type AnthropicConfig struct {
 	RoutePrefix    string
 	Anonymizer     TextAnonymizer
 	LogPIIFindings bool
+	NERAnalyzer    ner.Analyzer
 }
 
 type Anthropic struct {
 	routePrefix    string
 	anonymizer     TextAnonymizer
 	logPIIFindings bool
+	nerAnalyzer    ner.Analyzer
 }
 
 type anthropicAnonymizationRun struct {
@@ -47,6 +50,7 @@ type anthropicAnonymizationRun struct {
 	stats       map[anonymizer.EntityType]int
 	findings    []anonymizer.Finding
 	readToolIDs map[string]struct{}
+	nerMatches  ner.MatchSet
 }
 
 type anthropicContext struct {
@@ -66,6 +70,7 @@ func NewAnthropic(config AnthropicConfig) (*Anthropic, error) {
 		routePrefix:    strings.TrimRight(config.RoutePrefix, "/"),
 		anonymizer:     config.Anonymizer,
 		logPIIFindings: config.LogPIIFindings,
+		nerAnalyzer:    config.NERAnalyzer,
 	}, nil
 }
 
@@ -82,39 +87,48 @@ func (p *Anthropic) ShouldAnonymizeHTTP(request *http.Request) bool {
 }
 
 func (p *Anthropic) AnonymizeHTTPRequest(ctx context.Context, logger zerolog.Logger, body []byte) (AnonymizeResult, error) {
-	return p.Anonymize(ctx, logger, body), nil
+	return p.anonymize(ctx, logger, body)
 }
 
+// Anonymize is retained for callers that use the regex-only compatibility API.
 func (p *Anthropic) Anonymize(ctx context.Context, logger zerolog.Logger, body []byte) AnonymizeResult {
-	_ = ctx
+	result, _ := p.anonymize(ctx, logger, body)
+	return result
+}
+
+func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body []byte) (AnonymizeResult, error) {
 	var payload any
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		return AnonymizeResult{Body: body}
+		return AnonymizeResult{Body: body}, nil
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return AnonymizeResult{Body: body}
+		return AnonymizeResult{Body: body}, nil
 	}
 
-	run := p.newRun()
+	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
+	run := p.newRun(matches)
 	run.readToolIDs = collectAnthropicReadToolIDs(payload)
 	anonymized, changed := run.anonymizeRequestValue(payload, anthropicContext{})
 	if !changed {
-		return AnonymizeResult{Body: body, Stats: run.stats, Findings: run.findings}
+		return AnonymizeResult{Body: body, Stats: run.stats, Findings: run.findings}, nil
 	}
 	logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
 
 	output, err := encodeJSON(anonymized)
 	if err != nil {
-		return AnonymizeResult{Body: body}
+		return AnonymizeResult{}, err
 	}
 	return AnonymizeResult{
 		Body:     output,
 		Stats:    run.stats,
 		Findings: run.findings,
-	}
+	}, nil
 }
 
 func (p *Anthropic) requestPath(path string) string {
@@ -127,10 +141,11 @@ func (p *Anthropic) requestPath(path string) string {
 	return path
 }
 
-func (p *Anthropic) newRun() *anthropicAnonymizationRun {
+func (p *Anthropic) newRun(matches ner.MatchSet) *anthropicAnonymizationRun {
 	return &anthropicAnonymizationRun{
-		engine: p.anonymizer.NewRun(),
-		stats:  make(map[anonymizer.EntityType]int),
+		engine:     p.anonymizer.NewRun(),
+		stats:      make(map[anonymizer.EntityType]int),
+		nerMatches: matches,
 	}
 }
 
@@ -290,7 +305,7 @@ func (r *anthropicAnonymizationRun) anonymizeString(value string, context anthro
 }
 
 func (r *anthropicAnonymizationRun) anonymizeTextValue(value string) (string, bool) {
-	anonymized, result := r.engine.Anonymize(value)
+	anonymized, result := r.engine.AnonymizeWithMatches(value, r.nerMatches[value])
 	if len(result.Stats) == 0 {
 		return value, false
 	}
@@ -306,10 +321,11 @@ func (r *anthropicAnonymizationRun) anonymizeTextValuePreservingSystemReminders(
 	var output strings.Builder
 	changed := false
 	remaining := value
+	base := 0
 	for {
 		openIndex := strings.Index(remaining, systemReminderOpenTag)
 		if openIndex < 0 {
-			anonymized, segmentChanged := r.anonymizeTextValue(remaining)
+			anonymized, segmentChanged := r.anonymizeTextRange(remaining, value, base)
 			output.WriteString(anonymized)
 			return output.String(), changed || segmentChanged
 		}
@@ -317,19 +333,41 @@ func (r *anthropicAnonymizationRun) anonymizeTextValuePreservingSystemReminders(
 		closeSearchStart := openIndex + len(systemReminderOpenTag)
 		closeIndex := strings.Index(remaining[closeSearchStart:], systemReminderCloseTag)
 		if closeIndex < 0 {
-			anonymized, segmentChanged := r.anonymizeTextValue(remaining)
+			anonymized, segmentChanged := r.anonymizeTextRange(remaining, value, base)
 			output.WriteString(anonymized)
 			return output.String(), changed || segmentChanged
 		}
 
-		anonymized, segmentChanged := r.anonymizeTextValue(remaining[:openIndex])
+		anonymized, segmentChanged := r.anonymizeTextRange(remaining[:openIndex], value, base)
 		output.WriteString(anonymized)
 		changed = changed || segmentChanged
 
 		closeEnd := closeSearchStart + closeIndex + len(systemReminderCloseTag)
 		output.WriteString(remaining[openIndex:closeEnd])
 		remaining = remaining[closeEnd:]
+		base += closeEnd
 	}
+}
+
+func (r *anthropicAnonymizationRun) anonymizeTextRange(value, source string, base int) (string, bool) {
+	if value == source {
+		return r.anonymizeTextValue(value)
+	}
+	var projected []anonymizer.Match
+	for _, match := range r.nerMatches[source] {
+		if match.Start < base || match.End > base+len(value) {
+			continue
+		}
+		match.Start -= base
+		match.End -= base
+		projected = append(projected, match)
+	}
+	anonymized, result := r.engine.AnonymizeWithMatches(value, projected)
+	if len(result.Stats) == 0 {
+		return value, false
+	}
+	r.addStats(result)
+	return anonymized, true
 }
 
 func (r *anthropicAnonymizationRun) addStats(result anonymizer.Result) {
@@ -344,8 +382,7 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	for _, entityType := range sortedEntityTypes(stats) {
 		event = event.Int(string(entityType), stats[entityType])
 	}
-	if includePII {
-		event = event.Interface("pii_findings", PIILogFindings(findings))
-	}
+	_ = findings
+	_ = includePII
 	event.Msg("request body anonymized")
 }
