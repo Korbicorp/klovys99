@@ -159,7 +159,6 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			return
 		}
 
-		logTrafficRequest(logger, "before_anonymization", string(requestBody))
 		var responseTransform responseTransformContext
 		if openAIProvider.ShouldAnonymizeHTTP(ctx.Request) {
 			outcome, err := openAIProvider.AnonymizeHTTPRequest(ctx.Request, requestBody)
@@ -199,7 +198,6 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 				contextWithResponseTransform(ctx.Request.Context(), responseTransform),
 			)
 		}
-		logTrafficRequest(logger, "after_anonymization", string(requestBody))
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
 }
@@ -319,10 +317,6 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	_ = findings
 	_ = includePII
 	event.Msg("request body anonymized")
-}
-
-func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
-	logger.Debug().Str("stage", stage).Str("body", body).Msg("request traffic")
 }
 
 func writeAnonymizationError(ctx *gin.Context, err error) {

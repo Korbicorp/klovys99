@@ -128,11 +128,14 @@ func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body [
 		return AnonymizeResult{Body: body, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
 	}
 
+	if len(run.stats) > 0 {
+		logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
+	}
+
 	output, err := encodeJSON(anonymized)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	_ = logger
 	return AnonymizeResult{
 		Body:           output,
 		RestoreMapping: NewResponseRestoreMapping(run.findings),
