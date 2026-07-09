@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
@@ -63,19 +65,22 @@ type OpenAIConfig struct {
 }
 
 type OpenAI struct {
-	apiTarget      *url.URL
-	chatGPTTarget  *url.URL
-	httpClient     *http.Client
-	anonymizer     TextAnonymizer
-	logger         zerolog.Logger
-	statsRecorder  StatsRecorder
-	logPIIFindings bool
+	apiTarget         *url.URL
+	chatGPTTarget     *url.URL
+	httpClient        *http.Client
+	anonymizer        TextAnonymizer
+	logger            zerolog.Logger
+	statsRecorder     StatsRecorder
+	logPIIFindings    bool
+	responseMappings  map[string]*ResponseRestoreMapping
+	responseMappingsM sync.RWMutex
 }
 
 type AnonymizeResult struct {
-	Body     []byte
-	Stats    map[anonymizer.EntityType]int
-	Findings []anonymizer.Finding
+	Body           []byte
+	RestoreMapping *ResponseRestoreMapping
+	Stats          map[anonymizer.EntityType]int
+	Findings       []anonymizer.Finding
 }
 
 type PIILogFinding struct {
@@ -102,6 +107,27 @@ type openAIAnonymizationRun struct {
 	findings []anonymizer.Finding
 }
 
+type webSocketMappingState struct {
+	mu      sync.RWMutex
+	mapping *ResponseRestoreMapping
+}
+
+func newWebSocketMappingState(mapping *ResponseRestoreMapping) *webSocketMappingState {
+	return &webSocketMappingState{mapping: mapping}
+}
+
+func (s *webSocketMappingState) Load() *ResponseRestoreMapping {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mapping
+}
+
+func (s *webSocketMappingState) Store(mapping *ResponseRestoreMapping) {
+	s.mu.Lock()
+	s.mapping = mapping
+	s.mu.Unlock()
+}
+
 func NewOpenAI(config OpenAIConfig) (*OpenAI, error) {
 	if config.APITarget == nil {
 		return nil, fmt.Errorf("openai api target is required")
@@ -124,13 +150,14 @@ func NewOpenAI(config OpenAIConfig) (*OpenAI, error) {
 		logger = *config.Logger
 	}
 	return &OpenAI{
-		apiTarget:      config.APITarget,
-		chatGPTTarget:  config.ChatGPTTarget,
-		httpClient:     config.HTTPClient,
-		anonymizer:     config.Anonymizer,
-		logger:         logger,
-		statsRecorder:  config.StatsRecorder,
-		logPIIFindings: config.LogPIIFindings,
+		apiTarget:        config.APITarget,
+		chatGPTTarget:    config.ChatGPTTarget,
+		httpClient:       config.HTTPClient,
+		anonymizer:       config.Anonymizer,
+		logger:           logger,
+		statsRecorder:    config.StatsRecorder,
+		logPIIFindings:   config.LogPIIFindings,
+		responseMappings: make(map[string]*ResponseRestoreMapping),
 	}, nil
 }
 
@@ -254,7 +281,7 @@ func (p *OpenAI) HandleWebSocket(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	p.logTrafficFrame("request", "before_anonymization", firstMessage)
-	firstMessage, stats, findings, err := p.anonymizeWebSocketFrame(firstMessage)
+	mapping, firstMessage, stats, findings, err := p.anonymizeWebSocketFrame(nil, firstMessage)
 	if err != nil {
 		p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 		return
@@ -278,12 +305,13 @@ func (p *OpenAI) HandleWebSocket(writer http.ResponseWriter, request *http.Reque
 	}
 
 	done := make(chan struct{}, 2)
-	go p.relayClientToUpstream(clientConn, upstreamConn, done)
-	go p.relayUpstreamToClient(clientConn, upstreamConn, done)
+	mappingState := newWebSocketMappingState(mapping)
+	go p.relayClientToUpstream(mappingState, clientConn, upstreamConn, done)
+	go p.relayUpstreamToClient(mappingState, clientConn, upstreamConn, done)
 	<-done
 }
 
-func (p *OpenAI) relayClientToUpstream(clientConn, upstreamConn *websocket.Conn, done chan<- struct{}) {
+func (p *OpenAI) relayClientToUpstream(mappingState *webSocketMappingState, clientConn, upstreamConn *websocket.Conn, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, message, err := clientConn.ReadMessage()
@@ -295,12 +323,13 @@ func (p *OpenAI) relayClientToUpstream(clientConn, upstreamConn *websocket.Conn,
 			return
 		}
 		p.logTrafficFrame("request", "before_anonymization", message)
-		anonymized, stats, findings, err := p.anonymizeWebSocketFrame(message)
+		nextMapping, anonymized, stats, findings, err := p.anonymizeWebSocketFrame(mappingState.Load(), message)
 		if err != nil {
 			p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 			return
 		}
 		p.logTrafficFrame("request", "after_anonymization", anonymized)
+		mappingState.Store(nextMapping)
 		p.recordAnonymizedStats(stats, findings)
 		if err := upstreamConn.WriteMessage(websocket.TextMessage, anonymized); err != nil {
 			return
@@ -308,7 +337,7 @@ func (p *OpenAI) relayClientToUpstream(clientConn, upstreamConn *websocket.Conn,
 	}
 }
 
-func (p *OpenAI) relayUpstreamToClient(clientConn, upstreamConn *websocket.Conn, done chan<- struct{}) {
+func (p *OpenAI) relayUpstreamToClient(mappingState *webSocketMappingState, clientConn, upstreamConn *websocket.Conn, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, message, err := upstreamConn.ReadMessage()
@@ -316,7 +345,14 @@ func (p *OpenAI) relayUpstreamToClient(clientConn, upstreamConn *websocket.Conn,
 			return
 		}
 		if messageType == websocket.TextMessage {
-			p.logTrafficFrame("response", "raw", message)
+			mapping := mappingState.Load()
+			message, err = p.deanonymizeWebSocketFrame(mapping, message)
+			if err != nil {
+				return
+			}
+			if responseID := responseIDFromBody(message); responseID != "" {
+				p.storeResponseMapping(responseID, mapping)
+			}
 		}
 		if err := clientConn.WriteMessage(messageType, message); err != nil {
 			return
@@ -350,12 +386,14 @@ func (p *OpenAI) upstreamWebSocket(request *http.Request) (string, http.Header) 
 	return joinWebSocketURL(p.apiTarget, "/v1/responses"), upstreamHeaders
 }
 
-func (p *OpenAI) anonymizeWebSocketFrame(message []byte) ([]byte, map[anonymizer.EntityType]int, []anonymizer.Finding, error) {
+func (p *OpenAI) anonymizeWebSocketFrame(mapping *ResponseRestoreMapping, message []byte) (*ResponseRestoreMapping, []byte, map[anonymizer.EntityType]int, []anonymizer.Finding, error) {
 	payload, err := decodeJSONObject(message)
 	if err != nil {
-		return nil, nil, nil, err
+		return mapping, nil, nil, nil, err
 	}
 	run := p.newRun()
+	statsBefore := cloneEntityCountMap(run.stats)
+	findingsBefore := len(run.findings)
 	if response, ok := payload["response"]; ok {
 		anonymized, changed := run.anonymizeResponsesValue(response, responsesContext{})
 		if changed {
@@ -369,9 +407,30 @@ func (p *OpenAI) anonymizeWebSocketFrame(message []byte) ([]byte, map[anonymizer
 	}
 	output, err := encodeJSON(payload)
 	if err != nil {
-		return nil, nil, nil, err
+		return mapping, nil, nil, nil, err
 	}
-	return output, run.stats, run.findings, nil
+	nextMapping := p.mappingForPayload(previousResponseIDFromPayload(payload))
+	if mapping != nil && nextMapping.Empty() {
+		nextMapping = mapping.Clone()
+	}
+	findings := append([]anonymizer.Finding(nil), run.findings[findingsBefore:]...)
+	replacements := nextMapping.MergeFindings(findings)
+	if len(replacements) > 0 {
+		output = rewriteBodyTokens(output, replacements)
+		findings = rewriteFindingsTokens(findings, replacements)
+	}
+	if nextMapping.Empty() {
+		nextMapping = nil
+	}
+	return nextMapping, output, entityCountDelta(statsBefore, run.stats), findings, nil
+}
+
+func (p *OpenAI) deanonymizeWebSocketFrame(mapping *ResponseRestoreMapping, message []byte) ([]byte, error) {
+	output, _, err := restoreJSONBody(mapping, message)
+	if err != nil {
+		return message, nil
+	}
+	return output, nil
 }
 
 func (p *OpenAI) anonymizeResponsesBody(body []byte) (AnonymizeResult, error) {
@@ -380,15 +439,24 @@ func (p *OpenAI) anonymizeResponsesBody(body []byte) (AnonymizeResult, error) {
 		return AnonymizeResult{}, err
 	}
 	run := p.newRun()
+	restoreMapping := p.mappingForPayload(previousResponseIDFromPayload(payload))
 	anonymized, changed := run.anonymizeResponsesValue(payload, responsesContext{})
-	if !changed {
-		return AnonymizeResult{Body: body, Stats: run.stats, Findings: run.findings}, nil
+	output := body
+	if changed {
+		output, err = encodeJSON(anonymized)
+		if err != nil {
+			return AnonymizeResult{}, err
+		}
 	}
-	output, err := encodeJSON(anonymized)
-	if err != nil {
-		return AnonymizeResult{}, err
+	replacements := restoreMapping.MergeFindings(run.findings)
+	if len(replacements) > 0 {
+		output = rewriteBodyTokens(output, replacements)
+		run.findings = rewriteFindingsTokens(run.findings, replacements)
 	}
-	return AnonymizeResult{Body: output, Stats: run.stats, Findings: run.findings}, nil
+	if restoreMapping.Empty() {
+		restoreMapping = nil
+	}
+	return AnonymizeResult{Body: output, RestoreMapping: restoreMapping, Stats: run.stats, Findings: run.findings}, nil
 }
 
 func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, error) {
@@ -411,13 +479,23 @@ func (p *OpenAI) anonymizeChatCompletionsBody(body []byte) (AnonymizeResult, err
 		changed = changed || messageChanged
 	}
 	if !changed {
-		return AnonymizeResult{Body: body, Stats: run.stats, Findings: run.findings}, nil
+		return AnonymizeResult{Body: body, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
 	}
 	output, err := encodeJSON(payload)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	return AnonymizeResult{Body: output, Stats: run.stats, Findings: run.findings}, nil
+	return AnonymizeResult{Body: output, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
+}
+
+func (p *OpenAI) DeanonymizeHTTPResponse(mapping *ResponseRestoreMapping, response *http.Response) error {
+	if err := restoreHTTPJSONResponse(mapping, response); err != nil {
+		return err
+	}
+	if responseID := responseIDFromHTTPResponse(response); responseID != "" {
+		p.storeResponseMapping(responseID, mapping)
+	}
+	return nil
 }
 
 func (p *OpenAI) newRun() *openAIAnonymizationRun {
@@ -654,6 +732,86 @@ func (p *OpenAI) fetchChatGPTModelEntries(ctx context.Context, headers http.Head
 		return nil, fmt.Errorf("model registry returned no models")
 	}
 	return payload.Models, nil
+}
+
+func (p *OpenAI) mappingForPayload(previousResponseID string) *ResponseRestoreMapping {
+	if strings.TrimSpace(previousResponseID) == "" {
+		return &ResponseRestoreMapping{
+			tokenToValue: make(map[string]string),
+			valueToToken: make(map[string]string),
+			nextID:       make(map[anonymizer.EntityType]int),
+		}
+	}
+	p.responseMappingsM.RLock()
+	mapping := p.responseMappings[previousResponseID]
+	p.responseMappingsM.RUnlock()
+	if mapping == nil {
+		return &ResponseRestoreMapping{
+			tokenToValue: make(map[string]string),
+			valueToToken: make(map[string]string),
+			nextID:       make(map[anonymizer.EntityType]int),
+		}
+	}
+	return mapping.Clone()
+}
+
+func (p *OpenAI) storeResponseMapping(responseID string, mapping *ResponseRestoreMapping) {
+	if strings.TrimSpace(responseID) == "" || mapping == nil || mapping.Empty() {
+		return
+	}
+	p.responseMappingsM.Lock()
+	p.responseMappings[responseID] = mapping.Clone()
+	p.responseMappingsM.Unlock()
+}
+
+func previousResponseIDFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if previousResponseID := stringMapValue(payload, "previous_response_id"); previousResponseID != "" {
+		return previousResponseID
+	}
+	response, _ := payload["response"].(map[string]any)
+	return stringMapValue(response, "previous_response_id")
+}
+
+func responseIDFromBody(body []byte) string {
+	payload, err := decodeJSONObject(body)
+	if err != nil {
+		return ""
+	}
+	return responseIDFromPayload(payload)
+}
+
+func responseIDFromHTTPResponse(response *http.Response) string {
+	if response == nil || response.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return ""
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return responseIDFromBody(body)
+}
+
+func responseIDFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if responseID := stringMapValue(payload, "response_id"); responseID != "" {
+		return responseID
+	}
+	if responseID := stringMapValue(payload, "id"); responseID != "" {
+		return responseID
+	}
+	response, _ := payload["response"].(map[string]any)
+	if responseID := stringMapValue(response, "id"); responseID != "" {
+		return responseID
+	}
+	return ""
 }
 
 func NormalizeOpenAIPath(path string) string {
@@ -967,6 +1125,28 @@ func requestProcessedEvent(counts map[anonymizer.EntityType]int) statlog.Event {
 		TotalReplacements: total,
 		Counts:            stringCounts,
 	}
+}
+
+func cloneEntityCountMap(input map[anonymizer.EntityType]int) map[anonymizer.EntityType]int {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[anonymizer.EntityType]int, len(input))
+	for entityType, count := range input {
+		cloned[entityType] = count
+	}
+	return cloned
+}
+
+func entityCountDelta(before map[anonymizer.EntityType]int, after map[anonymizer.EntityType]int) map[anonymizer.EntityType]int {
+	delta := make(map[anonymizer.EntityType]int, len(after))
+	for entityType, count := range after {
+		change := count - before[entityType]
+		if change > 0 {
+			delta[entityType] = change
+		}
+	}
+	return delta
 }
 
 func recordStatsEvent(logger zerolog.Logger, recorder StatsRecorder, event statlog.Event) {

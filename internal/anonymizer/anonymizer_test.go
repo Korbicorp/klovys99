@@ -2,6 +2,7 @@ package anonymizer
 
 import (
 	"bytes"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -146,6 +147,90 @@ func TestRunKeepsStableTokensAcrossCalls(t *testing.T) {
 	}
 	if got, want := third, "[EMAIL_1]"; got != want {
 		t.Fatalf("third output = %q, want %q", got, want)
+	}
+}
+
+func TestSQLiteStoreReusesTokensAcrossRunsAndRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.db")
+
+	store, err := NewSQLiteTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteTokenStore() error = %v", err)
+	}
+
+	engine := NewServiceWithTokenStore([]Detector{
+		staticDetector{
+			matches: []Match{
+				{Start: 0, End: 16, Type: EntityEmail, Priority: 10, Normalized: "alice@example.io"},
+			},
+		},
+	}, store)
+
+	firstRun := engine.NewRun()
+	firstOutput, _ := firstRun.Anonymize("alice@example.io")
+	if got, want := firstOutput, "[EMAIL_1]"; got != want {
+		t.Fatalf("first output = %q, want %q", got, want)
+	}
+
+	secondRun := engine.NewRun()
+	secondOutput, _ := secondRun.Anonymize("alice@example.io")
+	if got, want := secondOutput, "[EMAIL_1]"; got != want {
+		t.Fatalf("second output = %q, want %q", got, want)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error = %v", err)
+	}
+
+	reopenedStore, err := NewSQLiteTokenStore(path)
+	if err != nil {
+		t.Fatalf("reopen NewSQLiteTokenStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = reopenedStore.Close()
+	})
+
+	reopenedEngine := NewServiceWithTokenStore(nil, reopenedStore)
+	reopenedRun := reopenedEngine.NewRun()
+	restored, ok := reopenedRun.Deanonymize("Contact [EMAIL_1] for details.")
+	if !ok {
+		t.Fatal("Deanonymize() reported no replacement after reopening sqlite store")
+	}
+	if got, want := restored, "Contact alice@example.io for details."; got != want {
+		t.Fatalf("restored = %q, want %q", got, want)
+	}
+}
+
+func TestSQLiteStoreDeanonymizesTokensFromPreviousRuns(t *testing.T) {
+	store, err := NewSQLiteTokenStore(filepath.Join(t.TempDir(), "tokens.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteTokenStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	engine := NewServiceWithTokenStore([]Detector{
+		staticDetector{
+			matches: []Match{
+				{Start: 0, End: 16, Type: EntityEmail, Priority: 10, Normalized: "alice@example.io"},
+			},
+		},
+	}, store)
+
+	firstRun := engine.NewRun()
+	output, _ := firstRun.Anonymize("alice@example.io")
+	if got, want := output, "[EMAIL_1]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+
+	secondRun := engine.NewRun()
+	restored, ok := secondRun.Deanonymize("Previous response said [EMAIL_1].")
+	if !ok {
+		t.Fatal("Deanonymize() reported no replacement for token created by a previous run")
+	}
+	if got, want := restored, "Previous response said alice@example.io."; got != want {
+		t.Fatalf("restored = %q, want %q", got, want)
 	}
 }
 

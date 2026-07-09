@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -30,6 +31,7 @@ const (
 	targetEnv          = "KLOVIS_TARGET_URL"
 	anthropicTargetEnv = "KLOVIS_ANTHROPIC_TARGET_URL"
 	openaiTargetEnv    = "KLOVIS_OPENAI_TARGET_URL"
+	tokenStorePathEnv  = "KLOVIS_TOKEN_STORE_PATH"
 	proxyDebugEnv      = "KLOVIS_PROXY_DEBUG"
 	logPIIFindingsEnv  = "KLOVIS_LOG_PII_FINDINGS"
 	logToFileEnv       = "KLOVIS_LOG_TO_FILE"
@@ -43,6 +45,7 @@ const (
 	defaultStatsPath      = statlog.DefaultPath
 	defaultStatsMaxBytes  = statlog.DefaultMaxBytes
 	defaultConfigPath     = appconfig.DefaultPath
+	defaultTokenStorePath = "klovys_tokens.sqlite"
 )
 
 //go:embed dashboard/index.html dashboard/test-tool.html dashboard/assets/*
@@ -77,6 +80,7 @@ type runtimeConfig struct {
 	StatsPath       string
 	StatsMaxBytes   int64
 	ConfigPath      string
+	TokenStorePath  string
 }
 
 type application struct {
@@ -86,6 +90,7 @@ type application struct {
 	logFile       *os.File
 	statsRecorder *statlog.Recorder
 	configStore   *appconfig.Store
+	tokenStore    io.Closer
 }
 
 type anonymizationPreviewer interface {
@@ -206,9 +211,16 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
+	tokenStore, err := anonymizer.NewSQLiteTokenStore(strings.TrimSpace(config.TokenStorePath))
+	if err != nil {
+		closeLogFile(logFile)
+		return nil, err
+	}
+
 	detectorService := detectors.NewService(config.Detectors)
 	detectorResult, err := detectorService.Load(ctx)
 	if err != nil {
+		_ = tokenStore.Close()
 		closeLogFile(logFile)
 		return nil, err
 	}
@@ -216,7 +228,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	logExternalLoadStats(config.Logger, "presidio", detectorResult.Presidio)
 	config.Logger.Info().Int("detectors", len(detectorResult.Detectors)).Msg("proxy detectors loaded")
 
-	anonymizerService := anonymizer.NewServiceWithProtectionPolicy(detectorResult.Detectors, configStore)
+	anonymizerService := anonymizer.NewServiceWithProtectionPolicyAndTokenStore(detectorResult.Detectors, configStore, tokenStore)
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target: config.Target,
 		RouteTargets: map[string]*url.URL{
@@ -229,6 +241,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		LogPIIFindings: config.LogPIIFindings,
 	})
 	if err != nil {
+		_ = tokenStore.Close()
 		closeLogFile(logFile)
 		return nil, err
 	}
@@ -241,6 +254,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		logFile:       logFile,
 		statsRecorder: statsRecorder,
 		configStore:   configStore,
+		tokenStore:    tokenStore,
 	}, nil
 }
 
@@ -437,6 +451,9 @@ func (a *application) Close() {
 	if a.logFile != nil {
 		closeLogFile(a.logFile)
 	}
+	if a.tokenStore != nil {
+		_ = a.tokenStore.Close()
+	}
 }
 
 func closeLogFile(logFile *os.File) {
@@ -482,6 +499,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 		StatsPath:       defaultStatsPath,
 		StatsMaxBytes:   defaultStatsMaxBytes,
 		ConfigPath:      defaultConfigPath,
+		TokenStorePath:  envStringWithDefault(tokenStorePathEnv, defaultTokenStorePath),
 	}, nil
 }
 
