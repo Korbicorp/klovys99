@@ -2,22 +2,24 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-klovys99 is a local anonymizing proxy for coding clients such as Claude Code,
-Codex, and other OpenAI-compatible tools.
-
-It sits between the local client and the upstream provider, detects sensitive
-values in outgoing prompt payloads, replaces them with stable tokens before the
-request leaves the machine, then restores mapped values in provider responses
-on the way back. The runtime also exposes a local dashboard and a built-in test
-tool to inspect anonymization behavior, backed by regex detectors, dynamic
-Presidio and Gitleaks rules, a local NER engine, and a SQLite token store for
-stable anonymization/de-anonymization round-trips.
+- Compatible with
+  <img src="claude.webp" alt="Claude" width="16" />
+  Claude Code,
+  <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI / ChatGPT / Codex" width="16" />
+  Codex, and other
+  <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI-compatible" width="16" />
+  OpenAI-compatible clients.
+- Anonymizes sensitive values before they leave the machine, sends only tokenized
+  payloads upstream, then restores the original values locally in responses.
+- Includes a local dashboard and test tool, powered by
+  <img src="docs/readme-assets/logos/presidio.svg" alt="Presidio" width="16" />
+  Presidio,
+  <img src="docs/readme-assets/logos/gitleaks.svg" alt="Gitleaks" width="16" />
+  Gitleaks, a local NER engine, and
+  <img src="docs/readme-assets/logos/sqlite.svg" alt="SQLite" width="16" />
+  SQLite for stable anonymization and de-anonymization round-trips.
 
 ## Architecture At A Glance
-
-<p align="center">
-  <img src="klovys99.png" alt="klovys99" width="140" />
-</p>
 
 ```mermaid
 flowchart LR
@@ -79,17 +81,6 @@ flowchart LR
     classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
     class runtime klovys;
 ```
-
-<p align="center">
-  <img src="docs/readme-assets/logos/vscode.svg" alt="VS Code" width="34" />
-  <img src="docs/readme-assets/logos/anthropic.svg" alt="Claude / Anthropic" width="34" />
-  <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI / ChatGPT / Codex" width="34" />
-  <img src="docs/readme-assets/logos/gemini.svg" alt="Google Gemini" width="34" />
-  <img src="docs/readme-assets/logos/mistralai.svg" alt="Mistral AI" width="34" />
-  <img src="docs/readme-assets/logos/presidio.svg" alt="Presidio" width="34" />
-  <img src="docs/readme-assets/logos/gitleaks.svg" alt="Gitleaks" width="34" />
-  <img src="docs/readme-assets/logos/sqlite.svg" alt="SQLite" width="34" />
-</p>
 
 ## Get Started
 
