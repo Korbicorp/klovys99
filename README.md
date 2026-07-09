@@ -9,10 +9,123 @@ It is designed to sit between coding clients such as Claude Code or Codex and
 their upstream API, replacing detected personal or sensitive values with stable
 pseudonym tokens before the request leaves the machine.
 
-![Klovys99 proxy schema](schema.png)
+## Architecture At A Glance
 
-Klovys99 sits between the local client and the upstream API so prompt content
-can be anonymized before it leaves the machine.
+<table>
+  <tr>
+    <td align="center" width="22%">
+      <img src="docs/readme-assets/logos/vscode.svg" alt="VS Code" width="58" /><br />
+      <strong>VS Code clients</strong><br />
+      Claude extension<br />
+      Codex extension
+    </td>
+    <td align="center" width="10%">
+      <strong>local HTTP / WS</strong><br />
+      &#10132;
+    </td>
+    <td align="center" width="36%">
+      <img src="klovys99.png" alt="klovys99" width="104" /><br />
+      <strong>klovys99 local proxy</strong><br />
+      Sits on the developer machine and anonymizes prompts before they leave the box
+    </td>
+    <td align="center" width="10%">
+      <strong>anonymized traffic</strong><br />
+      &#10132;
+    </td>
+    <td align="center" width="22%">
+      <img src="docs/readme-assets/logos/anthropic.svg" alt="Anthropic / Claude" width="46" />
+      <img src="docs/readme-assets/logos/openai.svg" alt="OpenAI / Codex" width="46" /><br />
+      <strong>Remote APIs</strong><br />
+      Claude / Anthropic<br />
+      Codex / OpenAI-compatible
+    </td>
+  </tr>
+</table>
+
+Klovys99 sits locally between the editor client and the upstream API so only
+anonymized prompt content is sent to the remote model.
+
+<table>
+  <tr>
+    <td align="center" width="22%">
+      <img src="klovys99.png" alt="klovys99" width="96" /><br />
+      <strong>klovys99 runtime</strong><br />
+      Starts local web surfaces alongside the proxy
+    </td>
+    <td align="center" width="8%">
+      <strong>spawns</strong><br />
+      &#10132;
+    </td>
+    <td align="center" width="28%">
+      <strong>Admin UI</strong><br />
+      Dashboard<br />
+      Stats, controls, anonymization preview
+    </td>
+    <td align="center" width="8%">
+      <strong>spawns</strong><br />
+      &#10132;
+    </td>
+    <td align="center" width="34%">
+      <strong>User chat UI</strong><br />
+      <img src="docs/readme-assets/logos/gemini.svg" alt="Google Gemini" width="30" />
+      <img src="docs/readme-assets/logos/anthropic.svg" alt="Claude" width="30" />
+      <img src="docs/readme-assets/logos/openai.svg" alt="ChatGPT" width="30" />
+      <img src="docs/readme-assets/logos/mistralai.svg" alt="Mistral AI" width="30" /><br />
+      Gemini / Claude / ChatGPT / Mistral AI<br />
+      API key based today, OAuth sign-in in progress
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" width="15%">
+      <strong>Prompt in</strong><br />
+      clear-text source
+    </td>
+    <td align="center" width="8%">
+      &#10132;
+    </td>
+    <td align="center" width="39%">
+      <strong>Parallel detection engine</strong><br />
+      regex core<br />
+      <img src="docs/readme-assets/logos/presidio.svg" alt="Presidio" width="88" />
+      <img src="docs/readme-assets/logos/gitleaks.svg" alt="Gitleaks" width="36" /><br />
+      Microsoft Presidio rules + Gitleaks rules + open-source NER
+    </td>
+    <td align="center" width="8%">
+      &#8646;
+    </td>
+    <td align="center" width="30%">
+      <img src="docs/readme-assets/logos/sqlite.svg" alt="SQLite" width="44" /><br />
+      <strong>SQLite token store</strong><br />
+      Stable anon/de-anon mapping for request and response round-trips
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      &nbsp;
+    </td>
+    <td align="center">
+      <strong>Output</strong><br />
+      anonymized request upstream
+    </td>
+    <td align="center">
+      &#10132;
+    </td>
+    <td align="center">
+      <strong>Return path</strong><br />
+      restored response back to the local client
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/readme-assets/logos/gemini.svg" alt="Google Gemini" width="38" />
+  <img src="docs/readme-assets/logos/anthropic.svg" alt="Claude" width="38" />
+  <img src="docs/readme-assets/logos/openai.svg" alt="ChatGPT / Codex" width="38" />
+  <img src="docs/readme-assets/logos/mistralai.svg" alt="Mistral AI" width="38" />
+</p>
 
 ## Get Started
 
