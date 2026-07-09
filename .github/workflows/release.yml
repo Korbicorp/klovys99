@@ -169,10 +169,13 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Publish npm package
-        if: ${{ secrets.NPM_TOKEN_KLOVYS != '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_KLOVYS }}
         run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "NPM_TOKEN_KLOVYS is not configured, skipping npm publish"
+            exit 0
+          fi
           if [[ "$GITHUB_REF" == refs/heads/main ]]; then
             base_version=$(node -p "require('./package.json').version")
             package_version="${base_version}-main.${GITHUB_RUN_NUMBER}"
