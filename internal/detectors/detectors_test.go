@@ -62,6 +62,37 @@ func TestDefaultDetectorsAnonymizeCoreEntities(t *testing.T) {
 	}
 }
 
+func TestIPDetectorIgnoresBareIPv6UnspecifiedAndCodePaths(t *testing.T) {
+	input := strings.Join([]string{
+		"Rust type std::string and foo::bar",
+		"module core::option::Option",
+		"separator :: should remain visible",
+	}, "\n")
+
+	output, result := anonymize(t, input, false)
+
+	if output != input {
+		t.Fatalf("output = %q, want original %q", output, input)
+	}
+	if _, ok := result.Stats[anonymizer.EntityIP]; ok {
+		t.Fatalf("ip should not be counted for code paths or bare :: %#v", result.Stats)
+	}
+}
+
+func TestIPDetectorKeepsValidIPv4AndIPv6Coverage(t *testing.T) {
+	input := "IPs: 3.1.1.1, 127.0.0.1:8080, 192.168.1.42, 2001:db8::1, ::1, fe80::1"
+
+	output, result := anonymize(t, input, false)
+
+	want := "IPs: [IP_1], [IP_2]:8080, [IP_3], [IP_4], [IP_5], [IP_6]"
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
+	}
+	if got, want := result.Stats[anonymizer.EntityIP].Count, 6; got != want {
+		t.Fatalf("ip count = %d, want %d", got, want)
+	}
+}
+
 func TestNameDetectionRequiresExplicitLabel(t *testing.T) {
 	output, result := anonymize(t, "Jean Dupont a envoye un message.", false)
 

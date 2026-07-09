@@ -253,11 +253,13 @@ func (p *OpenAI) HandleWebSocket(writer http.ResponseWriter, request *http.Reque
 		p.closeWebSocket(clientConn, websocket.CloseUnsupportedData, "first frame must be text")
 		return
 	}
+	p.logTrafficFrame("request", "before_anonymization", firstMessage)
 	firstMessage, stats, findings, err := p.anonymizeWebSocketFrame(firstMessage)
 	if err != nil {
 		p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 		return
 	}
+	p.logTrafficFrame("request", "after_anonymization", firstMessage)
 	p.recordAnonymizedStats(stats, findings)
 
 	upstreamURL, upstreamHeaders := p.upstreamWebSocket(request)
@@ -292,11 +294,13 @@ func (p *OpenAI) relayClientToUpstream(clientConn, upstreamConn *websocket.Conn,
 			p.closeWebSocket(clientConn, websocket.CloseUnsupportedData, "client frames must be text")
 			return
 		}
+		p.logTrafficFrame("request", "before_anonymization", message)
 		anonymized, stats, findings, err := p.anonymizeWebSocketFrame(message)
 		if err != nil {
 			p.closeWebSocket(clientConn, websocket.ClosePolicyViolation, "invalid sensitive frame")
 			return
 		}
+		p.logTrafficFrame("request", "after_anonymization", anonymized)
 		p.recordAnonymizedStats(stats, findings)
 		if err := upstreamConn.WriteMessage(websocket.TextMessage, anonymized); err != nil {
 			return
@@ -311,10 +315,21 @@ func (p *OpenAI) relayUpstreamToClient(clientConn, upstreamConn *websocket.Conn,
 		if err != nil {
 			return
 		}
+		if messageType == websocket.TextMessage {
+			p.logTrafficFrame("response", "raw", message)
+		}
 		if err := clientConn.WriteMessage(messageType, message); err != nil {
 			return
 		}
 	}
+}
+
+func (p *OpenAI) logTrafficFrame(direction, stage string, body []byte) {
+	p.logger.Debug().
+		Str("direction", direction).
+		Str("stage", stage).
+		Str("body", string(body)).
+		Msg("traffic body")
 }
 
 func (p *OpenAI) closeWebSocket(conn *websocket.Conn, code int, reason string) {
@@ -738,7 +753,7 @@ func encodeJSON(value any) ([]byte, error) {
 
 func isOpenAIMetadataKey(key string) bool {
 	switch key {
-	case "id", "model", "name", "role", "type", "tool_call_id", "call_id", "status":
+	case "id", "model", "name", "role", "type", "tool_call_id", "call_id", "status", "encrypted_content":
 		return true
 	default:
 		return false
