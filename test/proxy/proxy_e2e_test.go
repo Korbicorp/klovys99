@@ -99,7 +99,7 @@ func TestProxyReplaysClaudeCodeCapturedRequest(t *testing.T) {
 		t.Fatalf("upstream query = %q, want %q", upstreamRawQuery, expected.RawQuery)
 	}
 	assertExpectedHeaders(t, upstreamHeaders, expected.Headers)
-	assertJSONEqual(t, upstreamBody, expected.Body)
+	assertJSONEqual(t, upstreamBody, normalizeExpectedAnthropicBody(t, expected.Path, expected.Body))
 
 	for _, redactedValue := range expected.RedactedValues {
 		if !strings.Contains(captured.Body, redactedValue) {
@@ -168,6 +168,26 @@ func assertJSONEqual(t *testing.T, actual string, expected string) {
 	if diff := firstJSONDiff("$", actualValue, expectedValue); diff != "" {
 		t.Fatalf("upstream JSON body does not match expected body: %s", diff)
 	}
+}
+
+func normalizeExpectedAnthropicBody(t *testing.T, path string, body string) string {
+	t.Helper()
+
+	if path != "/v1/messages" {
+		return body
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("unmarshal expected anthropic body: %v", err)
+	}
+	payload["stream"] = false
+
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal expected anthropic body: %v", err)
+	}
+	return string(normalized)
 }
 
 func firstJSONDiff(path string, actual any, expected any) string {

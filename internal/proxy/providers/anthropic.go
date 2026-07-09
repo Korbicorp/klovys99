@@ -81,11 +81,21 @@ func (p *Anthropic) ShouldAnonymizeHTTP(request *http.Request) bool {
 	}
 }
 
-func (p *Anthropic) AnonymizeHTTPRequest(ctx context.Context, logger zerolog.Logger, body []byte) (AnonymizeResult, error) {
-	return p.Anonymize(ctx, logger, body), nil
+func (p *Anthropic) AnonymizeHTTPRequest(request *http.Request, logger zerolog.Logger, body []byte) (AnonymizeResult, error) {
+	forceStreamFalse := false
+	ctx := context.Background()
+	if request != nil {
+		ctx = request.Context()
+		forceStreamFalse = p.requestPath(request.URL.Path) == "/v1/messages"
+	}
+	return p.anonymizeBody(ctx, logger, body, forceStreamFalse), nil
 }
 
 func (p *Anthropic) Anonymize(ctx context.Context, logger zerolog.Logger, body []byte) AnonymizeResult {
+	return p.anonymizeBody(ctx, logger, body, false)
+}
+
+func (p *Anthropic) anonymizeBody(ctx context.Context, logger zerolog.Logger, body []byte, forceStreamFalse bool) AnonymizeResult {
 	_ = ctx
 	var payload any
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -101,20 +111,47 @@ func (p *Anthropic) Anonymize(ctx context.Context, logger zerolog.Logger, body [
 	run := p.newRun()
 	run.readToolIDs = collectAnthropicReadToolIDs(payload)
 	anonymized, changed := run.anonymizeRequestValue(payload, anthropicContext{})
-	if !changed {
-		return AnonymizeResult{Body: body, Stats: run.stats, Findings: run.findings}
+	if forceStreamFalse {
+		changed = forceAnthropicNonStreaming(payload) || changed
 	}
-	logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
+	if !changed {
+		return AnonymizeResult{Body: body, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}
+	}
+	if len(run.stats) > 0 {
+		logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
+	}
 
 	output, err := encodeJSON(anonymized)
 	if err != nil {
 		return AnonymizeResult{Body: body}
 	}
 	return AnonymizeResult{
-		Body:     output,
-		Stats:    run.stats,
-		Findings: run.findings,
+		Body:           output,
+		RestoreMapping: NewResponseRestoreMapping(run.findings),
+		Stats:          run.stats,
+		Findings:       run.findings,
 	}
+}
+
+func forceAnthropicNonStreaming(payload any) bool {
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	if current, ok := root["stream"].(bool); ok && !current {
+		return false
+	}
+	root["stream"] = false
+	return true
+}
+
+func (p *Anthropic) DeanonymizeHTTPResponse(mapping *ResponseRestoreMapping, response *http.Response) error {
+	return restoreHTTPJSONResponseWithDebug(
+		mapping,
+		response,
+		"[anthropic raw response]",
+		"[anthropic restored response]",
+	)
 }
 
 func (p *Anthropic) requestPath(path string) string {

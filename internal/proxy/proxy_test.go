@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -102,8 +105,9 @@ func TestProxyForwardsRequestAndResponse(t *testing.T) {
 	if upstreamHeader != "2023-06-01" {
 		t.Fatalf("upstream anthropic-version = %q, want 2023-06-01", upstreamHeader)
 	}
-	if upstreamBody != requestBody {
-		t.Fatalf("upstream body = %q, want %q", upstreamBody, requestBody)
+	expectedUpstreamBody := `{"model":"claude","messages":[{"role":"user","content":"secret prompt"}],"stream":false}`
+	if diff := firstJSONDiff("$", decodeJSONValue(t, "upstream body", upstreamBody), decodeJSONValue(t, "expected upstream body", expectedUpstreamBody)); diff != "" {
+		t.Fatalf("upstream JSON body does not match expected body: %s", diff)
 	}
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("response status = %d, want %d", response.StatusCode, http.StatusCreated)
@@ -222,6 +226,161 @@ func TestProxyAnonymizesPrefixedAnthropicMessagesRequests(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"EMAIL":1`) {
 		t.Fatalf("logs = %q, want anonymized stats", logs.String())
+	}
+}
+
+func TestProxyForcesNonStreamingAnthropicMessagesRequests(t *testing.T) {
+	var upstreamBody string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, upstream.URL),
+		RouteTargets: map[string]*url.URL{
+			AnthropicRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:     ptrLogger(zerolog.Nop()),
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	response.Body.Close()
+
+	if !strings.Contains(upstreamBody, `"stream":false`) {
+		t.Fatalf("upstream body = %q, want stream forced to false", upstreamBody)
+	}
+}
+
+func TestProxyDeanonymizesAnthropicResponses(t *testing.T) {
+	var upstreamBody string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		token := extractToken(t, upstreamBody, `Email ([^"]+)`)
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(fmt.Sprintf(`{"content":[{"type":"text","text":"Response for %s"}]}`, token)))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, upstream.URL),
+		Logger: ptrLogger(zerolog.Nop()),
+		Anonymizer: anonymizer.NewService([]anonymizer.Detector{
+			literalDetector{entityType: anonymizer.EntityEmail, value: "alice@example.com"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read proxy response body: %v", err)
+	}
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want anonymized request", upstreamBody)
+	}
+	if got := string(body); !strings.Contains(got, "alice@example.com") {
+		t.Fatalf("response body = %q, want restored email", got)
+	}
+}
+
+func TestProxyDeanonymizesGzippedAnthropicResponses(t *testing.T) {
+	var upstreamBody string
+	var upstreamAcceptEncoding string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		upstreamAcceptEncoding = request.Header.Get("Accept-Encoding")
+		token := extractToken(t, upstreamBody, `Email ([^"]+)`)
+
+		var compressed bytes.Buffer
+		gzipWriter := gzip.NewWriter(&compressed)
+		if _, err := gzipWriter.Write([]byte(fmt.Sprintf(`{"content":[{"type":"text","text":"Response for %s"}]}`, token))); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+		if err := gzipWriter.Close(); err != nil {
+			t.Fatalf("gzip close: %v", err)
+		}
+
+		writer.Header().Set("content-type", "application/json")
+		writer.Header().Set("content-encoding", "gzip")
+		_, _ = writer.Write(compressed.Bytes())
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, upstream.URL),
+		Logger: ptrLogger(zerolog.Nop()),
+		Anonymizer: anonymizer.NewService([]anonymizer.Detector{
+			literalDetector{entityType: anonymizer.EntityEmail, value: "alice@example.com"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{"messages":[{"role":"user","content":"Email alice@example.com"}]}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	request.Header.Set("Accept-Encoding", "gzip")
+
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read proxy response body: %v", err)
+	}
+	if upstreamAcceptEncoding != "gzip" {
+		t.Fatalf("upstream accept-encoding = %q, want gzip from automatic transport decompression", upstreamAcceptEncoding)
+	}
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want anonymized request", upstreamBody)
+	}
+	if got := string(body); !strings.Contains(got, "alice@example.com") {
+		t.Fatalf("response body = %q, want restored email", got)
 	}
 }
 
@@ -682,6 +841,96 @@ func TestProxyAnonymizesOpenAIResponsesRequests(t *testing.T) {
 	}
 }
 
+func TestProxyRestoresOpenAIResponsePlaceholdersAcrossRuns(t *testing.T) {
+	var upstreamBodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBodies = append(upstreamBodies, string(body))
+
+		writer.Header().Set("content-type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+		switch len(upstreamBodies) {
+		case 1:
+			_, _ = writer.Write([]byte(`{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Reply to [EMAIL_1]"}]}]}`))
+		case 2:
+			_, _ = writer.Write([]byte(`{"id":"resp_2","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Reply to [EMAIL_1] and [PHONE_1]"}]}]}`))
+		default:
+			t.Fatalf("unexpected upstream call %d", len(upstreamBodies))
+		}
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:     ptrLogger(zerolog.Nop()),
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	firstResponse, err := server.Client().Post(
+		server.URL+"/v1/responses",
+		"application/json",
+		strings.NewReader(`{"model":"gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"Email alice@example.com"}]}]}`),
+	)
+	if err != nil {
+		t.Fatalf("call first proxy request: %v", err)
+	}
+	defer firstResponse.Body.Close()
+
+	firstBody, err := io.ReadAll(firstResponse.Body)
+	if err != nil {
+		t.Fatalf("read first proxy response: %v", err)
+	}
+	if strings.Contains(string(firstBody), "[EMAIL_1]") || !strings.Contains(string(firstBody), "alice@example.com") {
+		t.Fatalf("first response body = %q, want restored email placeholder", firstBody)
+	}
+
+	secondResponse, err := server.Client().Post(
+		server.URL+"/v1/responses",
+		"application/json",
+		strings.NewReader(`{"model":"gpt-5.4","previous_response_id":"resp_1","input":[{"role":"user","content":[{"type":"input_text","text":"Phone 06 12 34 56 78"}]}]}`),
+	)
+	if err != nil {
+		t.Fatalf("call second proxy request: %v", err)
+	}
+	defer secondResponse.Body.Close()
+
+	secondBody, err := io.ReadAll(secondResponse.Body)
+	if err != nil {
+		t.Fatalf("read second proxy response: %v", err)
+	}
+	if strings.Contains(string(secondBody), "[EMAIL_1]") || strings.Contains(string(secondBody), "[PHONE_1]") {
+		t.Fatalf("second response body = %q, want restored placeholders", secondBody)
+	}
+	if !strings.Contains(string(secondBody), "alice@example.com") || !strings.Contains(string(secondBody), "06 12 34 56 78") {
+		t.Fatalf("second response body = %q, want restored prior and current values", secondBody)
+	}
+
+	if len(upstreamBodies) != 2 {
+		t.Fatalf("upstream calls = %d, want 2", len(upstreamBodies))
+	}
+	if strings.Contains(upstreamBodies[0], "alice@example.com") || !strings.Contains(upstreamBodies[0], "[EMAIL_1]") {
+		t.Fatalf("first upstream body = %q, want anonymized email", upstreamBodies[0])
+	}
+	if !strings.Contains(upstreamBodies[1], `"previous_response_id":"resp_1"`) {
+		t.Fatalf("second upstream body = %q, want previous response id", upstreamBodies[1])
+	}
+	if strings.Contains(upstreamBodies[1], "06 12 34 56 78") || !strings.Contains(upstreamBodies[1], "[PHONE_1]") {
+		t.Fatalf("second upstream body = %q, want anonymized phone", upstreamBodies[1])
+	}
+}
+
 func TestProxyLogsOpenAIPIIFindingsWhenEnabled(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusOK)
@@ -731,6 +980,56 @@ func TestProxyLogsOpenAIPIIFindingsWhenEnabled(t *testing.T) {
 	}
 	if strings.Contains(logOutput, `"body":`) || strings.Contains(logOutput, `"stage":"before_anonymization"`) || strings.Contains(logOutput, `"stage":"after_anonymization"`) {
 		t.Fatalf("logs = %q, want findings without full traffic bodies", logOutput)
+	}
+}
+
+func TestProxyDeanonymizesOpenAIResponses(t *testing.T) {
+	var upstreamBody string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		upstreamBody = string(body)
+		token := extractToken(t, upstreamBody, `Email ([^"]+)`)
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(fmt.Sprintf(`{"output":[{"type":"message","content":[{"type":"output_text","text":"Echo %s"}]}]}`, token)))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger: ptrLogger(zerolog.Nop()),
+		Anonymizer: anonymizer.NewService([]anonymizer.Detector{
+			literalDetector{entityType: anonymizer.EntityEmail, value: "alice@example.com"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"input":"Email alice@example.com"}`))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read proxy response body: %v", err)
+	}
+	if strings.Contains(upstreamBody, "alice@example.com") {
+		t.Fatalf("upstream body = %q, want anonymized request", upstreamBody)
+	}
+	if got := string(body); !strings.Contains(got, "alice@example.com") {
+		t.Fatalf("response body = %q, want restored email", got)
 	}
 }
 
@@ -1036,6 +1335,230 @@ func TestProxyRelaysAndAnonymizesCodexResponsesWebSocket(t *testing.T) {
 	}
 }
 
+func TestProxyRelaysAndDeanonymizesCodexResponsesWebSocket(t *testing.T) {
+	var upstreamFrame string
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(writer, request, nil)
+		if err != nil {
+			t.Fatalf("upstream upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("upstream read: %v", err)
+		}
+		upstreamFrame = string(message)
+		token := extractToken(t, upstreamFrame, `Email ([^"]+)`)
+		reply := fmt.Sprintf(`{"response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Back %s"}]}]}}`, token)
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(reply)); err != nil {
+			t.Fatalf("upstream write: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger: ptrLogger(zerolog.Nop()),
+		Anonymizer: anonymizer.NewService([]anonymizer.Detector{
+			literalDetector{entityType: anonymizer.EntityEmail, value: "alice@example.com"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer sk-test")
+	header.Set("Sec-WebSocket-Protocol", "realtime")
+	conn, _, err := websocket.DefaultDialer.Dial(httpToWS(server.URL)+"/v1/responses", header)
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer conn.Close()
+
+	frame := `{"type":"response.create","response":{"instructions":"Email alice@example.com"}}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		t.Fatalf("write proxy websocket: %v", err)
+	}
+	_, responseMessage, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read proxy websocket: %v", err)
+	}
+
+	if strings.Contains(upstreamFrame, "alice@example.com") {
+		t.Fatalf("upstream frame = %q, want anonymized request", upstreamFrame)
+	}
+	if got := string(responseMessage); !strings.Contains(got, "alice@example.com") {
+		t.Fatalf("proxy websocket response = %q, want restored email", got)
+	}
+}
+
+func TestProxyRestoresCodexResponsesWebSocketPlaceholders(t *testing.T) {
+	var upstreamFrame string
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(writer, request, nil)
+		if err != nil {
+			t.Fatalf("upstream upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("upstream read: %v", err)
+		}
+		upstreamFrame = string(message)
+
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"Email [EMAIL_1]"}`)); err != nil {
+			t.Fatalf("upstream write delta: %v", err)
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_ws_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Final [EMAIL_1]"}]}]}}`)); err != nil {
+			t.Fatalf("upstream write completed: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:     ptrLogger(zerolog.Nop()),
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(httpToWS(server.URL)+"/v1/responses", http.Header{})
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer conn.Close()
+
+	frame := `{"type":"response.create","response":{"input":[{"role":"user","content":[{"type":"input_text","text":"Email alice@example.com"}]}]}}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		t.Fatalf("write proxy websocket: %v", err)
+	}
+
+	_, deltaMessage, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read proxy websocket delta: %v", err)
+	}
+	if strings.Contains(string(deltaMessage), "[EMAIL_1]") || !strings.Contains(string(deltaMessage), "alice@example.com") {
+		t.Fatalf("proxy websocket delta = %q, want restored email", deltaMessage)
+	}
+
+	_, completedMessage, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read proxy websocket completed: %v", err)
+	}
+	if strings.Contains(string(completedMessage), "[EMAIL_1]") || !strings.Contains(string(completedMessage), "alice@example.com") {
+		t.Fatalf("proxy websocket completed = %q, want restored email", completedMessage)
+	}
+
+	if strings.Contains(upstreamFrame, "alice@example.com") || !strings.Contains(upstreamFrame, "[EMAIL_1]") {
+		t.Fatalf("upstream frame = %q, want anonymized email", upstreamFrame)
+	}
+}
+
+func TestProxyRestoresCodexResponsesWebSocketPlaceholdersAcrossFrames(t *testing.T) {
+	var upstreamFrames []string
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(writer, request, nil)
+		if err != nil {
+			t.Fatalf("upstream upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		_, firstMessage, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("upstream first read: %v", err)
+		}
+		upstreamFrames = append(upstreamFrames, string(firstMessage))
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_ws_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"First [EMAIL_1]"}]}]}}`)); err != nil {
+			t.Fatalf("upstream first write: %v", err)
+		}
+
+		_, secondMessage, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("upstream second read: %v", err)
+		}
+		upstreamFrames = append(upstreamFrames, string(secondMessage))
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_ws_2","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Second [EMAIL_1] [PHONE_1]"}]}]}}`)); err != nil {
+			t.Fatalf("upstream second write: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:     ptrLogger(zerolog.Nop()),
+		Anonymizer: newTestAnonymizer(),
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(httpToWS(server.URL)+"/v1/responses", http.Header{})
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer conn.Close()
+
+	firstFrame := `{"type":"response.create","response":{"input":[{"role":"user","content":[{"type":"input_text","text":"Email alice@example.com"}]}]}}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(firstFrame)); err != nil {
+		t.Fatalf("write first proxy websocket frame: %v", err)
+	}
+	_, firstResponse, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read first proxy websocket response: %v", err)
+	}
+	if strings.Contains(string(firstResponse), "[EMAIL_1]") || !strings.Contains(string(firstResponse), "alice@example.com") {
+		t.Fatalf("first proxy websocket response = %q, want restored email", firstResponse)
+	}
+
+	secondFrame := `{"type":"response.create","previous_response_id":"resp_ws_1","response":{"input":[{"role":"user","content":[{"type":"input_text","text":"Phone 06 12 34 56 78"}]}]}}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(secondFrame)); err != nil {
+		t.Fatalf("write second proxy websocket frame: %v", err)
+	}
+	_, secondResponse, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read second proxy websocket response: %v", err)
+	}
+	if strings.Contains(string(secondResponse), "[EMAIL_1]") || strings.Contains(string(secondResponse), "[PHONE_1]") {
+		t.Fatalf("second proxy websocket response = %q, want restored placeholders", secondResponse)
+	}
+	if !strings.Contains(string(secondResponse), "alice@example.com") || !strings.Contains(string(secondResponse), "06 12 34 56 78") {
+		t.Fatalf("second proxy websocket response = %q, want restored email and phone", secondResponse)
+	}
+
+	if len(upstreamFrames) != 2 {
+		t.Fatalf("upstream frames = %d, want 2", len(upstreamFrames))
+	}
+	if strings.Contains(upstreamFrames[0], "alice@example.com") || !strings.Contains(upstreamFrames[0], "[EMAIL_1]") {
+		t.Fatalf("first upstream frame = %q, want anonymized email", upstreamFrames[0])
+	}
+	if strings.Contains(upstreamFrames[1], "06 12 34 56 78") || !strings.Contains(upstreamFrames[1], "[PHONE_1]") {
+		t.Fatalf("second upstream frame = %q, want anonymized phone", upstreamFrames[1])
+	}
+}
+
 func TestProxyAnonymizesMessagesCountTokensRequests(t *testing.T) {
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -1273,6 +1796,16 @@ func httpToWS(value string) string {
 	return "ws" + strings.TrimPrefix(value, "http")
 }
 
+func extractToken(t *testing.T, input string, pattern string) string {
+	t.Helper()
+
+	matches := regexp.MustCompile(pattern).FindStringSubmatch(input)
+	if len(matches) != 2 {
+		t.Fatalf("input %q did not match token pattern %q", input, pattern)
+	}
+	return matches[1]
+}
+
 func mustParseURL(t *testing.T, value string) *url.URL {
 	t.Helper()
 
@@ -1281,6 +1814,66 @@ func mustParseURL(t *testing.T, value string) *url.URL {
 		t.Fatalf("parse URL: %v", err)
 	}
 	return parsed
+}
+
+func decodeJSONValue(t *testing.T, label string, input string) any {
+	t.Helper()
+
+	decoder := json.NewDecoder(strings.NewReader(input))
+	decoder.UseNumber()
+
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		t.Fatalf("decode %s: %v", label, err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("decode %s: trailing data", label)
+	}
+	return value
+}
+
+func firstJSONDiff(path string, actual any, expected any) string {
+	switch expectedTyped := expected.(type) {
+	case map[string]any:
+		actualTyped, ok := actual.(map[string]any)
+		if !ok {
+			return fmt.Sprintf("%s actual type %T, want object", path, actual)
+		}
+		for key, expectedValue := range expectedTyped {
+			actualValue, ok := actualTyped[key]
+			if !ok {
+				return fmt.Sprintf("%s.%s missing", path, key)
+			}
+			if diff := firstJSONDiff(path+"."+key, actualValue, expectedValue); diff != "" {
+				return diff
+			}
+		}
+		for key := range actualTyped {
+			if _, ok := expectedTyped[key]; !ok {
+				return fmt.Sprintf("%s.%s unexpected", path, key)
+			}
+		}
+		return ""
+	case []any:
+		actualTyped, ok := actual.([]any)
+		if !ok {
+			return fmt.Sprintf("%s actual type %T, want array", path, actual)
+		}
+		if len(actualTyped) != len(expectedTyped) {
+			return fmt.Sprintf("%s length = %d, want %d", path, len(actualTyped), len(expectedTyped))
+		}
+		for index, expectedValue := range expectedTyped {
+			if diff := firstJSONDiff(fmt.Sprintf("%s[%d]", path, index), actualTyped[index], expectedValue); diff != "" {
+				return diff
+			}
+		}
+		return ""
+	default:
+		if !reflect.DeepEqual(actual, expected) {
+			return fmt.Sprintf("%s = %#v, want %#v", path, actual, expected)
+		}
+		return ""
+	}
 }
 
 type literalDetector struct {
