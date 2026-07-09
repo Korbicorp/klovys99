@@ -129,27 +129,46 @@ anonymized prompt content is sent to the remote model.
 
 ## Get Started
 
-If you cloned this repository, start with these commands from the repository
-root:
+> **npm install is currently broken.** Until it is fixed, run klovys99 from
+> source: start the app manually with Go and start the GLiNER sidecar with
+> Docker, as described below.
 
-1. Install the package and the local CLI.
+The simplest way to start everything (GLiNER sidecar + proxy) in one command:
 
 ```sh
-npm install
+./scripts/dev-start.sh
 ```
 
-2. Configure the client you want to route through Klovys99. Run one of:
+This builds the GLiNER Docker image, downloads the pinned model on first run,
+starts the sidecar container, and then runs `go run ./cmd/klovys99`.
+
+If you prefer to run the steps yourself from the repository root:
+
+1. Build and start the GLiNER sidecar with Docker.
 
 ```sh
-npm run cli -- configure codex
-npm run cli -- configure claude
-npm run cli -- configure both
+docker build -t klovys99-gliner:local sidecar/gliner
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e GLINER_MODEL=urchade/gliner_multi_pii-v1 \
+  -e GLINER_MODEL_REVISION=1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d \
+  -e GLINER_MODEL_DIR=/models/model \
+  -e HOME=/tmp -e XDG_CACHE_HOME=/tmp/.cache -e HF_HOME=/tmp/.cache/huggingface \
+  -v "$HOME/.klovys99/gliner:/models" \
+  klovys99-gliner:local python /app/install_model.py
+KLOVIS_GLINER_MODEL=urchade/gliner_multi_pii-v1 \
+KLOVIS_GLINER_MODEL_REVISION=1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d \
+KLOVIS_GLINER_DATA_DIR="$HOME/.klovys99/gliner" \
+  docker compose -f sidecar/gliner/compose.yaml up -d --no-build
 ```
 
-3. Start the local proxy.
+2. Start the local proxy with Go, pointing it at the sidecar you just started.
 
 ```sh
-npm run cli -- start
+KLOVIS_GLINER_MODE=full \
+KLOVIS_GLINER_URL=http://127.0.0.1:8091 \
+KLOVIS_GLINER_MODEL=urchade/gliner_multi_pii-v1 \
+KLOVIS_GLINER_MODEL_REVISION=1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d \
+  go run ./cmd/klovys99
 ```
 
 Klovys99 listens on `http://127.0.0.1:8080` by default and exposes:
@@ -158,36 +177,18 @@ Klovys99 listens on `http://127.0.0.1:8080` by default and exposes:
 - `http://127.0.0.1:8080/openai/v1` for Codex and other OpenAI-compatible
   clients
 
-If you installed the published npm package instead of cloning this repository,
-use the same flow with `npx klovys99`:
+The historical unprefixed route also still exists and forwards to
+`KLOVIS_TARGET_URL`, which defaults to `https://api.anthropic.com`.
 
-```sh
-npx klovys99 configure both
-npx klovys99 start
-```
-
-The historical command name `npx klovis` still works. The historical unprefixed
-route also still exists and forwards to `KLOVIS_TARGET_URL`, which defaults to
-`https://api.anthropic.com`.
-
-If you want the install step to also update your client configuration
-immediately:
-
-```sh
-KLOVIS_CLIENT=claude npm install
-```
-
-Supported values are `codex`, `claude`, and `both`.
+3. Point your client at the proxy manually — see
+   [Client Configuration](#client-configuration) below, since the
+   `configure` CLI helper is part of the currently broken npm flow.
 
 ## Features
 
 - Local reverse proxy for Anthropic and OpenAI-compatible JSON requests.
-- `npm install` workflow that downloads a prebuilt binary for the current OS
-  and architecture and exposes a `klovys99` command.
-- Client configuration helpers for Codex and Claude Code.
 - Built-in deterministic detectors for common PII and sensitive identifiers.
-- Local GLiNER sidecar enabled by default through the standard `klovys99 start`
-  flow, with explicit `full` and `off` modes.
+- Local GLiNER Docker sidecar with explicit `full` and `off` modes.
 - Dynamic detector loading from the official Gitleaks and Microsoft Presidio
   rule sources.
 - Stable pseudonym tokens for the lifetime of the proxy process.
@@ -197,65 +198,41 @@ Supported values are `codex`, `claude`, and `both`.
 
 ## Requirements
 
-- Node.js 18 or newer.
+- Go 1.25 or newer.
+- Docker Desktop or Docker Engine, to run the GLiNER sidecar.
 - Network access on first startup to download the default Gitleaks and Presidio
-  rule sources.
+  rule sources, and the pinned GLiNER model.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
   client you route through Klovys99.
-- Docker Desktop or Docker Engine when you use the standard GLiNER-backed
-  startup flow.
-
-Go 1.25 or newer is only required if you work from a source checkout or build
-release binaries yourself.
 
 Check your local tooling:
 
 ```sh
-node -v
-npm -v
 go version
+docker version
 ```
 
 ## Installation
 
-From the repository root:
+npm installation is currently broken. Build and run from source instead:
 
 ```sh
-npm install
+git clone https://github.com/Korbicorp/klovys99.git
+cd klovys99
+go build -o klovys99 ./cmd/klovys99
 ```
 
-If you are installing the published package instead of working from a checkout:
-
-```sh
-npm install klovys99
-```
-
-The install step downloads the matching binary from the GitHub release for the
-package version into `dist/` and exposes the CLI entrypoints `klovys99` and
-`klovis`. `klovys99` is the preferred name and `klovis` remains available for
-compatibility.
-
-Supported prebuilt targets:
-
-- macOS `arm64`
-- macOS `x64`
-- Linux `arm64`
-- Linux `x64`
-- Windows `arm64`
-- Windows `x64`
+See [Get Started](#get-started) for how to run it alongside the GLiNER
+sidecar.
 
 ## Client Configuration
 
-Examples below use the published CLI form. From a local repository checkout,
-replace `npx klovys99` with `npm run cli --`.
+The `configure` CLI helper is part of the currently broken npm flow. Point
+your client at the proxy by editing its config file directly.
 
 ### Codex
 
-```sh
-npx klovys99 configure codex
-```
-
-This updates `~/.codex/config.toml` and sets:
+Edit `~/.codex/config.toml` and set:
 
 ```toml
 openai_base_url = "http://127.0.0.1:8080/openai/v1"
@@ -263,11 +240,7 @@ openai_base_url = "http://127.0.0.1:8080/openai/v1"
 
 ### Claude Code
 
-```sh
-npx klovys99 configure claude
-```
-
-This updates `~/.claude/settings.json` and sets:
+Edit `~/.claude/settings.json` and set:
 
 ```json
 {
@@ -277,11 +250,8 @@ This updates `~/.claude/settings.json` and sets:
 }
 ```
 
-If you want another listen URL written into both clients, pass `--base-url`:
-
-```sh
-npx klovys99 configure both --base-url http://127.0.0.1:9090
-```
+If klovys99 listens on another address, use that instead of
+`127.0.0.1:8080` in either snippet.
 
 ## Quick API Checks
 
@@ -358,8 +328,7 @@ Klovys99 runtime is configured with environment variables.
 
 ### Contextual GLiNER protection modes
 
-The standard `klovys99 start` flow now starts with GLiNER in `full` mode by
-default. The raw Go binary keeps `off` unless you set `KLOVIS_GLINER_MODE`
+The Go binary keeps GLiNER `off` unless you set `KLOVIS_GLINER_MODE=full`
 yourself. Two modes are available and explicit:
 
 - `full`: all configured contextual labels.
@@ -370,25 +339,12 @@ The default pinned model identity is:
 - model: `urchade/gliner_multi_pii-v1`
 - revision: `1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d`
 
-You can pre-install or refresh the pinned model explicitly:
-
-```sh
-npx klovys99 gliner install \
-  --model urchade/gliner_multi_pii-v1 \
-  --revision 1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d
-```
-
-The standard startup commands are:
-
-```sh
-npx klovys99 start
-npx klovys99 start --gliner-mode off
-```
-
-When `full` is selected, the npm wrapper ensures that the pinned model is
-installed locally under `~/.klovys99/gliner`, starts the local sidecar on
-`127.0.0.1:8091`, and then launches the Go proxy. `off` skips the sidecar
-entirely and runs the regex-only proxy.
+`./scripts/dev-start.sh` builds the sidecar image, installs this pinned model
+under `~/.klovys99/gliner` on first run, starts the sidecar on
+`127.0.0.1:8091`, and then launches the Go proxy in `full` mode — see
+[Get Started](#get-started) for the equivalent manual `docker` steps. Skip the
+sidecar entirely and run `go run ./cmd/klovys99` on its own to stay in
+regex-only (`off`) mode.
 
 The `full` mode requests:
 
@@ -404,35 +360,24 @@ A sample direct sidecar latency benchmark is available in [docs/benchmarks/gline
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `KLOVIS_GLINER_MODE` | `off` | Explicit contextual mode for the raw Go binary: `full` or `off`. The npm `klovys99 start` wrapper injects `full` by default. |
+| `KLOVIS_GLINER_MODE` | `off` | Explicit contextual mode for the Go binary: `full` or `off`. |
 | `KLOVIS_GLINER_ENABLED` | deprecated | Legacy bool compatibility shim. Prefer `KLOVIS_GLINER_MODE`. |
 | `KLOVIS_GLINER_URL` | `http://127.0.0.1:8091` | Loopback sidecar URL; non-loopback URLs are rejected. |
-| `KLOVIS_GLINER_MODEL` | `urchade/gliner_multi_pii-v1` | Exact model identifier used by the npm wrapper or direct env config. |
-| `KLOVIS_GLINER_MODEL_REVISION` | `1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d` | Immutable revision/digest used by the npm wrapper or direct env config. |
+| `KLOVIS_GLINER_MODEL` | `urchade/gliner_multi_pii-v1` | Exact model identifier. |
+| `KLOVIS_GLINER_MODEL_REVISION` | `1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d` | Immutable revision/digest. |
 | `KLOVIS_GLINER_TIMEOUT` | `5s` | Per-batch deadline. |
 | `KLOVIS_GLINER_THRESHOLD` | `0.50` | Global confidence threshold. |
 | `KLOVIS_GLINER_LABEL_THRESHOLDS` | `{}` | JSON object overriding thresholds for fixed labels. |
 | `KLOVIS_GLINER_MAX_CONCURRENCY` | `2` | Maximum concurrent inference calls. |
 | `KLOVIS_GLINER_MAX_BATCH_CHARS` | `32768` | Maximum Unicode characters per request batch. |
 | `KLOVIS_GLINER_FAILURE_POLICY` | `fail-closed` | Only supported policy in V1. |
-| `KLOVIS_GLINER_DATA_DIR` | `~/.klovys99/gliner` | npm lifecycle model directory. |
+| `KLOVIS_GLINER_DATA_DIR` | `~/.klovys99/gliner` | Sidecar model directory used by `scripts/dev-start.sh`. |
 
 When `full` is active, a timeout, unavailable sidecar, saturated queue,
 malformed span, or model identity mismatch returns `503` and makes zero
-upstream calls. If the npm wrapper cannot build, install, or start GLiNER, the
-startup command exits with an explicit error instead of silently falling back.
-`/healthz` reports Go liveness, `/readyz` includes contextual readiness, and
-`/api/status` exposes sanitized metadata including the active GLiNER mode.
-
-The npm wrapper also honors:
-
-| Variable | Description |
-| --- | --- |
-| `KLOVIS_CLIENT` | Client to configure during `npm install`: `codex`, `claude`, or `both`. |
-| `KLOVIS_BASE_URL` | Base URL written by `klovys99 configure` or `npm install` auto-configuration. |
-| `KLOVIS_SKIP_DOWNLOAD` | Skips the prebuilt binary download during `postinstall` when set to `true`. |
-| `KLOVIS_SKIP_BUILD` | Skips the local Go build fallback during `postinstall` when set to `true`. |
-| `KLOVIS_SKIP_CONFIGURE` | Skips client configuration during `postinstall` when set to `true`. |
+upstream calls. `/healthz` reports Go liveness, `/readyz` includes contextual
+readiness, and `/api/status` exposes sanitized metadata including the active
+GLiNER mode.
 
 Boolean variables accept only `true` or `false`.
 
@@ -442,7 +387,7 @@ Klovys99 writes structured application logs to stdout by default. To write logs 
 `proxy.log` instead, enable file logging:
 
 ```sh
-KLOVIS_LOG_TO_FILE=true npx klovys99 start
+KLOVIS_LOG_TO_FILE=true go run ./cmd/klovys99
 ```
 
 Debug and file logging remain available, but request bodies, detected values,
@@ -486,30 +431,34 @@ features behave differently upstream. In practice:
 
 ## Development
 
-Clone the repository and install both Node and Go dependencies:
+Clone the repository and download Go dependencies:
 
 ```sh
 git clone https://github.com/Korbicorp/klovys99.git
 cd klovys99
-npm install
 go mod download
 ```
 
 Tagged releases build one binary per supported OS and architecture in GitHub
 Actions. If `NPM_TOKEN_KLOVYS` is configured in repository secrets, the same tag
-workflow also publishes the npm package after uploading the release assets.
+workflow also publishes the npm package after uploading the release assets —
+npm installation from that package is currently broken, see
+[Installation](#installation).
 
-Run the test suites:
+Run the Go test suite:
 
 ```sh
 go test ./...
-node --test npm/test/*.test.js
 ```
 
-Run the proxy locally without npm:
+The npm packaging code under `npm/` has its own unit tests
+(`node --test npm/test/*.test.js`) if you're working on that code specifically,
+but they don't exercise a real install and aren't required to run the proxy.
+
+Run the proxy locally:
 
 ```sh
-go run ./cmd/klovys99
+./scripts/dev-start.sh
 ```
 
 Format Go code before submitting changes:
@@ -537,6 +486,5 @@ Useful checks before opening a pull request:
 
 ```sh
 go test ./...
-node --test npm/test/*.test.js
 gofmt -w ./cmd ./internal
 ```
