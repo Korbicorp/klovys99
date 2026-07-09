@@ -2,12 +2,16 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-klovys99 is a local reverse proxy that anonymizes sensitive prompt data before
-forwarding requests to Anthropic or OpenAI APIs.
+klovys99 is a local anonymizing proxy for coding clients such as Claude Code,
+Codex, and other OpenAI-compatible tools.
 
-It is designed to sit between coding clients such as Claude Code or Codex and
-their upstream API, replacing detected personal or sensitive values with stable
-pseudonym tokens before the request leaves the machine.
+It sits between the local client and the upstream provider, detects sensitive
+values in outgoing prompt payloads, replaces them with stable tokens before the
+request leaves the machine, then restores mapped values in provider responses
+on the way back. The runtime also exposes a local dashboard and a built-in test
+tool to inspect anonymization behavior, backed by regex detectors, dynamic
+Presidio and Gitleaks rules, a local NER engine, and a SQLite token store for
+stable anonymization/de-anonymization round-trips.
 
 ## Architecture At A Glance
 
@@ -25,27 +29,16 @@ flowchart LR
     proxy -->|"2. anonymized request only"| apis
     apis -->|"3. provider response"| proxy
     proxy -->|"4. restored response"| vscode
-```
 
-```mermaid
-flowchart LR
-    runtime["klovys99 process"]
-    admin["Admin web UI<br/>dashboard, stats, controls, test tool"]
-    chat["User web UI<br/>Gemini / Claude / ChatGPT / Mistral AI"]
-    auth["OAuth login<br/>work in progress"]
-    keys["Current auth mode<br/>user enters API keys"]
-
-    runtime --> admin
-    runtime --> chat
-    chat --> keys
-    chat -. planned .-> auth
+    classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
+    class proxy klovys;
 ```
 
 ```mermaid
 flowchart LR
     client["Local client or web UI"]
     input["Prompt / tool output / text payload"]
-    engine["Parallel anonymization engine"]
+    engine["klovys99 anonymization engine"]
     regex["Regex detectors"]
     presidio["Presidio rules"]
     gitleaks["Gitleaks rules"]
@@ -65,6 +58,26 @@ flowchart LR
     upstream -->|"tokenized response"| restore
     sqlite --> restore
     restore -->|"clear response restored locally"| client
+
+    classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
+    class engine,restore klovys;
+```
+
+```mermaid
+flowchart LR
+    runtime["klovys99 process"]
+    admin["Admin web UI<br/>dashboard, stats, controls, test tool"]
+    chat["User web UI<br/>Gemini / Claude / ChatGPT / Mistral AI"]
+    auth["OAuth login<br/>work in progress"]
+    keys["Current auth mode<br/>user enters API keys"]
+
+    runtime --> admin
+    runtime --> chat
+    chat --> keys
+    chat -. planned .-> auth
+
+    classDef klovys fill:#1371E6,stroke:#1371E6,color:#ffffff;
+    class runtime klovys;
 ```
 
 <p align="center">
