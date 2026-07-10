@@ -29,6 +29,8 @@
   },
   "scripts": {
     "cli": "node npm/cli.js",
+    "ui:ai-workspace": "npm --prefix frontend/ai-workspace run dev",
+    "ui:ai-workspace:build": "npm --prefix frontend/ai-workspace run build",
     "postinstall": "node npm/postinstall.js",
     "test": "node --test npm/test/*.test.js",
     "test:node": "node --test npm/test/*.test.js"

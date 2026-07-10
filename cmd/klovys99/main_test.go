@@ -13,15 +13,82 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Korbicorp/klovys99/internal/aiworkspace"
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
 	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
+	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
+
+type fakeAIWorkspaceService struct {
+	metadata            []aiworkspace.ProviderDescriptor
+	response            aiworkspace.CompletionResponse
+	err                 error
+	requests            []aiworkspace.CompletionRequest
+	conversations       []aiworkspace.ConversationSummary
+	detail              aiworkspace.ConversationDetail
+	savedProvider       aiworkspace.ProviderDescriptor
+	credentialsRequests []aiworkspace.SaveCredentialsRequest
+}
+
+type fakeStatusError struct {
+	message    string
+	statusCode int
+}
+
+func (e *fakeStatusError) Error() string {
+	return e.message
+}
+
+func (e *fakeStatusError) GetStatusCode() int {
+	return e.statusCode
+}
+
+func (f *fakeAIWorkspaceService) Metadata() []aiworkspace.ProviderDescriptor {
+	return f.metadata
+}
+
+func (f *fakeAIWorkspaceService) ListConversations() ([]aiworkspace.ConversationSummary, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.conversations, nil
+}
+
+func (f *fakeAIWorkspaceService) CreateConversation() (aiworkspace.ConversationDetail, error) {
+	if f.err != nil {
+		return aiworkspace.ConversationDetail{}, f.err
+	}
+	return f.detail, nil
+}
+
+func (f *fakeAIWorkspaceService) GetConversation(_ string) (aiworkspace.ConversationDetail, error) {
+	if f.err != nil {
+		return aiworkspace.ConversationDetail{}, f.err
+	}
+	return f.detail, nil
+}
+
+func (f *fakeAIWorkspaceService) Complete(_ context.Context, request aiworkspace.CompletionRequest) (aiworkspace.CompletionResponse, error) {
+	f.requests = append(f.requests, request)
+	if f.err != nil {
+		return aiworkspace.CompletionResponse{}, f.err
+	}
+	return f.response, nil
+}
+
+func (f *fakeAIWorkspaceService) SaveCredentials(_ string, request aiworkspace.SaveCredentialsRequest) (aiworkspace.ProviderDescriptor, error) {
+	f.credentialsRequests = append(f.credentialsRequests, request)
+	if f.err != nil {
+		return aiworkspace.ProviderDescriptor{}, f.err
+	}
+	return f.savedProvider, nil
+}
 
 func TestEnvBoolWithDefault(t *testing.T) {
 	tests := []struct {
@@ -848,6 +915,284 @@ func TestBuildApplicationAnonymizationTestAPIUsesConfigWithoutStatsOrLogs(t *tes
 	}
 }
 
+func TestNewHTTPHandlerServesAIWorkspaceProviders(t *testing.T) {
+	service := &fakeAIWorkspaceService{
+		metadata: []aiworkspace.ProviderDescriptor{
+			{ID: "claude", Label: "Claude", Available: true},
+			{ID: "openai", Label: "OpenAI", Available: true},
+		},
+	}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/api/ai-workspace/providers")
+	if err != nil {
+		t.Fatalf("call providers API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("providers status = %d, want 200", response.StatusCode)
+	}
+
+	var payload struct {
+		Providers []aiworkspace.ProviderDescriptor `json:"providers"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode providers response: %v", err)
+	}
+	if len(payload.Providers) != 2 || payload.Providers[1].ID != "openai" {
+		t.Fatalf("providers payload = %#v, want expected providers", payload)
+	}
+}
+
+func TestNewHTTPHandlerAllowsLocalDevCORS(t *testing.T) {
+	service := &fakeAIWorkspaceService{
+		metadata: []aiworkspace.ProviderDescriptor{
+			{ID: "claude", Label: "Claude", Available: true},
+		},
+	}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/ai-workspace/providers", nil)
+	if err != nil {
+		t.Fatalf("build providers request: %v", err)
+	}
+	request.Header.Set("Origin", "http://127.0.0.1:3001")
+
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("call providers API with origin: %v", err)
+	}
+	defer response.Body.Close()
+
+	if got, want := response.Header.Get("Access-Control-Allow-Origin"), "http://127.0.0.1:3001"; got != want {
+		t.Fatalf("allow origin = %q, want %q", got, want)
+	}
+}
+
+func TestNewHTTPHandlerHandlesLocalDevCORSPreflight(t *testing.T) {
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, &fakeAIWorkspaceService{})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodOptions, server.URL+"/api/ai-workspace/providers", nil)
+	if err != nil {
+		t.Fatalf("build preflight request: %v", err)
+	}
+	request.Header.Set("Origin", "http://localhost:3001")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("call preflight request: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204", response.StatusCode)
+	}
+	if got, want := response.Header.Get("Access-Control-Allow-Origin"), "http://localhost:3001"; got != want {
+		t.Fatalf("preflight allow origin = %q, want %q", got, want)
+	}
+}
+
+func TestNewHTTPHandlerDelegatesAIWorkspaceCompletion(t *testing.T) {
+	service := &fakeAIWorkspaceService{
+		response: aiworkspace.CompletionResponse{
+			Provider:         "openai",
+			Method:           "api_key",
+			Model:            "gpt-5.1-mini",
+			AnonymizedPrompt: "hello [EMAIL_1]",
+			ResponseText:     "processed [EMAIL_1]",
+		},
+	}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(
+		server.URL+"/api/ai-workspace/complete",
+		"application/json",
+		strings.NewReader(`{"provider":"openai","method":"api_key","model":"gpt-5.1-mini","anonymized_prompt":"hello [EMAIL_1]","config":{"api_key":"sk-demo"}}`),
+	)
+	if err != nil {
+		t.Fatalf("call completion API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("completion status = %d, want 200", response.StatusCode)
+	}
+
+	var payload aiworkspace.CompletionResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode completion response: %v", err)
+	}
+	if payload.ResponseText != "processed [EMAIL_1]" {
+		t.Fatalf("completion payload = %#v, want provider response", payload)
+	}
+	if len(service.requests) != 1 || service.requests[0].AnonymizedPrompt != "hello [EMAIL_1]" {
+		t.Fatalf("service requests = %#v, want delegated completion request", service.requests)
+	}
+}
+
+func TestNewHTTPHandlerSavesAIWorkspaceCredentials(t *testing.T) {
+	service := &fakeAIWorkspaceService{
+		savedProvider: aiworkspace.ProviderDescriptor{ID: "openai", Available: true},
+	}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(
+		server.URL+"/api/ai-workspace/providers/openai/credentials",
+		"application/json",
+		strings.NewReader(`{"method":"api_key","config":{"api_key":"sk-demo"}}`),
+	)
+	if err != nil {
+		t.Fatalf("call credentials API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("credentials status = %d, want 200", response.StatusCode)
+	}
+
+	var payload struct {
+		Provider aiworkspace.ProviderDescriptor `json:"provider"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode credentials response: %v", err)
+	}
+	if !payload.Provider.Available {
+		t.Fatalf("payload = %#v, want available provider", payload)
+	}
+	if len(service.credentialsRequests) != 1 || service.credentialsRequests[0].Config["api_key"] != "sk-demo" {
+		t.Fatalf("credentials requests = %#v, want delegated save request", service.credentialsRequests)
+	}
+}
+
+func TestNewHTTPHandlerRejectsInvalidAIWorkspaceCredentialsPayload(t *testing.T) {
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, &fakeAIWorkspaceService{})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(
+		server.URL+"/api/ai-workspace/providers/openai/credentials",
+		"application/json",
+		strings.NewReader(`{"config":`),
+	)
+	if err != nil {
+		t.Fatalf("call credentials API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("credentials status = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestNewHTTPHandlerListsAIWorkspaceConversations(t *testing.T) {
+	service := &fakeAIWorkspaceService{
+		conversations: []aiworkspace.ConversationSummary{
+			{ID: "conv-1", Title: "First"},
+		},
+	}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/api/ai-workspace/conversations")
+	if err != nil {
+		t.Fatalf("call conversations API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("conversations status = %d, want 200", response.StatusCode)
+	}
+
+	var payload struct {
+		Conversations []aiworkspace.ConversationSummary `json:"conversations"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode conversations response: %v", err)
+	}
+	if len(payload.Conversations) != 1 || payload.Conversations[0].ID != "conv-1" {
+		t.Fatalf("payload = %#v, want delegated conversations", payload)
+	}
+}
+
+func TestNewHTTPHandlerGetsAIWorkspaceConversation(t *testing.T) {
+	service := &fakeAIWorkspaceService{
+		detail: aiworkspace.ConversationDetail{
+			ID: "conv-1",
+			Messages: []aiworkspace.ConversationMessage{
+				{Role: "user", Content: "[EMAIL_1]"},
+			},
+		},
+	}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/api/ai-workspace/conversations/conv-1")
+	if err != nil {
+		t.Fatalf("call conversation detail API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("conversation detail status = %d, want 200", response.StatusCode)
+	}
+
+	var payload aiworkspace.ConversationDetail
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode conversation detail response: %v", err)
+	}
+	if payload.ID != "conv-1" || len(payload.Messages) != 1 {
+		t.Fatalf("payload = %#v, want delegated conversation detail", payload)
+	}
+}
+
+func TestNewHTTPHandlerRejectsInvalidAIWorkspaceCompletionPayload(t *testing.T) {
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, &fakeAIWorkspaceService{})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(
+		server.URL+"/api/ai-workspace/complete",
+		"application/json",
+		strings.NewReader(`{"provider":`),
+	)
+	if err != nil {
+		t.Fatalf("call completion API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("completion status = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestNewHTTPHandlerPropagatesAIWorkspaceServiceStatusCode(t *testing.T) {
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, &fakeAIWorkspaceService{
+		err: &fakeStatusError{message: "missing anonymized prompt", statusCode: http.StatusBadRequest},
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := server.Client().Post(
+		server.URL+"/api/ai-workspace/complete",
+		"application/json",
+		strings.NewReader(`{"provider":"openai","method":"api_key","anonymized_prompt":"hello [EMAIL_1]","config":{"api_key":"sk-demo"}}`),
+	)
+	if err != nil {
+		t.Fatalf("call completion API: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("completion status = %d, want 400", response.StatusCode)
+	}
+}
+
 // TestBuildApplicationServesDashboardBeforeProxy verifies that the local dashboard is served by the proxy itself
 // and that missing dashboard routes are not accidentally forwarded upstream.
 func TestBuildApplicationServesDashboardBeforeProxy(t *testing.T) {
@@ -1037,6 +1382,12 @@ func mustParseURL(t *testing.T, value string) *url.URL {
 
 func ptrLogger(logger zerolog.Logger) *zerolog.Logger {
 	return &logger
+}
+
+func noopProxyHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		ctx.JSON(http.StatusTeapot, gin.H{"proxy": "unused"})
+	}
 }
 
 // optionEnabled returns one type's enabled state from an API option list.
