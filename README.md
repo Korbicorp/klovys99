@@ -137,6 +137,9 @@ The historical unprefixed route also still exists and forwards to
 
 4. Optional: launch the AI workspace UI, a chat interface that anonymizes your
    prompt before sending it to a provider you configure with your own API key.
+   If you want the `Compte IA` / `AI accounts` panel to persist provider API
+   keys across reloads and restarts, set `KLOVYS99_AI_WORKSPACE_KEY` first
+   (you can generate one with `openssl rand -hex 32`).
 
 ```sh
 npm run ui:ai-workspace
@@ -317,6 +320,19 @@ How it works:
   `KLOVYS99_AI_WORKSPACE_KEY` is set. Without it, `Settings > Save` is a no-op
   and a key you type only lasts for the current browser tab, resent with each
   request.
+- If you want to use the AI workspace UI with persistent provider accounts from
+  the `Compte IA` / `AI accounts` panel, set `KLOVYS99_AI_WORKSPACE_KEY`
+  before starting the backend. A simple way to generate one is:
+
+  ```sh
+  openssl rand -hex 32
+  ```
+
+  Then export it, for example:
+
+  ```sh
+  export KLOVYS99_AI_WORKSPACE_KEY="$(openssl rand -hex 32)"
+  ```
 
 The frontend dev server proxies `/api` and `/dashboard` to the proxy on
 `127.0.0.1:8080`, and the backend only accepts cross-origin requests from
@@ -336,7 +352,7 @@ Klovys99 runtime is configured with environment variables.
 | `KLOVIS_LOG_PII_FINDINGS` | `false` | Deprecated and ignored for privacy; raw findings are never logged. |
 | `KLOVIS_LOG_TO_FILE` | `false` | Writes logs to `proxy.log` instead of stdout when set to `true`. |
 | `KLOVYS99_AI_WORKSPACE_DIR` | OS user config dir + `klovys99/ai-workspace` | Storage directory for AI workspace conversations and credentials. |
-| `KLOVYS99_AI_WORKSPACE_KEY` | unset | Encryption secret used to persist AI workspace provider API keys to disk. Without it, saved keys are not written to disk. |
+| `KLOVYS99_AI_WORKSPACE_KEY` | unset | Encryption secret used to persist AI workspace provider API keys to disk. Required if you want the AI workspace UI to keep configured provider accounts across reloads/restarts. Generate one with `openssl rand -hex 32`. Without it, saved keys are not written to disk. |
 
 ### Contextual GLiNER protection modes
 
