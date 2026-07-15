@@ -269,18 +269,22 @@ function normalizePreviewFindings(findings, sourceText = "") {
     .sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
-function normalizePIIReplacements(replacements) {
+function normalizePIIReplacements(replacements, sourceText = "") {
   if (!Array.isArray(replacements)) {
     return [];
   }
   return replacements
-    .map((replacement) => ({
-      type: String(replacement.type || "UNKNOWN"),
-      token: String(replacement.token || ""),
-      value: String(replacement.value || ""),
-      start: safeNumber(replacement.start),
-      end: safeNumber(replacement.end),
-    }))
+    .map((replacement) => {
+      const startByteOffset = safeNumber(replacement.start);
+      const endByteOffset = safeNumber(replacement.end);
+      return {
+        type: String(replacement.type || "UNKNOWN"),
+        token: String(replacement.token || ""),
+        value: String(replacement.value || ""),
+        start: byteOffsetToStringIndex(sourceText, startByteOffset),
+        end: byteOffsetToStringIndex(sourceText, endByteOffset),
+      };
+    })
     .filter((replacement) => replacement.token && replacement.end >= replacement.start)
     .sort((left, right) => left.start - right.start || left.end - right.end);
 }
@@ -997,7 +1001,7 @@ function ProviderCard({
 }
 
 function ChatBubble({ role, content, label, pending = false, pendingLabel = "", piiReplacements = [] }) {
-  const replacements = useMemo(() => normalizePIIReplacements(piiReplacements), [piiReplacements]);
+  const replacements = useMemo(() => normalizePIIReplacements(piiReplacements, content), [content, piiReplacements]);
   const injectedPlainContent = useMemo(() => injectPIIMarkers(content, replacements), [content, replacements]);
   const replacementsKey = useMemo(
     () => replacements.map((replacement) => (

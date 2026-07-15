@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/rs/zerolog/log"
 )
 
 type claudeOAuthConversationService interface {
@@ -64,6 +66,7 @@ func (s *liveClaudeConversationService) RunPrompt(ctx context.Context, configDir
 	} else {
 		args = append(args, "--session-id", sessionID)
 	}
+	log.Debug().Str("prompt", prompt).Msg("prompt used in oauth")
 	args = append(args, prompt)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = claudeEnv(configDir, token)
@@ -92,6 +95,7 @@ func (s *liveClaudeConversationService) RunPrompt(ctx context.Context, configDir
 	if payload.IsError {
 		return claudeOAuthPromptResult{}, errors.New(cleanCLIError(payload.Result))
 	}
+	log.Debug().Interface("payload", payload).Msg("cli resp")
 	return claudeOAuthPromptResult{
 		Text:      payload.Result,
 		SessionID: strings.TrimSpace(payload.SessionID),
