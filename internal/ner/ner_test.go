@@ -139,6 +139,24 @@ func TestAnalyzeJSONStringsDeduplicatesOneBatch(t *testing.T) {
 	}
 }
 
+func TestAnalyzeStringsDeduplicatesOneBatch(t *testing.T) {
+	analyzer := &fakeAnalyzer{}
+	matches, err := AnalyzeStrings(
+		context.Background(),
+		analyzer,
+		[]string{"Paris", "", "Paris", "Lyon"},
+	)
+	if err != nil {
+		t.Fatalf("AnalyzeStrings: %v", err)
+	}
+	if analyzer.calls != 1 || len(analyzer.texts) != 2 {
+		t.Fatalf("calls=%d texts=%v", analyzer.calls, analyzer.texts)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("matches=%v", matches)
+	}
+}
+
 type fakeAnalyzer struct {
 	calls int
 	texts []string

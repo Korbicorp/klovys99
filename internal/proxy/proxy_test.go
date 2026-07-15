@@ -36,6 +36,19 @@ func (failingNER) Status() ner.Status {
 	return ner.Status{Enabled: true, State: "unavailable"}
 }
 
+type recordingNER struct {
+	texts []string
+}
+
+func (r *recordingNER) AnalyzeBatch(_ context.Context, texts []string) ([][]anonymizer.Match, error) {
+	r.texts = append([]string(nil), texts...)
+	return make([][]anonymizer.Match, len(texts)), nil
+}
+
+func (r *recordingNER) Status() ner.Status {
+	return ner.Status{Enabled: true, State: "ready"}
+}
+
 func TestProxyFailsClosedWithoutUpstreamCallWhenNERFails(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -313,6 +326,42 @@ func TestProxyForcesNonStreamingAnthropicMessagesRequests(t *testing.T) {
 
 	if !strings.Contains(upstreamBody, `"stream":false`) {
 		t.Fatalf("upstream body = %q, want stream forced to false", upstreamBody)
+	}
+}
+
+func TestProxySendsOnlyAnthropicUserPromptsToNER(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	recorder := &recordingNER{}
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, upstream.URL),
+		RouteTargets: map[string]*url.URL{
+			AnthropicRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:      ptrLogger(zerolog.Nop()),
+		Anonymizer:  newTestAnonymizer(),
+		NERAnalyzer: recorder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	body := `{"system":"system prompt","messages":[{"role":"user","content":[{"type":"text","text":"user prompt"},{"type":"image","source":{"type":"base64","data":"ignored"}}]},{"role":"assistant","content":[{"type":"text","text":"assistant history"}]},{"role":"user","content":"follow up user prompt"},{"role":"user","content":[{"type":"tool_result","content":"file content"}]}]}`
+	response, err := server.Client().Post(server.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	response.Body.Close()
+
+	want := []string{"user prompt", "follow up user prompt"}
+	if !reflect.DeepEqual(recorder.texts, want) {
+		t.Fatalf("NER texts = %#v, want %#v", recorder.texts, want)
 	}
 }
 
@@ -879,6 +928,42 @@ func TestProxyAnonymizesOpenAIResponsesRequests(t *testing.T) {
 	}
 }
 
+func TestProxySendsOnlyOpenAIUserPromptsToNER(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	recorder := &recordingNER{}
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:      ptrLogger(zerolog.Nop()),
+		Anonymizer:  newTestAnonymizer(),
+		NERAnalyzer: recorder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	body := `{"model":"gpt-5.4","instructions":"system prompt","input":[{"role":"user","content":[{"type":"input_text","text":"user prompt"},{"type":"input_image","image_url":"ignored"}]},{"role":"assistant","content":[{"type":"output_text","text":"assistant history"}]},{"type":"function_call_output","output":"tool output"},{"type":"input_text","text":"standalone user input"}]}`
+	response, err := server.Client().Post(server.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	response.Body.Close()
+
+	want := []string{"user prompt", "standalone user input"}
+	if !reflect.DeepEqual(recorder.texts, want) {
+		t.Fatalf("NER texts = %#v, want %#v", recorder.texts, want)
+	}
+}
+
 func TestProxyRestoresOpenAIResponsePlaceholdersAcrossRuns(t *testing.T) {
 	var upstreamBodies []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -1108,6 +1193,42 @@ func TestProxyAnonymizesOpenAIChatCompletionsRequests(t *testing.T) {
 	}
 	if strings.Count(upstreamBody, "[EMAIL_") != 2 || !strings.Contains(upstreamBody, "[PHONE_1]") {
 		t.Fatalf("upstream body = %q, want anonymized chat content and tool calls", upstreamBody)
+	}
+}
+
+func TestProxySendsOnlyOpenAIChatUserPromptsToNER(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	recorder := &recordingNER{}
+	handler, err := NewProxyHandler(Config{
+		Target: mustParseURL(t, "http://anthropic.example"),
+		RouteTargets: map[string]*url.URL{
+			OpenAIRoutePrefix: mustParseURL(t, upstream.URL),
+		},
+		Logger:      ptrLogger(zerolog.Nop()),
+		Anonymizer:  newTestAnonymizer(),
+		NERAnalyzer: recorder,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	server := httptest.NewServer(newTestRouter(handler))
+	defer server.Close()
+
+	body := `{"model":"gpt-5.4","messages":[{"role":"system","content":"system prompt"},{"role":"user","content":[{"type":"text","text":"user prompt"}]},{"role":"assistant","tool_calls":[{"type":"function","function":{"arguments":"{\"file\":\"secret.txt\"}"}}]},{"role":"tool","content":"tool output"}]}`
+	response, err := server.Client().Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("call proxy: %v", err)
+	}
+	response.Body.Close()
+
+	want := []string{"user prompt"}
+	if !reflect.DeepEqual(recorder.texts, want) {
+		t.Fatalf("NER texts = %#v, want %#v", recorder.texts, want)
 	}
 }
 

@@ -44,7 +44,10 @@ services:
       KLOVIS_GLINER_MODEL_REVISION: ${KLOVIS_GLINER_MODEL_REVISION:?KLOVIS_GLINER_MODEL_REVISION is required}
       KLOVYS99_AI_WORKSPACE_KEY: ${KLOVYS99_AI_WORKSPACE_KEY:?KLOVYS99_AI_WORKSPACE_KEY is required}
       KLOVYS99_AI_WORKSPACE_DIR: ${KLOVYS99_AI_WORKSPACE_DIR:-/data/ai-workspace}
+      KLOVIS_PROXY_DEBUG: false
+      KLOVIS_LOG_TO_FILE: false
     restart: unless-stopped
     volumes:
       - ${KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR:?KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR is required}:/data/ai-workspace
       - ${KLOVYS99_DOCKER_CLAUDE_HOME_DIR:?KLOVYS99_DOCKER_CLAUDE_HOME_DIR is required}:/home/klovys/.claude
+      - ./.data/logs:/workspace

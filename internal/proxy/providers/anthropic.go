@@ -114,7 +114,7 @@ func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body [
 		return AnonymizeResult{Body: body}, nil
 	}
 
-	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, anthropicUserPromptTexts(payload))
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
@@ -125,6 +125,9 @@ func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body [
 		changed = forceAnthropicNonStreaming(payload) || changed
 	}
 	if !changed {
+		if len(run.stats) > 0 {
+			logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
+		}
 		return AnonymizeResult{Body: body, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
 	}
 
@@ -132,7 +135,9 @@ func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body [
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	_ = logger
+	if len(run.stats) > 0 {
+		logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
+	}
 	return AnonymizeResult{
 		Body:           output,
 		RestoreMapping: NewResponseRestoreMapping(run.findings),
@@ -416,4 +421,53 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	_ = findings
 	_ = includePII
 	event.Msg("request body anonymized")
+}
+
+func anthropicUserPromptTexts(payload any) []string {
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	messages, ok := root["messages"].([]any)
+	if !ok {
+		return nil
+	}
+	var texts []string
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok || stringMapValue(message, "role") != "user" {
+			continue
+		}
+		texts = append(texts, collectAnthropicUserContentTexts(message["content"])...)
+	}
+	return texts
+}
+
+func collectAnthropicUserContentTexts(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}
+	case []any:
+		var texts []string
+		for _, item := range typed {
+			texts = append(texts, collectAnthropicUserContentTexts(item)...)
+		}
+		return texts
+	case map[string]any:
+		switch stringMapValue(typed, "type") {
+		case "text":
+			var texts []string
+			if text, ok := typed["text"].(string); ok {
+				texts = append(texts, text)
+			}
+			if data, ok := typed["data"].(string); ok {
+				texts = append(texts, data)
+			}
+			return texts
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
 }

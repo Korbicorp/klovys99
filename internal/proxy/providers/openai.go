@@ -369,7 +369,7 @@ func (p *OpenAI) anonymizeWebSocketFrame(mapping *ResponseRestoreMapping, messag
 	if err != nil {
 		return mapping, nil, nil, nil, err
 	}
-	matches, err := ner.AnalyzeJSONStrings(context.Background(), p.nerAnalyzer, message)
+	matches, err := ner.AnalyzeStrings(context.Background(), p.nerAnalyzer, openAIUserPromptTexts(payload))
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -420,7 +420,7 @@ func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (Anony
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, openAIUserPromptTexts(payload))
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
@@ -454,7 +454,7 @@ func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) 
 	if !ok {
 		return AnonymizeResult{}, fmt.Errorf("chat completions messages must be an array")
 	}
-	matches, err := ner.AnalyzeJSONStrings(ctx, p.nerAnalyzer, body)
+	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, openAIChatUserPromptTexts(messages))
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
@@ -671,6 +671,92 @@ func (r *openAIAnonymizationRun) anonymizeString(value string) (string, bool) {
 	}
 	r.findings = append(r.findings, result.Findings...)
 	return anonymized, true
+}
+
+func openAIUserPromptTexts(payload map[string]any) []string {
+	if payload == nil {
+		return nil
+	}
+	if response, ok := payload["response"].(map[string]any); ok {
+		return openAIUserPromptTexts(response)
+	}
+	var texts []string
+	switch input := payload["input"].(type) {
+	case string:
+		texts = append(texts, input)
+	case []any:
+		texts = append(texts, openAIInputUserPromptTexts(input)...)
+	case map[string]any:
+		texts = append(texts, openAIInputItemUserPromptTexts(input)...)
+	}
+	return texts
+}
+
+func openAIInputUserPromptTexts(items []any) []string {
+	var texts []string
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			if text, ok := item.(string); ok {
+				texts = append(texts, text)
+			}
+			continue
+		}
+		texts = append(texts, openAIInputItemUserPromptTexts(object)...)
+	}
+	return texts
+}
+
+func openAIInputItemUserPromptTexts(item map[string]any) []string {
+	if item == nil {
+		return nil
+	}
+	if stringMapValue(item, "role") == "user" {
+		return collectOpenAIChatContentTexts(item["content"])
+	}
+	switch stringMapValue(item, "type") {
+	case "input_text", "text":
+		if text, ok := item["text"].(string); ok {
+			return []string{text}
+		}
+	}
+	return nil
+}
+
+func openAIChatUserPromptTexts(messages []any) []string {
+	var texts []string
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok || stringMapValue(message, "role") != "user" {
+			continue
+		}
+		texts = append(texts, collectOpenAIChatContentTexts(message["content"])...)
+	}
+	return texts
+}
+
+func collectOpenAIChatContentTexts(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}
+	case []any:
+		var texts []string
+		for _, item := range typed {
+			texts = append(texts, collectOpenAIChatContentTexts(item)...)
+		}
+		return texts
+	case map[string]any:
+		var texts []string
+		for key, item := range typed {
+			if key != "text" && key != "content" && key != "input" {
+				continue
+			}
+			texts = append(texts, collectOpenAIChatContentTexts(item)...)
+		}
+		return texts
+	default:
+		return nil
+	}
 }
 
 func (p *OpenAI) chatGPTModelsList(ctx context.Context, headers http.Header, clientVersion string) ([]byte, int, error) {
