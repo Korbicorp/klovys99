@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+.data
+node_modules
+dist
+frontend/ai-workspace/node_modules
+frontend/ai-workspace/dist
+proxy.log
+output.txt
+anonymization_stats*.jsonl
+klovys_tokens.sqlite
+klovys99_config.json
+klovys99_config.json.tmp
+__debug_bin*

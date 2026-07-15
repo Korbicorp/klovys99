@@ -88,14 +88,42 @@ flowchart LR
 > source: start the app manually with Go and start the GLiNER sidecar with
 > Docker, as described below.
 
-The simplest way to start everything (GLiNER sidecar + proxy) in one command:
+For Claude OAuth in the AI workspace, the standard runtime is now Docker
+Compose so the Go app and Claude CLI run in the same containerized environment.
+
+1. Copy the environment template and set a real
+   `KLOVYS99_AI_WORKSPACE_KEY`.
+
+```sh
+cp .env.example .env
+```
+
+`compose.yaml` charge ensuite explicitement ce fichier `.env` pour les
+services `gliner` et `klovys99`.
+
+2. Start the full stack, including the Go proxy, GLiNER, and Claude CLI.
+
+```sh
+docker compose up --build
+```
+
+This exposes klovys99 on `http://127.0.0.1:8080`, persists the AI workspace
+state under `./.data/ai-workspace`, and keeps Claude CLI state under
+`./.data/claude-home`. Claude OAuth no longer requires a local `claude`
+installation in this mode. The root compose stack shares the GLiNER network
+namespace with `klovys99`, so `KLOVIS_GLINER_URL` stays on
+`http://127.0.0.1:8091` to satisfy the backend loopback-only check.
+
+If you prefer the previous source-driven development flow, the simplest way to
+start everything (GLiNER sidecar + proxy) in one command remains:
 
 ```sh
 ./scripts/dev-start.sh
 ```
 
-This builds the GLiNER Docker image, downloads the pinned model on first run,
-starts the sidecar container, and then runs `go run ./cmd/klovys99`.
+This creates `.env` from `.env.example` if needed, builds the GLiNER Docker
+image, downloads the pinned model on first run, and then launches the root
+`docker compose up --build` stack.
 
 If you prefer to run the steps yourself from the repository root:
 
@@ -138,8 +166,9 @@ The historical unprefixed route also still exists and forwards to
 4. Optional: launch the AI workspace UI, a chat interface that anonymizes your
    prompt before sending it to a provider you configure with your own API key.
    If you want the `Compte IA` / `AI accounts` panel to persist provider API
-   keys across reloads and restarts, set `KLOVYS99_AI_WORKSPACE_KEY` first
-   (you can generate one with `openssl rand -hex 32`).
+   keys and Claude OAuth tokens across reloads and restarts, set
+   `KLOVYS99_AI_WORKSPACE_KEY` first (you can generate one with
+   `openssl rand -hex 32`).
 
 ```sh
 npm run ui:ai-workspace
@@ -176,7 +205,8 @@ use the same flow with `npx klovys99`:
 ## Requirements
 
 - Go 1.25 or newer.
-- Docker Desktop or Docker Engine, to run the GLiNER sidecar.
+- Docker Desktop or Docker Engine, to run the GLiNER sidecar and the
+  containerized Claude OAuth runtime.
 - Network access on first startup to download the default Gitleaks and Presidio
   rule sources, and the pinned GLiNER model.
 - An Anthropic API key, Claude subscription, or OpenAI API key depending on the
@@ -199,8 +229,8 @@ cd klovys99
 go build -o klovys99 ./cmd/klovys99
 ```
 
-See [Get Started](#get-started) for how to run it alongside the GLiNER
-sidecar.
+See [Get Started](#get-started) for both the Docker Compose runtime and the
+source-driven development flow.
 
 ## Client Configuration
 

@@ -1,0 +1,50 @@
+services:
+  gliner:
+    build:
+      context: ./sidecar/gliner
+    image: klovys99-gliner:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GLINER_HOST: 0.0.0.0
+      GLINER_PORT: 8091
+      GLINER_MODEL: ${KLOVIS_GLINER_MODEL:?KLOVIS_GLINER_MODEL is required}
+      GLINER_MODEL_REVISION: ${KLOVIS_GLINER_MODEL_REVISION:?KLOVIS_GLINER_MODEL_REVISION is required}
+      GLINER_MODEL_DIR: /models/current
+      GLINER_MAX_BATCH_CHARS: ${KLOVIS_GLINER_MAX_BATCH_CHARS:-32768}
+    ports:
+      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:${KLOVIS_DOCKER_PORT:-8080}:8080"
+    volumes:
+      - ${KLOVIS_GLINER_DATA_DIR:?KLOVIS_GLINER_DATA_DIR is required}/model:/models/current:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 60s
+
+  klovys99:
+    build:
+      context: .
+      args:
+        CLAUDE_CODE_NPM_PACKAGE: ${CLAUDE_CODE_NPM_PACKAGE:-@anthropic-ai/claude-code}
+    depends_on:
+      gliner:
+        condition: service_healthy
+    network_mode: "service:gliner"
+    env_file:
+      - .env
+    environment:
+      KLOVIS_ADDR: ${KLOVIS_ADDR:-0.0.0.0:8080}
+      KLOVIS_GLINER_MODE: ${KLOVIS_GLINER_MODE:-full}
+      KLOVIS_GLINER_URL: http://127.0.0.1:8091
+      KLOVIS_GLINER_MODEL: ${KLOVIS_GLINER_MODEL:?KLOVIS_GLINER_MODEL is required}
+      KLOVIS_GLINER_MODEL_REVISION: ${KLOVIS_GLINER_MODEL_REVISION:?KLOVIS_GLINER_MODEL_REVISION is required}
+      KLOVYS99_AI_WORKSPACE_KEY: ${KLOVYS99_AI_WORKSPACE_KEY:?KLOVYS99_AI_WORKSPACE_KEY is required}
+      KLOVYS99_AI_WORKSPACE_DIR: ${KLOVYS99_AI_WORKSPACE_DIR:-/data/ai-workspace}
+    restart: unless-stopped
+    volumes:
+      - ${KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR:?KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR is required}:/data/ai-workspace
+      - ${KLOVYS99_DOCKER_CLAUDE_HOME_DIR:?KLOVYS99_DOCKER_CLAUDE_HOME_DIR is required}:/home/klovys/.claude

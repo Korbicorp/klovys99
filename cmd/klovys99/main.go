@@ -125,6 +125,11 @@ type aiWorkspaceService interface {
 	GetConversation(id string) (aiworkspace.ConversationDetail, error)
 	Complete(ctx context.Context, request aiworkspace.CompletionRequest) (aiworkspace.CompletionResponse, error)
 	SaveCredentials(providerID string, request aiworkspace.SaveCredentialsRequest) (aiworkspace.ProviderDescriptor, error)
+	ClaudeOAuthStatus() aiworkspace.ClaudeOAuthStatusResponse
+	StartClaudeOAuth(ctx context.Context) (aiworkspace.ClaudeOAuthStartResponse, error)
+	SubmitClaudeOAuth(ctx context.Context, request aiworkspace.ClaudeOAuthSubmitRequest) (aiworkspace.ClaudeOAuthStatusResponse, error)
+	CancelClaudeOAuth() error
+	UnlinkClaudeOAuth() error
 }
 
 type previewService struct {
@@ -497,6 +502,51 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 			}
 			ctx.JSON(http.StatusOK, gin.H{"provider": provider})
 		})
+		router.GET("/api/ai-workspace/providers/claude/oauth/status", func(ctx *gin.Context) {
+			ctx.JSON(http.StatusOK, aiService.ClaudeOAuthStatus())
+		})
+		router.POST("/api/ai-workspace/providers/claude/oauth/start", func(ctx *gin.Context) {
+			response, err := aiService.StartClaudeOAuth(ctx.Request.Context())
+			if err != nil {
+				writeAPIError(ctx, err, http.StatusBadGateway)
+				return
+			}
+			ctx.JSON(http.StatusOK, response)
+		})
+		router.POST("/api/ai-workspace/providers/claude/oauth/submit", func(ctx *gin.Context) {
+			var request aiworkspace.ClaudeOAuthSubmitRequest
+			if err := ctx.ShouldBindJSON(&request); err != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode Claude OAuth request: %v", err)})
+				return
+			}
+			response, err := aiService.SubmitClaudeOAuth(ctx.Request.Context(), request)
+			if err != nil {
+				writeAPIError(ctx, err, http.StatusBadGateway)
+				return
+			}
+			ctx.JSON(http.StatusOK, response)
+		})
+		router.POST("/api/ai-workspace/providers/claude/oauth/cancel", func(ctx *gin.Context) {
+			if err := aiService.CancelClaudeOAuth(); err != nil {
+				writeAPIError(ctx, err, http.StatusBadGateway)
+				return
+			}
+			ctx.JSON(http.StatusOK, aiService.ClaudeOAuthStatus())
+		})
+		router.POST("/api/ai-workspace/providers/claude/oauth/unlink", func(ctx *gin.Context) {
+			if err := aiService.UnlinkClaudeOAuth(); err != nil {
+				writeAPIError(ctx, err, http.StatusBadGateway)
+				return
+			}
+			ctx.JSON(http.StatusOK, aiService.ClaudeOAuthStatus())
+		})
+		router.DELETE("/api/ai-workspace/providers/claude/oauth", func(ctx *gin.Context) {
+			if err := aiService.UnlinkClaudeOAuth(); err != nil {
+				writeAPIError(ctx, err, http.StatusBadGateway)
+				return
+			}
+			ctx.JSON(http.StatusOK, aiService.ClaudeOAuthStatus())
+		})
 		router.POST("/api/ai-workspace/complete", func(ctx *gin.Context) {
 			var request aiworkspace.CompletionRequest
 			if err := ctx.ShouldBindJSON(&request); err != nil {
@@ -543,6 +593,15 @@ func previewNERStatus(previewer anonymizationPreviewer) ner.Status {
 	}
 	return ner.DisabledStatus()
 }
+
+func writeAPIError(ctx *gin.Context, err error, fallbackStatus int) {
+	statusCode := fallbackStatus
+	if typedErr, ok := err.(interface{ GetStatusCode() int }); ok {
+		statusCode = typedErr.GetStatusCode()
+	}
+	ctx.JSON(statusCode, gin.H{"error": err.Error()})
+}
+
 func localDevCORSMiddleware() gin.HandlerFunc {
 	allowedOrigins := map[string]struct{}{
 		"http://127.0.0.1:3001": {},

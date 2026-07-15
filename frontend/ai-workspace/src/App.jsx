@@ -71,12 +71,68 @@ function buildConfigStateWithValues(fields, currentValues = {}) {
   return next;
 }
 
-function countWords(value) {
-  return value.trim() ? value.trim().split(/\s+/).length : 0;
+function normalizeClaudeOAuthStatus(status = {}) {
+  return {
+    linked: Boolean(status.linked),
+    pending: Boolean(status.pending),
+    method: status.method || "oauth_token",
+    authorizationURL: status.authorization_url || status.authorizationURL || "",
+    requiresCode: Boolean(status.requires_code || status.requiresCode),
+  };
+}
+
+function buildClaudeOAuthMethod(text, status) {
+  return {
+    id: "oauth_token",
+    label: text.claudeOAuthMethodLabel,
+    available: Boolean(status?.linked),
+    fields: [],
+  };
+}
+
+function mergeClaudeProvider(provider, status, text) {
+  if (!provider || provider.id !== "claude") {
+    return provider;
+  }
+  const oauthMethod = buildClaudeOAuthMethod(text, status);
+  let hasOAuthMethod = false;
+  const methods = (provider.methods || []).map((method) => {
+    if (method.id !== "oauth_token") {
+      return method;
+    }
+    hasOAuthMethod = true;
+    return {
+      ...method,
+      ...oauthMethod,
+      label: method.label || oauthMethod.label,
+    };
+  });
+  if (!hasOAuthMethod) {
+    methods.push(oauthMethod);
+  }
+  return {
+    ...provider,
+    available: provider.available || methods.some((method) => method.available),
+    methods,
+  };
+}
+
+function mergeProvidersWithClaudeOAuth(providers, status, text) {
+  return (providers || []).map((provider) => mergeClaudeProvider(provider, status, text));
 }
 
 function conversationTitle(conversation, fallback) {
   return conversation?.title?.trim() || fallback;
+}
+
+function buildOptimisticMessage(role, content, options = {}) {
+  return {
+    id: options.id || `optimistic-${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role,
+    content,
+    created_at: new Date().toISOString(),
+    pending: Boolean(options.pending),
+  };
 }
 
 async function readJSON(response) {
@@ -91,15 +147,582 @@ async function readJSON(response) {
   }
 }
 
+const previewEntityTypes = [
+  "EMAIL",
+  "IP",
+  "PHONE",
+  "NIR",
+  "ADDRESS",
+  "IBAN",
+  "CREDIT_CARD",
+  "MAC_ADDRESS",
+  "CRYPTO",
+  "SECRET",
+  "GENERIC_ID",
+  "NUMERIC_ID",
+  "REFERENCE_ID",
+  "NAME",
+  "LOCATION",
+  "ORGANIZATION",
+  "CONTEXT_IDENTIFIER",
+  "OTHER_PII",
+  "DATE",
+  "BLOOD_TYPE",
+  "DOCUMENT_ID",
+  "VEHICLE_PLATE",
+  "MEDICAL_PROVIDER",
+  "SCHOOL",
+  "EMPLOYER",
+  "PET_IDENTIFIER",
+];
+
+const unknownTypeTheme = {
+  background: "rgba(7, 108, 216, 0.15)",
+  border: "rgba(7, 108, 216, 0.18)",
+  text: "#084b9a",
+};
+
+function safeNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildTypeColorThemes(types) {
+  return Object.fromEntries(
+    types.map((type, index) => {
+      const hue = Math.round((index * 137.508) % 360);
+      const saturation = index % 2 === 0 ? 72 : 64;
+      const backgroundLightness = index % 3 === 0 ? 89 : index % 3 === 1 ? 86 : 83;
+      const borderLightness = backgroundLightness - 11;
+      const textLightness = index % 2 === 0 ? 24 : 28;
+      return [
+        type,
+        {
+          background: `hsl(${hue} ${saturation}% ${backgroundLightness}%)`,
+          border: `hsl(${hue} ${Math.max(saturation - 10, 46)}% ${borderLightness}%)`,
+          text: `hsl(${hue} ${Math.min(saturation + 6, 82)}% ${textLightness}%)`,
+        },
+      ];
+    }),
+  );
+}
+
+const previewTypeColorThemes = buildTypeColorThemes(previewEntityTypes);
+
+function themeForType(type) {
+  return previewTypeColorThemes[type] || unknownTypeTheme;
+}
+
+function styleAttributeForType(type) {
+  const theme = themeForType(type);
+  return [
+    `--type-highlight-bg: ${theme.background}`,
+    `--type-highlight-border: ${theme.border}`,
+    `--type-highlight-text: ${theme.text}`,
+  ]
+    .map((part) => escapeHtml(part))
+    .join("; ");
+}
+
+function byteOffsetToStringIndex(text, byteOffset) {
+  const encoder = new TextEncoder();
+  let consumedBytes = 0;
+  let stringIndex = 0;
+
+  for (const char of String(text)) {
+    if (consumedBytes >= byteOffset) {
+      break;
+    }
+    consumedBytes += encoder.encode(char).length;
+    stringIndex += char.length;
+  }
+
+  return stringIndex;
+}
+
+function normalizePreviewFindings(findings, sourceText = "") {
+  if (!Array.isArray(findings)) {
+    return [];
+  }
+  return findings
+    .map((finding) => {
+      const startByteOffset = safeNumber(finding.start);
+      const endByteOffset = safeNumber(finding.end);
+      return {
+        type: String(finding.type || "UNKNOWN"),
+        value: String(finding.value || ""),
+        token: String(finding.token || ""),
+        start: byteOffsetToStringIndex(sourceText, startByteOffset),
+        end: byteOffsetToStringIndex(sourceText, endByteOffset),
+      };
+    })
+    .filter((finding) => finding.end >= finding.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function renderTextWithFindings(sourceText, findings, mapFinding) {
+  if (!findings.length) {
+    return escapeHtml(sourceText).replaceAll("\n", "<br>");
+  }
+
+  let cursor = 0;
+  let html = "";
+  findings.forEach((finding) => {
+    html += escapeHtml(sourceText.slice(cursor, finding.start)).replaceAll("\n", "<br>");
+    const segment = mapFinding(finding);
+    const styleAttribute = segment.style ? ` style="${segment.style}"` : "";
+    html += `<span class="preview-highlight ${segment.className}"${styleAttribute}>${escapeHtml(segment.text)}</span>`;
+    cursor = finding.end;
+  });
+  html += escapeHtml(sourceText.slice(cursor)).replaceAll("\n", "<br>");
+  return html;
+}
+
+function renderHighlightedSource(sourceText, findings) {
+  return renderTextWithFindings(sourceText, findings, (finding) => ({
+    text: finding.value,
+    className: "preview-highlight-enabled",
+    style: styleAttributeForType(finding.type),
+  }));
+}
+
+function renderHighlightedResult(sourceText, findings) {
+  return renderTextWithFindings(sourceText, findings, (finding) => ({
+    text: finding.token,
+    className: "preview-highlight-enabled",
+    style: styleAttributeForType(finding.type),
+  }));
+}
+
+function extractPlainText(node) {
+  if (!node) {
+    return "";
+  }
+  if (node.nodeType === Node.TEXT_NODE) {
+    return (node.textContent || "").replaceAll("\u200b", "");
+  }
+  if (node.nodeName === "BR") {
+    return "\n";
+  }
+  return Array.from(node.childNodes).map((child) => extractPlainText(child)).join("");
+}
+
+function plainTextLengthForRange(range) {
+  const container = document.createElement("div");
+  container.appendChild(range.cloneContents());
+  return extractPlainText(container).length;
+}
+
+function getSelectionOffsets(root) {
+  if (!root) {
+    return { start: 0, end: 0 };
+  }
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return { start: 0, end: 0 };
+  }
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    return { start: 0, end: 0 };
+  }
+  const startRange = range.cloneRange();
+  startRange.selectNodeContents(root);
+  startRange.setEnd(range.startContainer, range.startOffset);
+  const endRange = range.cloneRange();
+  endRange.selectNodeContents(root);
+  endRange.setEnd(range.endContainer, range.endOffset);
+  return {
+    start: plainTextLengthForRange(startRange),
+    end: plainTextLengthForRange(endRange),
+  };
+}
+
+function setRangeBoundary(range, root, target, setter) {
+  let remaining = Math.max(0, target);
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+    {
+      acceptNode(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          return NodeFilter.FILTER_ACCEPT;
+        }
+        return node.nodeName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      },
+    },
+  );
+
+  let current = walker.nextNode();
+  while (current) {
+    if (current.nodeType === Node.TEXT_NODE) {
+      const textLength = current.textContent?.length || 0;
+      if (remaining <= textLength) {
+        range[setter](current, remaining);
+        return;
+      }
+      remaining -= textLength;
+    } else if (current.nodeName === "BR") {
+      if (remaining === 0) {
+        if (setter === "setStart") {
+          range.setStartBefore(current);
+        } else {
+          range.setEndBefore(current);
+        }
+        return;
+      }
+      if (remaining === 1) {
+        if (setter === "setStart") {
+          range.setStartAfter(current);
+        } else {
+          range.setEndAfter(current);
+        }
+        return;
+      }
+      remaining -= 1;
+    }
+    current = walker.nextNode();
+  }
+
+  range[setter](root, root.childNodes.length);
+}
+
+function restoreSelectionOffsets(root, offsets) {
+  if (!root || !offsets) {
+    return;
+  }
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+  const range = document.createRange();
+  setRangeBoundary(range, root, offsets.start, "setStart");
+  setRangeBoundary(range, root, offsets.end, "setEnd");
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertPlainTextAtSelection(text) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return;
+  }
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+  const fragment = document.createDocumentFragment();
+
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      fragment.appendChild(document.createElement("br"));
+    }
+    if (line) {
+      fragment.appendChild(document.createTextNode(line));
+    }
+  });
+
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendChild(document.createTextNode("\u200b"));
+  }
+
+  const lastNode = fragment.lastChild;
+  range.insertNode(fragment);
+  const nextRange = document.createRange();
+  if (lastNode) {
+    nextRange.setStartAfter(lastNode);
+  } else {
+    nextRange.setStart(range.endContainer, range.endOffset);
+  }
+  nextRange.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(nextRange);
+}
+
+function RichTextPromptEditor({
+  value,
+  findings,
+  placeholder,
+  canSend,
+  onChange,
+  onSend,
+  onInteraction,
+}) {
+  const editorRef = useRef(null);
+  const selectionRef = useRef({ start: 0, end: 0 });
+  const html = useMemo(() => renderHighlightedSource(value, findings), [value, findings]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) {
+      return;
+    }
+    if (editor.innerHTML !== html) {
+      editor.innerHTML = html;
+    }
+    if (document.activeElement === editor) {
+      restoreSelectionOffsets(editor, selectionRef.current);
+    }
+  }, [html]);
+
+  function syncFromEditor() {
+    const editor = editorRef.current;
+    if (!editor) {
+      return;
+    }
+    selectionRef.current = getSelectionOffsets(editor);
+    const nextValue = extractPlainText(editor).replace(/\u00a0/g, " ");
+    onInteraction();
+    onChange(nextValue);
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (canSend) {
+        onSend();
+      }
+      return;
+    }
+    if (event.key === "Enter" && event.shiftKey) {
+      event.preventDefault();
+      insertPlainTextAtSelection("\n");
+      syncFromEditor();
+    }
+  }
+
+  function handlePaste(event) {
+    event.preventDefault();
+    insertPlainTextAtSelection(event.clipboardData?.getData("text/plain") || "");
+    syncFromEditor();
+  }
+
+  return (
+    <div
+      id="prompt"
+      ref={editorRef}
+      className="chat-composer-input chat-composer-editor"
+      contentEditable
+      role="textbox"
+      aria-multiline="true"
+      data-placeholder={placeholder}
+      onBeforeInput={() => {
+        const editor = editorRef.current;
+        if (!editor) {
+          return;
+        }
+        selectionRef.current = getSelectionOffsets(editor);
+      }}
+      onInput={syncFromEditor}
+      onKeyDown={handleKeyDown}
+      onPaste={handlePaste}
+      suppressContentEditableWarning
+    />
+  );
+}
+
+function renderInlineMarkdown(text, keyPrefix) {
+  const pattern = /(\[[^\]]+\]\((https?:\/\/[^\s)]+)\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  const parts = [];
+  let cursor = 0;
+  let match;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      parts.push(text.slice(cursor, match.index));
+    }
+
+    const token = match[0];
+    const key = `${keyPrefix}-${match.index}`;
+
+    if (token.startsWith("[") && match[2]) {
+      const closingBracket = token.indexOf("]");
+      const label = token.slice(1, closingBracket);
+      parts.push(
+        <a key={key} href={match[2]} target="_blank" rel="noreferrer">
+          {label}
+        </a>,
+      );
+    } else if (token.startsWith("`")) {
+      parts.push(<code key={key}>{token.slice(1, -1)}</code>);
+    } else if (token.startsWith("**")) {
+      parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("*")) {
+      parts.push(<em key={key}>{token.slice(1, -1)}</em>);
+    }
+
+    cursor = match.index + token.length;
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+
+  return parts;
+}
+
+function renderMarkdown(content) {
+  const normalized = content.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("```")) {
+      const language = trimmed.slice(3).trim();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push(
+        <pre key={`code-${blocks.length}`} className="chat-bubble-code-block">
+          <code data-language={language || undefined}>{codeLines.join("\n")}</code>
+        </pre>,
+      );
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const HeadingTag = `h${level}`;
+      blocks.push(
+        <HeadingTag key={`heading-${blocks.length}`}>
+          {renderInlineMarkdown(headingMatch[2], `heading-${blocks.length}`)}
+        </HeadingTag>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote-${blocks.length}`}>
+          {renderInlineMarkdown(quoteLines.join(" "), `quote-${blocks.length}`)}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ul key={`ul-${blocks.length}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ul-${blocks.length}-${itemIndex}`}>
+              {renderInlineMarkdown(item, `ul-${blocks.length}-${itemIndex}`)}
+            </li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^\d+\.\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ol key={`ol-${blocks.length}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ol-${blocks.length}-${itemIndex}`}>
+              {renderInlineMarkdown(item, `ol-${blocks.length}-${itemIndex}`)}
+            </li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (index < lines.length) {
+      const candidate = lines[index];
+      const candidateTrimmed = candidate.trim();
+      if (
+        !candidateTrimmed
+        || candidateTrimmed.startsWith("```")
+        || /^#{1,6}\s+/.test(candidate)
+        || /^>\s?/.test(candidateTrimmed)
+        || /^[-*]\s+/.test(candidateTrimmed)
+        || /^\d+\.\s+/.test(candidateTrimmed)
+      ) {
+        break;
+      }
+      paragraphLines.push(candidateTrimmed);
+      index += 1;
+    }
+
+    blocks.push(
+      <p key={`p-${blocks.length}`}>
+        {renderInlineMarkdown(paragraphLines.join(" "), `p-${blocks.length}`)}
+      </p>,
+    );
+  }
+
+  return blocks;
+}
+
 function ProviderStatusDot({ available }) {
   return <span className={`settings-provider-dot ${available ? "settings-provider-dot-live" : ""}`} aria-hidden="true" />;
 }
 
-function ProviderCard({ provider, selectedMethod, config, onSelectProvider, onConfigChange, onSave, saving, text }) {
-  const expanded = provider.id === selectedMethod?.providerID || provider.id === selectedMethod?.selectedProviderID;
-  const currentMethod = provider.id === selectedMethod?.selectedProviderID
-    ? selectedMethod?.method
+function ProviderCard({
+  provider,
+  selectedProviderID,
+  selectedMethodID,
+  config,
+  onSelectProvider,
+  onSelectMethod,
+  onConfigChange,
+  onSave,
+  saving,
+  text,
+  claudeOAuth,
+  claudeOAuthCode,
+  onClaudeOAuthCodeChange,
+  onClaudeOAuthStart,
+  onClaudeOAuthSubmit,
+  onClaudeOAuthCancel,
+  onClaudeOAuthUnlink,
+  claudeOAuthBusy,
+}) {
+  const expanded = provider.id === selectedProviderID;
+  const currentMethod = expanded
+    ? provider.methods?.find((method) => method.id === selectedMethodID) || getAvailableMethod(provider)
     : getAvailableMethod(provider);
+  const isClaudeOAuth = provider.id === "claude" && currentMethod?.id === "oauth_token";
   const hasRequiredValues = (currentMethod?.fields || [])
     .filter((field) => field.required)
     .every((field) => (config[field.key] || "").trim());
@@ -123,8 +746,74 @@ function ProviderCard({ provider, selectedMethod, config, onSelectProvider, onCo
       {expanded ? (
         <div className="settings-provider-body">
           <div className="settings-provider-copy">
-            <p>{text.providerHelp}</p>
+            {isClaudeOAuth ? null : <p>{text.providerHelp}</p>}
+            {isClaudeOAuth ? (
+              <p>
+                {claudeOAuth.pending
+                  ? text.claudeOAuthPending
+                  : claudeOAuth.linked
+                    ? text.claudeOAuthLinked
+                    : text.claudeOAuthNotLinked}
+              </p>
+            ) : null}
           </div>
+
+          {provider.methods?.length > 1 ? (
+            <div className="workspace-field">
+              <span className="workspace-field-label">{text.methodLabel}</span>
+              <div className="settings-method-toggle" role="tablist" aria-label={text.methodLabel}>
+                {provider.methods.map((method) => {
+                  const selected = method.id === currentMethod?.id;
+                  return (
+                    <button
+                      key={method.id}
+                      className={`settings-method-toggle-button ${selected ? "settings-method-toggle-button-active" : ""}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      onClick={() => onSelectMethod(provider.id, method.id)}
+                    >
+                      {method.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          {isClaudeOAuth && claudeOAuth.pending && claudeOAuth.authorizationURL ? (
+            <div className="workspace-field">
+              <p className="workspace-help-text">
+                {text.claudeOAuthOpenLinkPrefix}{" "}
+                <a
+                  className="workspace-inline-link"
+                  href={claudeOAuth.authorizationURL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {text.claudeOAuthAuthorizationURL}
+                </a>
+                .
+              </p>
+            </div>
+          ) : null}
+
+          {isClaudeOAuth && claudeOAuth.pending && claudeOAuth.requiresCode ? (
+            <label className="workspace-field" htmlFor={`${provider.id}-oauth-code`}>
+              <span className="workspace-field-label">
+                {text.claudeOAuthCodeLabel}
+                <span className="workspace-field-required">{text.fieldRequired}</span>
+              </span>
+              <input
+                id={`${provider.id}-oauth-code`}
+                className="workspace-input"
+                type="text"
+                value={claudeOAuthCode}
+                onChange={(event) => onClaudeOAuthCodeChange(event.target.value)}
+                placeholder={text.claudeOAuthCodePlaceholder}
+              />
+            </label>
+          ) : null}
 
           {(currentMethod?.fields || []).map((field) => (
             <label key={field.key} className="workspace-field" htmlFor={`${provider.id}-${field.key}`}>
@@ -153,26 +842,83 @@ function ProviderCard({ provider, selectedMethod, config, onSelectProvider, onCo
             </label>
           ))}
 
-          <button
-            className="settings-provider-save-button"
-            type="button"
-            onClick={() => onSave(provider.id, currentMethod?.id)}
-            disabled={!hasRequiredValues || saving}
-          >
-            {saving ? text.saving : text.saveKey}
-          </button>
+          {isClaudeOAuth ? (
+            <div className="chat-composer-right">
+              {claudeOAuth.pending ? (
+                <>
+                  {claudeOAuth.requiresCode ? (
+                    <button
+                      className="settings-provider-save-button"
+                      type="button"
+                      onClick={() => onClaudeOAuthSubmit()}
+                      disabled={!claudeOAuthCode.trim() || claudeOAuthBusy}
+                    >
+                      {claudeOAuthBusy ? text.saving : text.claudeOAuthSubmit}
+                    </button>
+                  ) : null}
+                  <button
+                    className="chat-settings-button"
+                    type="button"
+                    onClick={() => onClaudeOAuthCancel()}
+                    disabled={claudeOAuthBusy}
+                  >
+                    {text.claudeOAuthCancel}
+                  </button>
+                </>
+              ) : claudeOAuth.linked ? (
+                <button
+                  className="chat-settings-button settings-disconnect-button"
+                  type="button"
+                  onClick={() => onClaudeOAuthUnlink()}
+                  disabled={claudeOAuthBusy}
+                >
+                  {text.claudeOAuthDisconnect}
+                </button>
+              ) : (
+                <button
+                  className="settings-provider-save-button"
+                  type="button"
+                  onClick={() => onClaudeOAuthStart()}
+                  disabled={claudeOAuthBusy}
+                >
+                  {claudeOAuthBusy ? text.saving : text.claudeOAuthStart}
+                </button>
+              )}
+            </div>
+          ) : (
+            <button
+              className="settings-provider-save-button"
+              type="button"
+              onClick={() => onSave(provider.id, currentMethod?.id)}
+              disabled={!hasRequiredValues || saving}
+            >
+              {saving ? text.saving : text.saveKey}
+            </button>
+          )}
         </div>
       ) : null}
     </section>
   );
 }
 
-function ChatBubble({ role, content, label }) {
+function ChatBubble({ role, content, label, pending = false, pendingLabel = "" }) {
   return (
     <article className={`chat-bubble-row chat-bubble-row-${role}`}>
-      <div className={`chat-bubble chat-bubble-${role}`}>
+      <div className={`chat-bubble chat-bubble-${role} ${pending ? "chat-bubble-pending" : ""}`}>
         <span className="chat-bubble-label">{label}</span>
-        <p>{content}</p>
+        {pending ? (
+          <div className="chat-bubble-loader" aria-label={pendingLabel} role="status">
+            <span />
+            <span />
+            <span />
+          </div>
+        ) : (
+          role === "assistant" ? (
+            <div className="chat-bubble-markdown">{renderMarkdown(content)}</div>
+          ) : (
+            <p>{content}</p>
+          )
+        )}
       </div>
     </article>
   );
@@ -190,6 +936,8 @@ export function App() {
   const [config, setConfig] = useState({});
   const [prompt, setPrompt] = useState("");
   const [anonymizedPrompt, setAnonymizedPrompt] = useState("");
+  const [previewSourceText, setPreviewSourceText] = useState("");
+  const [previewFindings, setPreviewFindings] = useState([]);
   const [messages, setMessages] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [activeConversationID, setActiveConversationID] = useState("");
@@ -200,9 +948,13 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingProviderID, setSavingProviderID] = useState("");
+  const [claudeOAuth, setClaudeOAuth] = useState(() => normalizeClaudeOAuthStatus());
+  const [claudeOAuthCode, setClaudeOAuthCode] = useState("");
+  const [claudeOAuthAction, setClaudeOAuthAction] = useState("");
   const anonymizeRequestRef = useRef(0);
   const threadRef = useRef(null);
   const storedSelectionRef = useRef(readStoredWorkspaceSelection());
+  const lastOpenedClaudeOAuthURLRef = useRef("");
 
   useEffect(() => {
     document.title = `klovys99 ${text.title}`;
@@ -215,6 +967,7 @@ export function App() {
       nextMethodID = methodID,
       nextModel = model,
       keepConfig = false,
+      claudeOAuthStatus = claudeOAuth,
     } = options;
     setLoadingProviders(true);
     try {
@@ -224,7 +977,7 @@ export function App() {
         throw new Error(payload.error || "Failed to load providers");
       }
       setRequestError("");
-      const nextProviders = payload.providers || [];
+      const nextProviders = mergeProvidersWithClaudeOAuth(payload.providers || [], claudeOAuthStatus, text);
       setProviders(nextProviders);
       if (nextProviders.length === 0) {
         setProviderID("");
@@ -272,6 +1025,50 @@ export function App() {
     }
   }
 
+  function applyClaudeOAuthState(status) {
+    const nextStatus = normalizeClaudeOAuthStatus(status);
+    setClaudeOAuth(nextStatus);
+    setProviders((current) => mergeProvidersWithClaudeOAuth(current, nextStatus, text));
+    if (!nextStatus.pending || !nextStatus.requiresCode) {
+      setClaudeOAuthCode("");
+    }
+    return nextStatus;
+  }
+
+  async function syncClaudeOAuthLinkedState(nextStatus, options = {}) {
+    const { keepCurrentModel = false } = options;
+    if (!nextStatus?.linked) {
+      return;
+    }
+    setProviderID("claude");
+    setMethodID("oauth_token");
+    await loadProviders({
+      preserveSelection: true,
+      nextProviderID: "claude",
+      nextMethodID: "oauth_token",
+      nextModel: keepCurrentModel && selectedProvider?.id === "claude" ? model : "",
+      keepConfig: true,
+      claudeOAuthStatus: nextStatus,
+    });
+  }
+
+  async function fetchClaudeOAuthStatus(options = {}) {
+    const { silent = false } = options;
+    try {
+      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/providers/claude/oauth/status"));
+      const payload = await readJSON(response);
+      if (!response.ok) {
+        throw new Error(payload.error || text.providerError);
+      }
+      return applyClaudeOAuthState(payload);
+    } catch (error) {
+      if (!silent) {
+        setRequestError(error.message);
+      }
+      return null;
+    }
+  }
+
   const selectedProvider = useMemo(
     () => providers.find((provider) => provider.id === providerID) || null,
     [providers, providerID],
@@ -283,6 +1080,14 @@ export function App() {
   const selectedMethod = useMemo(
     () => selectedProvider?.methods?.find((method) => method.id === methodID) || getAvailableMethod(selectedProvider),
     [selectedProvider, methodID],
+  );
+  const activePreviewMatchesPrompt = previewSourceText === prompt;
+  const displayPreviewFindings = previewSourceText && prompt.startsWith(previewSourceText)
+    ? previewFindings
+    : [];
+  const anonymizedPreviewHTML = useMemo(
+    () => renderHighlightedResult(prompt, displayPreviewFindings),
+    [prompt, displayPreviewFindings],
   );
   const connectedProviderID = connectedProviders.some((provider) => provider.id === providerID)
     ? providerID
@@ -316,6 +1121,26 @@ export function App() {
     }
     setProviderID(connectedProviders[0].id);
   }, [connectedProviders, providerID, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+    fetchClaudeOAuthStatus({ silent: true });
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    const authorizationURL = claudeOAuth.authorizationURL;
+    if (!claudeOAuth.pending || !authorizationURL) {
+      lastOpenedClaudeOAuthURLRef.current = "";
+      return;
+    }
+    if (lastOpenedClaudeOAuthURLRef.current === authorizationURL) {
+      return;
+    }
+    lastOpenedClaudeOAuthURLRef.current = authorizationURL;
+    window.open(authorizationURL, "_blank", "noopener,noreferrer");
+  }, [claudeOAuth.authorizationURL, claudeOAuth.pending]);
 
   useEffect(() => {
     writeStoredWorkspaceSelection({ providerID, methodID, model });
@@ -369,6 +1194,8 @@ export function App() {
       applyConversationSelection(payload);
       setPrompt("");
       setAnonymizedPrompt("");
+      setPreviewSourceText("");
+      setPreviewFindings([]);
       setStatus(text.idleStatus);
       setRequestError("");
     }
@@ -392,7 +1219,8 @@ export function App() {
 
     async function initialize() {
       try {
-        await loadProviders();
+        const initialClaudeOAuth = await fetchClaudeOAuthStatus({ silent: true });
+        await loadProviders({ claudeOAuthStatus: initialClaudeOAuth || claudeOAuth });
         if (cancelled) {
           return;
         }
@@ -431,6 +1259,8 @@ export function App() {
 
     if (!trimmedPrompt) {
       setAnonymizedPrompt("");
+      setPreviewSourceText("");
+      setPreviewFindings([]);
       setAnonymizing(false);
       setStatus(text.idleStatus);
       return undefined;
@@ -452,13 +1282,18 @@ export function App() {
         if (anonymizeRequestRef.current !== requestID) {
           return;
         }
-        setAnonymizedPrompt(payload.anonymized_text || "");
+        const nextSourceText = String(payload.original_text || prompt);
+        setAnonymizedPrompt(String(payload.anonymized_text || ""));
+        setPreviewSourceText(nextSourceText);
+        setPreviewFindings(normalizePreviewFindings(payload.findings, nextSourceText));
         setRequestError("");
         setStatus(text.anonymizedStatus);
       } catch (error) {
         if (anonymizeRequestRef.current !== requestID) {
           return;
         }
+        setPreviewSourceText("");
+        setPreviewFindings([]);
         setRequestError(error.message);
         setStatus(text.previewErrorStatus);
       } finally {
@@ -492,6 +1327,13 @@ export function App() {
     setProviderID(nextProviderID);
   }
 
+  function updateMethod(nextProviderID, nextMethodID) {
+    if (providerID !== nextProviderID) {
+      setProviderID(nextProviderID);
+    }
+    setMethodID(nextMethodID);
+  }
+
   function updateConfig(key, value) {
     setConfig((current) => ({ ...current, [key]: value }));
   }
@@ -523,6 +1365,114 @@ export function App() {
     }
   }
 
+  async function startClaudeOAuth() {
+    setClaudeOAuthAction("start");
+    setRequestError("");
+    try {
+      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/providers/claude/oauth/start"), {
+        method: "POST",
+      });
+      const payload = await readJSON(response);
+      if (!response.ok) {
+        throw new Error(payload.error || text.providerError);
+      }
+      const nextStatus = applyClaudeOAuthState(payload);
+      setProviderID("claude");
+      setMethodID("oauth_token");
+      await loadProviders({
+        preserveSelection: true,
+        nextProviderID: "claude",
+        nextMethodID: "oauth_token",
+        nextModel: model,
+        keepConfig: true,
+        claudeOAuthStatus: nextStatus,
+      });
+      if (nextStatus.linked) {
+        await syncClaudeOAuthLinkedState(nextStatus, { keepCurrentModel: true });
+      }
+    } catch (error) {
+      setRequestError(error.message);
+    } finally {
+      setClaudeOAuthAction("");
+    }
+  }
+
+  async function submitClaudeOAuth() {
+    setClaudeOAuthAction("submit");
+    setRequestError("");
+    try {
+      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/providers/claude/oauth/submit"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: claudeOAuthCode.trim() }),
+      });
+      const payload = await readJSON(response);
+      if (!response.ok) {
+        throw new Error(payload.error || text.providerError);
+      }
+      const nextStatus = applyClaudeOAuthState(payload);
+      await syncClaudeOAuthLinkedState(nextStatus, { keepCurrentModel: true });
+    } catch (error) {
+      setRequestError(error.message);
+    } finally {
+      setClaudeOAuthAction("");
+    }
+  }
+
+  async function cancelClaudeOAuth() {
+    setClaudeOAuthAction("cancel");
+    setRequestError("");
+    try {
+      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/providers/claude/oauth/cancel"), {
+        method: "POST",
+      });
+      const payload = await readJSON(response);
+      if (!response.ok) {
+        throw new Error(payload.error || text.providerError);
+      }
+      const nextStatus = applyClaudeOAuthState(payload);
+      await loadProviders({
+        preserveSelection: true,
+        nextProviderID: providerID,
+        nextMethodID: methodID,
+        nextModel: model,
+        keepConfig: true,
+        claudeOAuthStatus: nextStatus,
+      });
+    } catch (error) {
+      setRequestError(error.message);
+    } finally {
+      setClaudeOAuthAction("");
+    }
+  }
+
+  async function unlinkClaudeOAuth() {
+    setClaudeOAuthAction("unlink");
+    setRequestError("");
+    try {
+      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/providers/claude/oauth"), {
+        method: "DELETE",
+      });
+      const payload = await readJSON(response);
+      if (!response.ok) {
+        throw new Error(payload.error || text.providerError);
+      }
+      const nextStatus = applyClaudeOAuthState(payload);
+      await loadProviders({
+        preserveSelection: true,
+        nextProviderID: providerID,
+        nextMethodID: methodID === "oauth_token" ? "api_key" : methodID,
+        nextModel: model,
+        keepConfig: true,
+        claudeOAuthStatus: nextStatus,
+      });
+    } catch (error) {
+      setRequestError(error.message);
+    } finally {
+      setClaudeOAuthAction("");
+    }
+  }
+
   async function startNewConversation() {
     try {
       const created = await createConversation();
@@ -550,15 +1500,35 @@ export function App() {
     const hasStoredProvider = providers.some((provider) => (
       provider.available || provider.methods?.some((method) => method.available)
     ));
-    const hasSelectedLocalCredentials = (selectedMethod?.fields || [])
-      .filter((field) => field.required)
-      .every((field) => (config[field.key] || "").trim());
-    if ((!hasStoredProvider && !hasSelectedLocalCredentials) || (!selectedProvider?.available && !hasSelectedLocalCredentials)) {
+    const isSelectedClaudeOAuth = selectedProvider?.id === "claude" && selectedMethod?.id === "oauth_token";
+    const hasSelectedCredentials = isSelectedClaudeOAuth
+      ? claudeOAuth.linked
+      : (selectedMethod?.fields || [])
+        .filter((field) => field.required)
+        .every((field) => (config[field.key] || "").trim());
+    const selectedMethodReady = isSelectedClaudeOAuth
+      ? claudeOAuth.linked
+      : Boolean(selectedMethod?.available) || hasSelectedCredentials;
+    if ((!hasStoredProvider && !hasSelectedCredentials) || !selectedMethodReady) {
       setSettingsOpen(true);
       return;
     }
+    const promptSnapshot = prompt;
+    const anonymizedPromptSnapshot = anonymizedPrompt;
+    const previewSourceTextSnapshot = previewSourceText;
+    const previewFindingsSnapshot = previewFindings;
+    const previousMessages = messages;
+    const optimisticUserMessage = buildOptimisticMessage("user", anonymizedPromptSnapshot);
+    const optimisticAssistantMessage = buildOptimisticMessage("assistant", "", { pending: true });
+
     setSending(true);
     setRequestError("");
+    setMessages((current) => [...current, optimisticUserMessage, optimisticAssistantMessage]);
+    setPrompt("");
+    setAnonymizedPrompt("");
+    setPreviewSourceText("");
+    setPreviewFindings([]);
+    setStatus(text.sendingStatus);
     try {
       const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/complete"), {
         method: "POST",
@@ -568,7 +1538,7 @@ export function App() {
           provider: providerID,
           method: methodID,
           model,
-          anonymized_prompt: anonymizedPrompt,
+          anonymized_prompt: anonymizedPromptSnapshot,
           config,
         }),
       });
@@ -577,8 +1547,6 @@ export function App() {
         throw new Error(payload.error || text.providerError);
       }
       const nextConversationID = payload.conversation_id || activeConversationID;
-      setPrompt("");
-      setAnonymizedPrompt("");
       setStatus(text.responseStatus);
       await loadProviders({
         preserveSelection: true,
@@ -589,6 +1557,12 @@ export function App() {
       });
       await syncConversations(nextConversationID);
     } catch (error) {
+      setMessages(previousMessages);
+      setPrompt(promptSnapshot);
+      setAnonymizedPrompt(anonymizedPromptSnapshot);
+      setPreviewSourceText(previewSourceTextSnapshot);
+      setPreviewFindings(previewFindingsSnapshot);
+      setStatus(text.anonymizedStatus);
       setRequestError(error.message);
     } finally {
       setSending(false);
@@ -596,14 +1570,16 @@ export function App() {
   }
 
   const configFields = selectedMethod?.fields || [];
-  const completedConfigFields = configFields.filter((field) => (config[field.key] || "").trim()).length;
-  const hasSelectedLocalCredentials = configFields
-    .filter((field) => field.required)
-    .every((field) => (config[field.key] || "").trim());
+  const isSelectedClaudeOAuth = selectedProvider?.id === "claude" && selectedMethod?.id === "oauth_token";
+  const hasSelectedCredentials = isSelectedClaudeOAuth
+    ? claudeOAuth.linked
+    : configFields
+      .filter((field) => field.required)
+      .every((field) => (config[field.key] || "").trim());
   const hasConfiguredProvider = providers.some((provider) => (
     provider.available || provider.methods?.some((method) => method.available)
-  )) || hasSelectedLocalCredentials;
-  const canSend = Boolean(anonymizedPrompt && !sending && !anonymizing);
+  )) || hasSelectedCredentials;
+  const canSend = Boolean(anonymizedPrompt && activePreviewMatchesPrompt && !sending && !anonymizing);
 
   return (
     <div className="chat-app-shell">
@@ -614,7 +1590,7 @@ export function App() {
           </a>
         </div>
 
-        <button className="chat-new-conversation" type="button" onClick={startNewConversation}>
+        <button className="chat-new-conversation" type="button" onClick={startNewConversation} disabled={sending}>
           + {text.newConversation}
         </button>
 
@@ -626,6 +1602,7 @@ export function App() {
               className={`chat-history-item ${conversation.id === activeConversationID ? "chat-history-item-active" : ""}`}
               type="button"
               onClick={() => handleSelectConversation(conversation.id)}
+              disabled={sending}
             >
               {conversationTitle(conversation, text.newConversationLabel)}
             </button>
@@ -649,9 +1626,11 @@ export function App() {
             <div className="chat-message-list">
               {messages.map((message, index) => (
                 <ChatBubble
-                  key={`${message.created_at || index}-${index}`}
+                  key={message.id || `${message.created_at || index}-${index}`}
                   role={message.role}
                   content={message.content}
+                  pending={message.pending}
+                  pendingLabel={text.responsePending}
                   label={message.role === "user" ? text.sentLabel : `${selectedProvider?.label || "AI"} ${text.receivedLabel}`}
                 />
               ))}
@@ -661,21 +1640,27 @@ export function App() {
 
         <section className="chat-composer-wrap">
           <div className="chat-anonymized-preview">
-            <pre className={`chat-anonymized-preview-body ${anonymizedPrompt ? "" : "chat-anonymized-preview-body-empty"}`}>
-              {anonymizedPrompt || (anonymizing ? text.previewPending : text.noAnonymizedPrompt)}
-            </pre>
+            {prompt ? (
+              <div
+                className={`chat-anonymized-preview-body ${displayPreviewFindings.length === 0 ? "chat-anonymized-preview-body-empty" : ""}`}
+                dangerouslySetInnerHTML={{ __html: anonymizedPreviewHTML }}
+              />
+            ) : (
+              <pre className="chat-anonymized-preview-body chat-anonymized-preview-body-empty">
+                {text.noAnonymizedPrompt}
+              </pre>
+            )}
           </div>
 
           <div className="chat-composer">
-            <textarea
-              id="prompt"
-              className="chat-composer-input"
+            <RichTextPromptEditor
               value={prompt}
-              onChange={(event) => {
-                setPrompt(event.target.value);
-                setRequestError("");
-              }}
+              findings={displayPreviewFindings}
               placeholder={text.promptPlaceholder}
+              canSend={canSend}
+              onSend={handleSend}
+              onInteraction={() => setRequestError("")}
+              onChange={setPrompt}
             />
             <button className="chat-send-button" type="button" onClick={handleSend} disabled={!canSend}>
               ↑
@@ -745,30 +1730,25 @@ export function App() {
                     <ProviderCard
                       key={provider.id}
                       provider={provider}
-                      selectedMethod={{ method: selectedMethod, selectedProviderID: providerID }}
+                      selectedProviderID={providerID}
+                      selectedMethodID={methodID}
                       config={provider.id === providerID ? config : {}}
                       onSelectProvider={updateProvider}
+                      onSelectMethod={updateMethod}
                       onConfigChange={updateConfig}
                       onSave={saveProviderCredentials}
                       saving={savingProviderID === provider.id}
                       text={text}
+                      claudeOAuth={claudeOAuth}
+                      claudeOAuthCode={claudeOAuthCode}
+                      onClaudeOAuthCodeChange={setClaudeOAuthCode}
+                      onClaudeOAuthStart={startClaudeOAuth}
+                      onClaudeOAuthSubmit={submitClaudeOAuth}
+                      onClaudeOAuthCancel={cancelClaudeOAuth}
+                      onClaudeOAuthUnlink={unlinkClaudeOAuth}
+                      claudeOAuthBusy={claudeOAuthAction !== ""}
                     />
                   ))}
-                </div>
-
-                <div className="settings-summary-bar">
-                  <div className="metric-card">
-                    <span>{text.activeProvider}</span>
-                    <strong>{selectedProvider?.label || text.providerUnavailable}</strong>
-                  </div>
-                  <div className="metric-card">
-                    <span>{text.statusLabel}</span>
-                    <strong>{completedConfigFields}/{configFields.length}</strong>
-                  </div>
-                  <div className="metric-card">
-                    <span>{text.promptWords}</span>
-                    <strong>{countWords(prompt)}</strong>
-                  </div>
                 </div>
               </div>
             </div>
