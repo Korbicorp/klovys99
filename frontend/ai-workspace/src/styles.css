@@ -418,6 +418,66 @@ body {
   color: var(--type-highlight-text, #084b9a);
 }
 
+.chat-bubble-pii-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-pii-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  margin: 0 1px;
+  padding: 1px 4px;
+  border: 1px solid var(--type-highlight-border, rgba(7, 108, 216, 0.18));
+  border-radius: 6px;
+  background: var(--type-highlight-bg, rgba(7, 108, 216, 0.15));
+  color: var(--type-highlight-text, #084b9a);
+  font: inherit;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.chat-pii-toggle:hover,
+.chat-pii-toggle:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--type-highlight-border, rgba(7, 108, 216, 0.18)) 45%, transparent);
+  outline: none;
+}
+
+.chat-pii-toggle-token {
+  background: color-mix(in srgb, var(--type-highlight-bg, rgba(7, 108, 216, 0.15)) 55%, #ffffff);
+}
+
+.chat-pii-toggle-text {
+  display: inline-block;
+}
+
+.chat-pii-toggle-hover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  min-width: max-content;
+  max-width: min(320px, 70vw);
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.94);
+  color: #fff;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+  z-index: 2;
+}
+
+.chat-pii-toggle:hover .chat-pii-toggle-hover,
+.chat-pii-toggle:focus-visible .chat-pii-toggle-hover {
+  opacity: 1;
+}
+
 .chat-send-button {
   position: absolute;
   right: 16px;

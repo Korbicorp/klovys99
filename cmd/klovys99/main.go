@@ -325,7 +325,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewService())
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewService(anonymizerService))
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,

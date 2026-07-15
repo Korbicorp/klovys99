@@ -269,6 +269,22 @@ function normalizePreviewFindings(findings, sourceText = "") {
     .sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
+function normalizePIIReplacements(replacements) {
+  if (!Array.isArray(replacements)) {
+    return [];
+  }
+  return replacements
+    .map((replacement) => ({
+      type: String(replacement.type || "UNKNOWN"),
+      token: String(replacement.token || ""),
+      value: String(replacement.value || ""),
+      start: safeNumber(replacement.start),
+      end: safeNumber(replacement.end),
+    }))
+    .filter((replacement) => replacement.token && replacement.end >= replacement.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
 function renderTextWithFindings(sourceText, findings, mapFinding) {
   if (!findings.length) {
     return escapeHtml(sourceText).replaceAll("\n", "<br>");
@@ -301,6 +317,84 @@ function renderHighlightedResult(sourceText, findings) {
     className: "preview-highlight-enabled",
     style: styleAttributeForType(finding.type),
   }));
+}
+
+const piiMarkerPattern = /\uE000(\d+)\uE001/g;
+
+function injectPIIMarkers(content, replacements) {
+  if (!replacements.length) {
+    return { content, markers: [] };
+  }
+
+  let cursor = 0;
+  let output = "";
+  const markers = [];
+
+  replacements.forEach((replacement) => {
+    output += content.slice(cursor, replacement.start);
+    const markerIndex = markers.length;
+    output += `\uE000${markerIndex}\uE001`;
+    markers.push(replacement);
+    cursor = replacement.end;
+  });
+
+  output += content.slice(cursor);
+  return { content: output, markers };
+}
+
+function renderPIIToken(replacement, key, toggledTokens, onToggle) {
+  const isTokenVisible = toggledTokens.has(replacement.token);
+  const displayText = isTokenVisible ? replacement.token : replacement.value;
+  const theme = themeForType(replacement.type);
+
+  return (
+    <button
+      key={key}
+      type="button"
+      className={`chat-pii-toggle ${isTokenVisible ? "chat-pii-toggle-token" : ""}`}
+      style={{
+        "--type-highlight-bg": theme.background,
+        "--type-highlight-border": theme.border,
+        "--type-highlight-text": theme.text,
+      }}
+      title={isTokenVisible ? replacement.value : replacement.token}
+      onClick={() => onToggle(replacement.token)}
+    >
+      <span className="chat-pii-toggle-text">{displayText}</span>
+      <span className="chat-pii-toggle-hover">{isTokenVisible ? replacement.value : replacement.token}</span>
+    </button>
+  );
+}
+
+function renderTextWithPIIMarkers(text, keyPrefix, markers, toggledTokens, onToggle) {
+  if (!markers.length) {
+    return [text];
+  }
+
+  const parts = [];
+  let cursor = 0;
+  let match;
+
+  piiMarkerPattern.lastIndex = 0;
+  while ((match = piiMarkerPattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      parts.push(text.slice(cursor, match.index));
+    }
+    const replacement = markers[Number(match[1])];
+    if (replacement) {
+      parts.push(renderPIIToken(replacement, `${keyPrefix}-pii-${match.index}`, toggledTokens, onToggle));
+    } else {
+      parts.push(match[0]);
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+
+  piiMarkerPattern.lastIndex = 0;
+  return parts;
 }
 
 function extractPlainText(node) {
@@ -529,7 +623,7 @@ function RichTextPromptEditor({
   );
 }
 
-function renderInlineMarkdown(text, keyPrefix) {
+function renderInlineMarkdown(text, keyPrefix, markers = [], toggledTokens = new Set(), onToggle = () => {}) {
   const pattern = /(\[[^\]]+\]\((https?:\/\/[^\s)]+)\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
   const parts = [];
   let cursor = 0;
@@ -537,7 +631,7 @@ function renderInlineMarkdown(text, keyPrefix) {
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > cursor) {
-      parts.push(text.slice(cursor, match.index));
+      parts.push(...renderTextWithPIIMarkers(text.slice(cursor, match.index), `${keyPrefix}-text-${cursor}`, markers, toggledTokens, onToggle));
     }
 
     const token = match[0];
@@ -548,29 +642,30 @@ function renderInlineMarkdown(text, keyPrefix) {
       const label = token.slice(1, closingBracket);
       parts.push(
         <a key={key} href={match[2]} target="_blank" rel="noreferrer">
-          {label}
+          {renderTextWithPIIMarkers(label, `${key}-link`, markers, toggledTokens, onToggle)}
         </a>,
       );
     } else if (token.startsWith("`")) {
-      parts.push(<code key={key}>{token.slice(1, -1)}</code>);
+      parts.push(<code key={key}>{renderTextWithPIIMarkers(token.slice(1, -1), `${key}-code`, markers, toggledTokens, onToggle)}</code>);
     } else if (token.startsWith("**")) {
-      parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+      parts.push(<strong key={key}>{renderTextWithPIIMarkers(token.slice(2, -2), `${key}-strong`, markers, toggledTokens, onToggle)}</strong>);
     } else if (token.startsWith("*")) {
-      parts.push(<em key={key}>{token.slice(1, -1)}</em>);
+      parts.push(<em key={key}>{renderTextWithPIIMarkers(token.slice(1, -1), `${key}-em`, markers, toggledTokens, onToggle)}</em>);
     }
 
     cursor = match.index + token.length;
   }
 
   if (cursor < text.length) {
-    parts.push(text.slice(cursor));
+    parts.push(...renderTextWithPIIMarkers(text.slice(cursor), `${keyPrefix}-tail-${cursor}`, markers, toggledTokens, onToggle));
   }
 
   return parts;
 }
 
-function renderMarkdown(content) {
-  const normalized = content.replace(/\r\n?/g, "\n");
+function renderMarkdown(content, replacements = [], toggledTokens = new Set(), onToggle = () => {}) {
+  const injected = injectPIIMarkers(content, replacements);
+  const normalized = injected.content.replace(/\r\n?/g, "\n");
   const lines = normalized.split("\n");
   const blocks = [];
   let index = 0;
@@ -609,7 +704,7 @@ function renderMarkdown(content) {
       const HeadingTag = `h${level}`;
       blocks.push(
         <HeadingTag key={`heading-${blocks.length}`}>
-          {renderInlineMarkdown(headingMatch[2], `heading-${blocks.length}`)}
+          {renderInlineMarkdown(headingMatch[2], `heading-${blocks.length}`, injected.markers, toggledTokens, onToggle)}
         </HeadingTag>,
       );
       index += 1;
@@ -624,7 +719,7 @@ function renderMarkdown(content) {
       }
       blocks.push(
         <blockquote key={`quote-${blocks.length}`}>
-          {renderInlineMarkdown(quoteLines.join(" "), `quote-${blocks.length}`)}
+          {renderInlineMarkdown(quoteLines.join(" "), `quote-${blocks.length}`, injected.markers, toggledTokens, onToggle)}
         </blockquote>,
       );
       continue;
@@ -640,7 +735,7 @@ function renderMarkdown(content) {
         <ul key={`ul-${blocks.length}`}>
           {items.map((item, itemIndex) => (
             <li key={`ul-${blocks.length}-${itemIndex}`}>
-              {renderInlineMarkdown(item, `ul-${blocks.length}-${itemIndex}`)}
+              {renderInlineMarkdown(item, `ul-${blocks.length}-${itemIndex}`, injected.markers, toggledTokens, onToggle)}
             </li>
           ))}
         </ul>,
@@ -658,7 +753,7 @@ function renderMarkdown(content) {
         <ol key={`ol-${blocks.length}`}>
           {items.map((item, itemIndex) => (
             <li key={`ol-${blocks.length}-${itemIndex}`}>
-              {renderInlineMarkdown(item, `ol-${blocks.length}-${itemIndex}`)}
+              {renderInlineMarkdown(item, `ol-${blocks.length}-${itemIndex}`, injected.markers, toggledTokens, onToggle)}
             </li>
           ))}
         </ol>,
@@ -686,7 +781,7 @@ function renderMarkdown(content) {
 
     blocks.push(
       <p key={`p-${blocks.length}`}>
-        {renderInlineMarkdown(paragraphLines.join(" "), `p-${blocks.length}`)}
+        {renderInlineMarkdown(paragraphLines.join(" "), `p-${blocks.length}`, injected.markers, toggledTokens, onToggle)}
       </p>,
     );
   }
@@ -901,7 +996,33 @@ function ProviderCard({
   );
 }
 
-function ChatBubble({ role, content, label, pending = false, pendingLabel = "" }) {
+function ChatBubble({ role, content, label, pending = false, pendingLabel = "", piiReplacements = [] }) {
+  const replacements = useMemo(() => normalizePIIReplacements(piiReplacements), [piiReplacements]);
+  const injectedPlainContent = useMemo(() => injectPIIMarkers(content, replacements), [content, replacements]);
+  const replacementsKey = useMemo(
+    () => replacements.map((replacement) => (
+      `${replacement.token}:${replacement.start}:${replacement.end}:${replacement.value}`
+    )).join("|"),
+    [replacements],
+  );
+  const [toggledTokens, setToggledTokens] = useState(() => new Set());
+
+  useEffect(() => {
+    setToggledTokens(new Set());
+  }, [content, replacementsKey]);
+
+  function handleToggle(token) {
+    setToggledTokens((current) => {
+      const next = new Set(current);
+      if (next.has(token)) {
+        next.delete(token);
+      } else {
+        next.add(token);
+      }
+      return next;
+    });
+  }
+
   return (
     <article className={`chat-bubble-row chat-bubble-row-${role}`}>
       <div className={`chat-bubble chat-bubble-${role} ${pending ? "chat-bubble-pending" : ""}`}>
@@ -914,9 +1035,21 @@ function ChatBubble({ role, content, label, pending = false, pendingLabel = "" }
           </div>
         ) : (
           role === "assistant" ? (
-            <div className="chat-bubble-markdown">{renderMarkdown(content)}</div>
+            <div className="chat-bubble-markdown chat-bubble-pii-content">
+              {renderMarkdown(content, replacements, toggledTokens, handleToggle)}
+            </div>
           ) : (
-            <p>{content}</p>
+            <p className={replacements.length > 0 ? "chat-bubble-pii-content" : ""}>
+              {replacements.length > 0
+                ? renderTextWithPIIMarkers(
+                  injectedPlainContent.content,
+                  `${role}-plain`,
+                  injectedPlainContent.markers,
+                  toggledTokens,
+                  handleToggle,
+                )
+                : content}
+            </p>
           )
         )}
       </div>
@@ -1518,7 +1651,11 @@ export function App() {
     const previewSourceTextSnapshot = previewSourceText;
     const previewFindingsSnapshot = previewFindings;
     const previousMessages = messages;
-    const optimisticUserMessage = buildOptimisticMessage("user", anonymizedPromptSnapshot);
+    const displayPromptSnapshot = previewSourceTextSnapshot || promptSnapshot;
+    const optimisticUserMessage = {
+      ...buildOptimisticMessage("user", displayPromptSnapshot),
+      pii_replacements: previewFindingsSnapshot,
+    };
     const optimisticAssistantMessage = buildOptimisticMessage("assistant", "", { pending: true });
 
     setSending(true);
@@ -1547,6 +1684,21 @@ export function App() {
         throw new Error(payload.error || text.providerError);
       }
       const nextConversationID = payload.conversation_id || activeConversationID;
+      const restoredResponseText = String(payload.response_text || "");
+      const responsePIIReplacements = normalizePIIReplacements(payload.response_pii_replacements);
+      setMessages((current) => {
+        if (current.length < 2) {
+          return current;
+        }
+        return [
+          ...current.slice(0, -2),
+          optimisticUserMessage,
+          {
+            ...buildOptimisticMessage("assistant", restoredResponseText, { id: optimisticAssistantMessage.id }),
+            pii_replacements: responsePIIReplacements,
+          },
+        ];
+      });
       setStatus(text.responseStatus);
       await loadProviders({
         preserveSelection: true,
@@ -1629,6 +1781,7 @@ export function App() {
                   key={message.id || `${message.created_at || index}-${index}`}
                   role={message.role}
                   content={message.content}
+                  piiReplacements={message.pii_replacements}
                   pending={message.pending}
                   pendingLabel={text.responsePending}
                   label={message.role === "user" ? text.sentLabel : `${selectedProvider?.label || "AI"} ${text.receivedLabel}`}

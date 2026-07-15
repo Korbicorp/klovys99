@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/credential"
 )
 
@@ -405,6 +406,158 @@ func TestServiceCompletePersistsConversationAndTruncatesProviderHistory(t *testi
 	}
 	if stored.Messages[16].Content != "[NEW_EMAIL_1]" || stored.Messages[17].Content != "assistant-response" {
 		t.Fatalf("stored messages tail = %#v, want persisted user+assistant messages", stored.Messages[len(stored.Messages)-2:])
+	}
+}
+
+func TestServiceCompleteRestoresProviderResponseButPersistsAnonymizedConversation(t *testing.T) {
+	t.Setenv(credential.SecretEnv, "test-secret")
+	t.Setenv(aiWorkspaceDirEnv, t.TempDir())
+
+	shared := newSharedEmailAnonymizer(t)
+	seedKnownEmailToken(t, shared, "alice@example.com")
+
+	service := NewService(shared)
+	descriptor := service.providers["openai"].descriptor
+	descriptor.Available = true
+	descriptor.UnavailableReason = ""
+	methodDescriptor := service.providers["openai"].methods["api_key"].descriptor
+	methodDescriptor.Available = true
+	methodDescriptor.UnavailableReason = ""
+	service.providers["openai"] = providerDefinition{
+		descriptor: descriptor,
+		methods: map[string]providerMethod{
+			"api_key": {
+				descriptor: methodDescriptor,
+				call: func(_ context.Context, _ *http.Client, _ string, _ string, messages []ConversationMessage, _ map[string]string) (providerCallResult, error) {
+					if len(messages) != 1 || messages[0].Content != "[EMAIL_1]" {
+						t.Fatalf("messages = %#v, want anonymized provider transcript", messages)
+					}
+					return providerCallResult{ResponseText: "Reply to [EMAIL_1]"}, nil
+				},
+			},
+		},
+	}
+
+	response, err := service.Complete(context.Background(), CompletionRequest{
+		Provider:         "openai",
+		Method:           "api_key",
+		Model:            "gpt-5.1-mini",
+		AnonymizedPrompt: "[EMAIL_1]",
+		Config:           map[string]string{"api_key": "sk-demo"},
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if got, want := response.ResponseText, "Reply to alice@example.com"; got != want {
+		t.Fatalf("ResponseText = %q, want %q", got, want)
+	}
+
+	stored, err := service.store.Get(response.ConversationID)
+	if err != nil {
+		t.Fatalf("store.Get returned error: %v", err)
+	}
+	if len(stored.Messages) != 2 {
+		t.Fatalf("len(stored.Messages) = %d, want 2", len(stored.Messages))
+	}
+	if stored.Messages[0].Content != "[EMAIL_1]" || stored.Messages[1].Content != "Reply to [EMAIL_1]" {
+		t.Fatalf("stored messages = %#v, want anonymized persisted content", stored.Messages)
+	}
+
+	restored, err := service.GetConversation(response.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversation returned error: %v", err)
+	}
+	if restored.Messages[0].Content != "alice@example.com" || restored.Messages[1].Content != "Reply to alice@example.com" {
+		t.Fatalf("restored messages = %#v, want restored display content", restored.Messages)
+	}
+}
+
+func TestServiceGetConversationAndListRestorePersistedContentAcrossRestart(t *testing.T) {
+	t.Setenv(credential.SecretEnv, "test-secret")
+	stateDir := t.TempDir()
+	t.Setenv(aiWorkspaceDirEnv, stateDir)
+
+	storePath := filepath.Join(stateDir, "tokens.sqlite")
+	tokenStore, err := anonymizer.NewSQLiteTokenStore(storePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteTokenStore() error = %v", err)
+	}
+	shared := anonymizer.NewServiceWithTokenStore([]anonymizer.Detector{
+		exactMatchDetector{target: "alice@example.com", entityType: anonymizer.EntityEmail, normalized: "alice@example.com"},
+	}, tokenStore)
+	seedKnownEmailToken(t, shared, "alice@example.com")
+
+	service := NewService(shared)
+	conversation, err := service.CreateConversation()
+	if err != nil {
+		t.Fatalf("CreateConversation returned error: %v", err)
+	}
+	conversation.Title = "Thread [EMAIL_1]"
+	conversation.Messages = []ConversationMessage{
+		{Role: "user", Content: "[EMAIL_1]", CreatedAt: time.Now().UTC()},
+		{Role: "assistant", Content: "Reply to [EMAIL_1]", CreatedAt: time.Now().UTC()},
+	}
+	conversation.UpdatedAt = conversation.Messages[len(conversation.Messages)-1].CreatedAt
+	if err := service.store.Save(conversation); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+	if err := tokenStore.Close(); err != nil {
+		t.Fatalf("tokenStore.Close() error = %v", err)
+	}
+
+	reopenedStore, err := anonymizer.NewSQLiteTokenStore(storePath)
+	if err != nil {
+		t.Fatalf("reopen NewSQLiteTokenStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = reopenedStore.Close()
+	})
+	reloaded := NewService(anonymizer.NewServiceWithTokenStore(nil, reopenedStore))
+
+	got, err := reloaded.GetConversation(conversation.ID)
+	if err != nil {
+		t.Fatalf("GetConversation returned error: %v", err)
+	}
+	if got.Title != "Thread alice@example.com" {
+		t.Fatalf("Title = %q, want restored title", got.Title)
+	}
+	if got.Messages[0].Content != "alice@example.com" || got.Messages[1].Content != "Reply to alice@example.com" {
+		t.Fatalf("messages = %#v, want restored messages after restart", got.Messages)
+	}
+
+	summaries, err := reloaded.ListConversations()
+	if err != nil {
+		t.Fatalf("ListConversations returned error: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].Title != "Thread alice@example.com" {
+		t.Fatalf("summaries = %#v, want restored summary title", summaries)
+	}
+}
+
+func TestServiceLeavesUnknownPlaceholderUnchangedWhenNoMappingExists(t *testing.T) {
+	t.Setenv(credential.SecretEnv, "test-secret")
+	t.Setenv(aiWorkspaceDirEnv, t.TempDir())
+
+	service := NewService(newSharedEmailAnonymizer(t))
+	conversation, err := service.CreateConversation()
+	if err != nil {
+		t.Fatalf("CreateConversation returned error: %v", err)
+	}
+	conversation.Title = "Thread [EMAIL_999]"
+	conversation.Messages = []ConversationMessage{
+		{Role: "assistant", Content: "Unknown [EMAIL_999]", CreatedAt: time.Now().UTC()},
+	}
+	conversation.UpdatedAt = conversation.Messages[0].CreatedAt
+	if err := service.store.Save(conversation); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	got, err := service.GetConversation(conversation.ID)
+	if err != nil {
+		t.Fatalf("GetConversation returned error: %v", err)
+	}
+	if got.Title != "Thread [EMAIL_999]" || got.Messages[0].Content != "Unknown [EMAIL_999]" {
+		t.Fatalf("conversation = %#v, want unknown placeholders unchanged", got)
 	}
 }
 
@@ -1021,4 +1174,52 @@ func equalStringSlices(left []string, right []string) bool {
 		}
 	}
 	return true
+}
+
+type exactMatchDetector struct {
+	target     string
+	entityType anonymizer.EntityType
+	normalized string
+}
+
+func (d exactMatchDetector) FindAll(text string) []anonymizer.Match {
+	index := strings.Index(text, d.target)
+	if index < 0 {
+		return nil
+	}
+	return []anonymizer.Match{{
+		Start:      index,
+		End:        index + len(d.target),
+		Type:       d.entityType,
+		Priority:   10,
+		Normalized: d.normalized,
+	}}
+}
+
+func newSharedEmailAnonymizer(t *testing.T) *anonymizer.Service {
+	t.Helper()
+
+	store, err := anonymizer.NewSQLiteTokenStore(filepath.Join(t.TempDir(), "tokens.sqlite"))
+	if err != nil {
+		t.Fatalf("NewSQLiteTokenStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	return anonymizer.NewServiceWithTokenStore([]anonymizer.Detector{
+		exactMatchDetector{target: "alice@example.com", entityType: anonymizer.EntityEmail, normalized: "alice@example.com"},
+	}, store)
+}
+
+func seedKnownEmailToken(t *testing.T, engine *anonymizer.Service, value string) {
+	t.Helper()
+
+	run := engine.NewRun()
+	defer func() {
+		_ = run.Close()
+	}()
+	output, _ := run.Anonymize(value)
+	if got, want := output, "[EMAIL_1]"; got != want {
+		t.Fatalf("Anonymize(%q) = %q, want %q", value, got, want)
+	}
 }

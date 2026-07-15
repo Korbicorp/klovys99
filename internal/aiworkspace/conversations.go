@@ -28,9 +28,18 @@ type ConversationSummary struct {
 }
 
 type ConversationMessage struct {
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	Role            string           `json:"role"`
+	Content         string           `json:"content"`
+	CreatedAt       time.Time        `json:"created_at"`
+	PIIReplacements []PIIReplacement `json:"pii_replacements,omitempty"`
+}
+
+type PIIReplacement struct {
+	Type  string `json:"type"`
+	Token string `json:"token"`
+	Value string `json:"value"`
+	Start int    `json:"start"`
+	End   int    `json:"end"`
 }
 
 type ConversationDetail struct {
