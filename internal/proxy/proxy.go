@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +27,7 @@ const (
 	DefaultOpenAIURL     = "https://api.openai.com"
 	AnthropicRoutePrefix = "/anthropic"
 	OpenAIRoutePrefix    = "/openai"
-	maxRequestBodyBytes  = 8 << 20
+	maxRequestBodyBytes  = 50 << 20
 )
 
 type TextAnonymizer interface {
@@ -49,9 +50,11 @@ type Config struct {
 	Anthropic      *providers.Anthropic
 	OpenAI         *providers.OpenAI
 	NERAnalyzer    ner.Analyzer
+	FileAnonymizer providers.FileAnonymizer
 }
 
 type responseTransformContextKey struct{}
+type uploadProviderContextKey struct{}
 
 type responseTransformContext struct {
 	mapping   *providers.ResponseRestoreMapping
@@ -90,6 +93,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			Anonymizer:     config.Anonymizer,
 			LogPIIFindings: config.LogPIIFindings,
 			NERAnalyzer:    config.NERAnalyzer,
+			FileAnonymizer: config.FileAnonymizer,
 		})
 		if err != nil {
 			return nil, err
@@ -119,6 +123,7 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			StatsRecorder:  config.StatsRecorder,
 			LogPIIFindings: config.LogPIIFindings,
 			NERAnalyzer:    config.NERAnalyzer,
+			FileAnonymizer: config.FileAnonymizer,
 		})
 		if err != nil {
 			return nil, err
@@ -130,6 +135,12 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 		proxy.Transport = config.Transport
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
+		if response != nil && response.Request != nil && response.Request.Method == http.MethodPost && strings.HasSuffix(response.Request.URL.Path, "/v1/files") && response.StatusCode >= 200 && response.StatusCode < 300 {
+			providerName, _ := response.Request.Context().Value(uploadProviderContextKey{}).(string)
+			if err := registerUploadedFileResponse(config.FileAnonymizer, providerName, response); err != nil {
+				return err
+			}
+		}
 		transform, ok := responseTransformFromRequest(response.Request)
 		if !ok || transform.mapping == nil || transform.transform == nil {
 			return nil
@@ -203,8 +214,35 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			)
 		}
 		logTrafficRequest(logger, "after_anonymization", string(requestBody))
+		if strings.HasSuffix(ctx.Request.URL.Path, "/v1/files") {
+			providerName := "openai"
+			if strings.HasPrefix(ctx.Request.URL.Path, AnthropicRoutePrefix) {
+				providerName = "anthropic"
+			}
+			ctx.Request = ctx.Request.WithContext(context.WithValue(ctx.Request.Context(), uploadProviderContextKey{}, providerName))
+		}
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
 	}, nil
+}
+
+func registerUploadedFileResponse(files providers.FileAnonymizer, provider string, response *http.Response) error {
+	if files == nil || response.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	response.Body.Close()
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) == nil {
+		if id, ok := payload["id"].(string); ok {
+			files.RegisterFileID(provider, id)
+		}
+	}
+	return nil
 }
 
 func contextWithResponseTransform(ctx context.Context, transform responseTransformContext) context.Context {

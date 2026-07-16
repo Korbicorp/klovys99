@@ -310,10 +310,20 @@ The proxy anonymizes:
 - text content in prompts, system messages, `<system-reminder>` blocks, text
   file context, and tool results;
 - text document sources where `source.type` is `text`.
+- inline PDF, image, DOCX, and XLSX attachments when the local Presidio
+  sidecar is enabled;
+- multipart file uploads sent through the OpenAI or Anthropic `/v1/files`
+  endpoint before they reach the provider.
 
 Structural metadata such as model names, roles, content block types, tool IDs,
 tool names, media types, cache-control values, and base64 document data is left
 unchanged so the upstream request shape remains valid.
+
+Binary attachments are extracted and rebuilt locally. Text in PDF, DOCX, and
+XLSX files uses the same persistent pseudonym tokens as prompts. OCR findings
+in images and scanned PDF pages are irreversibly blacked out. External URLs and
+unverified file references follow `KLOVIS_PRESIDIO_FAILURE_POLICY` and are never
+downloaded by the sidecar.
 
 For a single proxy process, repeated values are mapped to stable tokens. For
 example, the same email address is replaced by the same `[EMAIL_N]` token across
@@ -434,6 +444,12 @@ A sample direct sidecar latency benchmark is available in [docs/benchmarks/gline
 | `KLOVIS_GLINER_MAX_BATCH_CHARS` | `32768` | Maximum Unicode characters per request batch. |
 | `KLOVIS_GLINER_FAILURE_POLICY` | `fail-closed` | Only supported policy in V1. |
 | `KLOVIS_GLINER_DATA_DIR` | `~/.klovys99/gliner` | Sidecar model directory used by `scripts/dev-start.sh`. |
+| `KLOVIS_PRESIDIO_MODE` | `off` | File anonymization mode for the raw Go binary: `full` or `off`. Docker and npm start in `full`. |
+| `KLOVIS_PRESIDIO_URL` | `http://127.0.0.1:8092` | Local Presidio document sidecar URL. |
+| `KLOVIS_PRESIDIO_TIMEOUT` | `60s` | Deadline for extraction or reconstruction. |
+| `KLOVIS_PRESIDIO_MAX_FILE_BYTES` | `52428800` | Maximum attachment size (50 MiB). |
+| `KLOVIS_PRESIDIO_FAILURE_POLICY` | `remove` | `remove`, `reject`, or the unsafe `passthrough` fallback. |
+| `KLOVIS_PRESIDIO_OCR_LANG` | `eng+fra` | Tesseract languages installed in the sidecar. |
 
 When `full` is active, a timeout, unavailable sidecar, saturated queue,
 malformed span, or model identity mismatch returns `503` and makes zero

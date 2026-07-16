@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/rs/zerolog/log"
@@ -20,6 +21,7 @@ func AnalyzeStrings(ctx context.Context, analyzer Analyzer, texts []string) (Mat
 	if analyzer == nil {
 		return nil, nil
 	}
+	start := time.Now()
 	log.Debug().Strs("prompts", texts).Msg("prompt sent to gliner")
 	seen := make(map[string]struct{}, len(texts))
 	deduped := make([]string, 0, len(texts))
@@ -44,6 +46,7 @@ func AnalyzeStrings(ctx context.Context, analyzer Analyzer, texts []string) (Mat
 	for index, text := range deduped {
 		matchSet[text] = results[index]
 	}
+	log.Info().Str("elapsed", time.Since(start).String()).Msg("Gliner exec time")
 	return matchSet, nil
 }
 

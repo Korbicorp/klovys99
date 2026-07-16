@@ -64,6 +64,7 @@ type OpenAIConfig struct {
 	StatsRecorder  StatsRecorder
 	LogPIIFindings bool
 	NERAnalyzer    ner.Analyzer
+	FileAnonymizer FileAnonymizer
 }
 
 type OpenAI struct {
@@ -75,6 +76,7 @@ type OpenAI struct {
 	statsRecorder     StatsRecorder
 	logPIIFindings    bool
 	nerAnalyzer       ner.Analyzer
+	fileAnonymizer    FileAnonymizer
 	responseMappings  map[string]*ResponseRestoreMapping
 	responseMappingsM sync.RWMutex
 }
@@ -144,6 +146,7 @@ func NewOpenAI(config OpenAIConfig) (*OpenAI, error) {
 		statsRecorder:    config.StatsRecorder,
 		logPIIFindings:   config.LogPIIFindings,
 		nerAnalyzer:      config.NERAnalyzer,
+		fileAnonymizer:   config.FileAnonymizer,
 		responseMappings: make(map[string]*ResponseRestoreMapping),
 	}, nil
 }
@@ -154,6 +157,9 @@ func (p *OpenAI) MatchHTTP(request *http.Request) bool {
 		return true
 	}
 	if path == "/v1/chat/completions" {
+		return true
+	}
+	if path == "/v1/files" {
 		return true
 	}
 	if path == "/v1/models" || strings.HasPrefix(path, "/v1/models/") {
@@ -179,7 +185,7 @@ func (p *OpenAI) ShouldAnonymizeHTTP(request *http.Request) bool {
 	if _, ok := codexResponsePaths[path]; ok {
 		return true
 	}
-	return path == "/v1/chat/completions"
+	return path == "/v1/chat/completions" || path == "/v1/files"
 }
 
 func (p *OpenAI) AnonymizeHTTPRequest(request *http.Request, body []byte) (AnonymizeResult, error) {
@@ -189,6 +195,12 @@ func (p *OpenAI) AnonymizeHTTPRequest(request *http.Request, body []byte) (Anony
 		return p.anonymizeResponsesBody(request.Context(), body)
 	case path == "/v1/chat/completions":
 		return p.anonymizeChatCompletionsBody(request.Context(), body)
+	case path == "/v1/files":
+		output, contentType, err := anonymizeMultipartUpload(request.Context(), "openai", request.Header.Get("Content-Type"), body, p.fileAnonymizer)
+		if err == nil {
+			request.Header.Set("Content-Type", contentType)
+		}
+		return AnonymizeResult{Body: output}, err
 	default:
 		return AnonymizeResult{Body: body}, nil
 	}
@@ -205,6 +217,8 @@ func (p *OpenAI) ResolveHTTPRoute(request *http.Request) (*url.URL, string, bool
 		return p.apiTarget, "/v1/responses", true
 	case path == "/v1/chat/completions":
 		return p.apiTarget, "/v1/chat/completions", true
+	case path == "/v1/files":
+		return p.apiTarget, "/v1/files", true
 	case request.Method == http.MethodGet && (path == "/v1/models" || strings.HasPrefix(path, "/v1/models/")):
 		return p.apiTarget, path, true
 	default:
@@ -420,15 +434,23 @@ func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (Anony
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
+	filesChanged, fileResult, err := anonymizeInlineFiles(ctx, "openai", p.fileAnonymizer, payload)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
 	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, openAIUserPromptTexts(payload))
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
 	run := p.newRun(matches)
+	for typ, count := range fileResult.stats {
+		run.stats[typ] += count
+	}
+	run.findings = append(run.findings, fileResult.findings...)
 	restoreMapping := p.mappingForPayload(previousResponseIDFromPayload(payload))
 	anonymized, changed := run.anonymizeResponsesValue(payload, responsesContext{})
 	output := body
-	if changed {
+	if changed || filesChanged {
 		output, err = encodeJSON(anonymized)
 		if err != nil {
 			return AnonymizeResult{}, err
@@ -450,6 +472,10 @@ func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) 
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
+	filesChanged, fileResult, err := anonymizeInlineFiles(ctx, "openai", p.fileAnonymizer, payload)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
 	messages, ok := payload["messages"].([]any)
 	if !ok {
 		return AnonymizeResult{}, fmt.Errorf("chat completions messages must be an array")
@@ -459,7 +485,11 @@ func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) 
 		return AnonymizeResult{}, err
 	}
 	run := p.newRun(matches)
-	changed := false
+	for typ, count := range fileResult.stats {
+		run.stats[typ] += count
+	}
+	run.findings = append(run.findings, fileResult.findings...)
+	changed := filesChanged
 	for index, message := range messages {
 		messageMap, ok := message.(map[string]any)
 		if !ok {

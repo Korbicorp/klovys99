@@ -20,6 +20,7 @@ import (
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/fileanonymizer"
 	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
@@ -48,6 +49,11 @@ const (
 	glinerConcurrencyEnv     = "KLOVIS_GLINER_MAX_CONCURRENCY"
 	glinerBatchCharsEnv      = "KLOVIS_GLINER_MAX_BATCH_CHARS"
 	glinerFailurePolicyEnv   = "KLOVIS_GLINER_FAILURE_POLICY"
+	presidioModeEnv          = "KLOVIS_PRESIDIO_MODE"
+	presidioURLEnv           = "KLOVIS_PRESIDIO_URL"
+	presidioTimeoutEnv       = "KLOVIS_PRESIDIO_TIMEOUT"
+	presidioMaxFileBytesEnv  = "KLOVIS_PRESIDIO_MAX_FILE_BYTES"
+	presidioFailurePolicyEnv = "KLOVIS_PRESIDIO_FAILURE_POLICY"
 )
 
 const (
@@ -97,6 +103,7 @@ type runtimeConfig struct {
 	NERConfig       ner.Config
 	NERAnalyzer     ner.Analyzer
 	TokenStorePath  string
+	PresidioConfig  fileanonymizer.Config
 }
 
 type application struct {
@@ -307,6 +314,17 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		}
 	}
 	anonymizerService := anonymizer.NewServiceWithProtectionPolicyAndTokenStore(detectorResult.Detectors, configStore, tokenStore)
+	presidioConfig := config.PresidioConfig
+	presidioConfig.Anonymizer = anonymizerService
+	presidioConfig.Logger = config.Logger
+	presidioConfig.RegistryPath = strings.TrimSpace(config.TokenStorePath)
+	presidioConfig.NERAnalyzer = nerAnalyzer
+	presidioClient, err := fileanonymizer.New(presidioConfig)
+	if err != nil {
+		_ = tokenStore.Close()
+		closeLogFile(logFile)
+		return nil, err
+	}
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target: config.Target,
 		RouteTargets: map[string]*url.URL{
@@ -318,6 +336,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		StatsRecorder:  statsRecorder,
 		LogPIIFindings: config.LogPIIFindings,
 		NERAnalyzer:    nerAnalyzer,
+		FileAnonymizer: presidioClient,
 	})
 	if err != nil {
 		_ = tokenStore.Close()
@@ -781,6 +800,22 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	presidioMode := fileanonymizer.NormalizeMode(envStringWithDefault(presidioModeEnv, fileanonymizer.ModeOff))
+	if presidioMode == "" {
+		return runtimeConfig{}, fmt.Errorf("parse %s: value must be full or off", presidioModeEnv)
+	}
+	presidioPolicy := fileanonymizer.NormalizeFailurePolicy(envStringWithDefault(presidioFailurePolicyEnv, fileanonymizer.PolicyRemove))
+	if presidioPolicy == "" {
+		return runtimeConfig{}, fmt.Errorf("parse %s: value must be remove, reject, or passthrough", presidioFailurePolicyEnv)
+	}
+	presidioTimeout, err := envDurationWithDefault(presidioTimeoutEnv, 60*time.Second)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	presidioMaxBytes, err := envInt64WithDefault(presidioMaxFileBytesEnv, fileanonymizer.DefaultMaxFileBytes)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	return runtimeConfig{
 		Addr:            envStringWithDefault(proxyAddrEnv, defaultProxyAdr),
 		Target:          target,
@@ -807,6 +842,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 			MaxBatchChars:  glinerBatchChars,
 		},
 		TokenStorePath: envStringWithDefault(tokenStorePathEnv, defaultTokenStorePath),
+		PresidioConfig: fileanonymizer.Config{Mode: presidioMode, URL: envStringWithDefault(presidioURLEnv, fileanonymizer.DefaultURL), Timeout: presidioTimeout, MaxFileBytes: presidioMaxBytes, FailurePolicy: presidioPolicy},
 	}, nil
 }
 
@@ -932,6 +968,18 @@ func envIntWithDefault(name string, def int) (int, error) {
 		return 0, fmt.Errorf("parse %s: value must be greater than zero", name)
 	}
 	return parsed, nil
+}
+
+func envInt64WithDefault(name string, def int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("parse %s: value must be a positive integer", name)
+	}
+	return value, nil
 }
 
 func envFloatWithDefault(name string, def float64) (float64, error) {

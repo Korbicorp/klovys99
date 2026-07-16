@@ -36,6 +36,7 @@ type AnthropicConfig struct {
 	Anonymizer     TextAnonymizer
 	LogPIIFindings bool
 	NERAnalyzer    ner.Analyzer
+	FileAnonymizer FileAnonymizer
 }
 
 type Anthropic struct {
@@ -43,6 +44,7 @@ type Anthropic struct {
 	anonymizer     TextAnonymizer
 	logPIIFindings bool
 	nerAnalyzer    ner.Analyzer
+	fileAnonymizer FileAnonymizer
 }
 
 type anthropicAnonymizationRun struct {
@@ -71,6 +73,7 @@ func NewAnthropic(config AnthropicConfig) (*Anthropic, error) {
 		anonymizer:     config.Anonymizer,
 		logPIIFindings: config.LogPIIFindings,
 		nerAnalyzer:    config.NERAnalyzer,
+		fileAnonymizer: config.FileAnonymizer,
 	}, nil
 }
 
@@ -79,7 +82,7 @@ func (p *Anthropic) ShouldAnonymizeHTTP(request *http.Request) bool {
 		return false
 	}
 	switch p.requestPath(request.URL.Path) {
-	case "/v1/messages", "/v1/messages/count_tokens":
+	case "/v1/messages", "/v1/messages/count_tokens", "/v1/files":
 		return true
 	default:
 		return false
@@ -91,6 +94,13 @@ func (p *Anthropic) AnonymizeHTTPRequest(request *http.Request, logger zerolog.L
 	ctx := context.Background()
 	if request != nil {
 		ctx = request.Context()
+		if p.requestPath(request.URL.Path) == "/v1/files" {
+			output, contentType, err := anonymizeMultipartUpload(ctx, "anthropic", request.Header.Get("Content-Type"), body, p.fileAnonymizer)
+			if err == nil {
+				request.Header.Set("Content-Type", contentType)
+			}
+			return AnonymizeResult{Body: output}, err
+		}
 		forceStreamFalse = p.requestPath(request.URL.Path) == "/v1/messages"
 	}
 	return p.anonymize(ctx, logger, body, forceStreamFalse)
@@ -113,14 +123,23 @@ func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body [
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return AnonymizeResult{Body: body}, nil
 	}
+	filesChanged, fileResult, err := anonymizeInlineFiles(ctx, "anthropic", p.fileAnonymizer, payload)
+	if err != nil {
+		return AnonymizeResult{}, err
+	}
 
 	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, anthropicUserPromptTexts(payload))
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
 	run := p.newRun(matches)
+	for typ, count := range fileResult.stats {
+		run.stats[typ] += count
+	}
+	run.findings = append(run.findings, fileResult.findings...)
 	run.readToolIDs = collectAnthropicReadToolIDs(payload)
 	anonymized, changed := run.anonymizeRequestValue(payload, anthropicContext{})
+	changed = changed || filesChanged
 	if forceStreamFalse {
 		changed = forceAnthropicNonStreaming(payload) || changed
 	}
