@@ -34,6 +34,8 @@ type fakeAIWorkspaceService struct {
 	detail              aiworkspace.ConversationDetail
 	savedProvider       aiworkspace.ProviderDescriptor
 	credentialsRequests []aiworkspace.SaveCredentialsRequest
+	claudeOAuthStatus   aiworkspace.ClaudeOAuthStatusResponse
+	claudeOAuthStart    aiworkspace.ClaudeOAuthStartResponse
 }
 
 type fakeStatusError struct {
@@ -88,6 +90,35 @@ func (f *fakeAIWorkspaceService) SaveCredentials(_ string, request aiworkspace.S
 		return aiworkspace.ProviderDescriptor{}, f.err
 	}
 	return f.savedProvider, nil
+}
+
+func (f *fakeAIWorkspaceService) ClaudeOAuthStatus() aiworkspace.ClaudeOAuthStatusResponse {
+	return f.claudeOAuthStatus
+}
+
+func (f *fakeAIWorkspaceService) StartClaudeOAuth(_ context.Context) (aiworkspace.ClaudeOAuthStartResponse, error) {
+	if f.err != nil {
+		return aiworkspace.ClaudeOAuthStartResponse{}, f.err
+	}
+	if f.claudeOAuthStart.Method == "" {
+		return aiworkspace.ClaudeOAuthStartResponse{Method: "oauth_token"}, nil
+	}
+	return f.claudeOAuthStart, nil
+}
+
+func (f *fakeAIWorkspaceService) SubmitClaudeOAuth(_ context.Context, _ aiworkspace.ClaudeOAuthSubmitRequest) (aiworkspace.ClaudeOAuthStatusResponse, error) {
+	if f.err != nil {
+		return aiworkspace.ClaudeOAuthStatusResponse{}, f.err
+	}
+	return f.claudeOAuthStatus, nil
+}
+
+func (f *fakeAIWorkspaceService) CancelClaudeOAuth() error {
+	return f.err
+}
+
+func (f *fakeAIWorkspaceService) UnlinkClaudeOAuth() error {
+	return f.err
 }
 
 func TestEnvBoolWithDefault(t *testing.T) {

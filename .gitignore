@@ -7,6 +7,7 @@ __debug_bin*
 
 # Local environment and runtime state
 .env
+.data/
 proxy.log
 output.txt
 anonymization_stats*.jsonl

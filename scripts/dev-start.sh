@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
-# Starts klovys99 from source without npm: builds/starts the GLiNER Docker
-# sidecar, then runs the Go proxy directly with `go run`.
+# Starts the full Docker Compose runtime: prepares the GLiNER model on first
+# run, then launches the root compose stack.
 #
 # Usage: ./scripts/dev-start.sh
-# Requires Docker and Go to be installed locally.
+# Requires Docker to be installed locally.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SIDECAR_DIR="$REPO_ROOT/sidecar/gliner"
+ENV_FILE="$REPO_ROOT/.env"
+ENV_EXAMPLE="$REPO_ROOT/.env.example"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  if [[ ! -f "$ENV_EXAMPLE" ]]; then
+    echo "Missing $ENV_EXAMPLE" >&2
+    exit 1
+  fi
+  echo "==> Creating .env from .env.example"
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+fi
+
+set -a
+source "$ENV_FILE"
+set +a
 
 MODEL="${KLOVIS_GLINER_MODEL:-urchade/gliner_multi_pii-v1}"
 REVISION="${KLOVIS_GLINER_MODEL_REVISION:-1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d}"
-DATA_DIR="${KLOVIS_GLINER_DATA_DIR:-$HOME/.klovys99/gliner}"
-GLINER_URL="${KLOVIS_GLINER_URL:-http://127.0.0.1:8091}"
+DATA_DIR="${KLOVIS_GLINER_DATA_DIR:-$REPO_ROOT/.data/gliner}"
 MANIFEST="$DATA_DIR/model/klovis-model-manifest.json"
 
 mkdir -p "$DATA_DIR"
@@ -38,16 +52,6 @@ if ! grep -q "\"revision\": *\"$REVISION\"" "$MANIFEST" 2>/dev/null; then
     python /app/install_model.py
 fi
 
-echo "==> Starting GLiNER sidecar container"
-KLOVIS_GLINER_MODEL="$MODEL" \
-KLOVIS_GLINER_MODEL_REVISION="$REVISION" \
-KLOVIS_GLINER_DATA_DIR="$DATA_DIR" \
-  docker compose -f "$SIDECAR_DIR/compose.yaml" up -d --no-build
-
-echo "==> Starting klovys99 proxy (go run ./cmd/klovys99)"
 cd "$REPO_ROOT"
-KLOVIS_GLINER_MODE=full \
-KLOVIS_GLINER_URL="$GLINER_URL" \
-KLOVIS_GLINER_MODEL="$MODEL" \
-KLOVIS_GLINER_MODEL_REVISION="$REVISION" \
-  exec go run ./cmd/klovys99 "$@"
+echo "==> Starting root Docker Compose stack"
+exec docker compose up --build "$@"

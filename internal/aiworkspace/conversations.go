@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const maxProviderConversationMessages = 15
@@ -26,20 +28,30 @@ type ConversationSummary struct {
 }
 
 type ConversationMessage struct {
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	Role            string           `json:"role"`
+	Content         string           `json:"content"`
+	CreatedAt       time.Time        `json:"created_at"`
+	PIIReplacements []PIIReplacement `json:"pii_replacements,omitempty"`
+}
+
+type PIIReplacement struct {
+	Type  string `json:"type"`
+	Token string `json:"token"`
+	Value string `json:"value"`
+	Start int    `json:"start"`
+	End   int    `json:"end"`
 }
 
 type ConversationDetail struct {
-	ID        string                `json:"id"`
-	Title     string                `json:"title"`
-	Provider  string                `json:"provider"`
-	Method    string                `json:"method"`
-	Model     string                `json:"model"`
-	CreatedAt time.Time             `json:"created_at"`
-	UpdatedAt time.Time             `json:"updated_at"`
-	Messages  []ConversationMessage `json:"messages"`
+	ID                string                `json:"id"`
+	Title             string                `json:"title"`
+	Provider          string                `json:"provider"`
+	Method            string                `json:"method"`
+	Model             string                `json:"model"`
+	ProviderSessionID string                `json:"provider_session_id,omitempty"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
+	Messages          []ConversationMessage `json:"messages"`
 }
 
 type conversationStore struct {
@@ -181,6 +193,21 @@ func summarizeConversation(conversation ConversationDetail) ConversationSummary 
 }
 
 func newConversationID() string {
+	return uuid.NewString()
+}
+
+func claudeConversationSessionID(conversationID string) string {
+	trimmed := strings.TrimSpace(conversationID)
+	if parsed, err := uuid.Parse(trimmed); err == nil {
+		return parsed.String()
+	}
+	if trimmed == "" {
+		return uuid.NewString()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("klovys99/claude/"+trimmed)).String()
+}
+
+func legacyConversationID() string {
 	buffer := make([]byte, 8)
 	if _, err := rand.Read(buffer); err != nil {
 		return strings.ReplaceAll(time.Now().UTC().Format(time.RFC3339Nano), ":", "")
