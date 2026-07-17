@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Starts the full Docker Compose runtime: prepares the GLiNER model on first
-# run, then launches the root compose stack.
+# Starts the full development runtime: prepares the GLiNER model on first run,
+# then launches the AI Workspace frontend and the root compose stack.
 #
 # Usage: ./scripts/dev-start.sh
 # Requires Docker to be installed locally.
@@ -53,5 +53,15 @@ if ! grep -q "\"revision\": *\"$REVISION\"" "$MANIFEST" 2>/dev/null; then
 fi
 
 cd "$REPO_ROOT"
+echo "==> Starting AI Workspace frontend"
+npm run ui:ai-workspace &
+AI_WORKSPACE_PID=$!
+
+cleanup() {
+  kill "$AI_WORKSPACE_PID" 2>/dev/null || true
+  wait "$AI_WORKSPACE_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 echo "==> Starting root Docker Compose stack"
-exec docker compose up --build "$@"
+docker compose up --build "$@"
