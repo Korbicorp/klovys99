@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -19,6 +18,7 @@ import (
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/rs/zerolog"
+	resty "gopkg.in/resty.v1"
 	_ "modernc.org/sqlite"
 )
 
@@ -52,7 +52,9 @@ type Config struct {
 type Client struct {
 	mode, failurePolicy string
 	base                *url.URL
+	readyEndpoint       *url.URL
 	http                *http.Client
+	resty               *resty.Client
 	maxBytes            int64
 	anonymizer          TextAnonymizer
 	logger              zerolog.Logger
@@ -127,7 +129,10 @@ func New(config Config) (*Client, error) {
 	if config.Logger != nil {
 		logger = *config.Logger
 	}
-	client := &Client{mode: mode, failurePolicy: policy, base: base, http: config.HTTPClient, maxBytes: config.MaxFileBytes, anonymizer: config.Anonymizer, logger: logger, trusted: make(map[string]struct{}), nerAnalyzer: config.NERAnalyzer}
+	client := &Client{mode: mode, failurePolicy: policy, base: base, http: config.HTTPClient, resty: resty.NewWithClient(config.HTTPClient), maxBytes: config.MaxFileBytes, anonymizer: config.Anonymizer, logger: logger, trusted: make(map[string]struct{}), nerAnalyzer: config.NERAnalyzer}
+	readyEndpoint := *base
+	readyEndpoint.Path = strings.TrimRight(readyEndpoint.Path, "/") + "/readyz"
+	client.readyEndpoint = &readyEndpoint
 	if strings.TrimSpace(config.RegistryPath) != "" {
 		db, dbErr := sql.Open("sqlite", config.RegistryPath)
 		if dbErr != nil {
@@ -143,11 +148,36 @@ func New(config Config) (*Client, error) {
 }
 
 func (c *Client) Enabled() bool { return c != nil && c.mode == ModeFull }
+
 func (c *Client) FailurePolicy() string {
 	if c == nil {
 		return PolicyPassthrough
 	}
 	return c.failurePolicy
+}
+
+func (c *Client) Probe(ctx context.Context) error {
+	if c == nil || !c.Enabled() {
+		return nil
+	}
+	var payload struct {
+		Status string `json:"status"`
+	}
+	response, err := c.resty.R().
+		SetContext(ctx).
+		ExpectContentType("application/json").
+		SetResult(&payload).
+		Get(c.readyEndpoint.String())
+	if err != nil {
+		return fmt.Errorf("%w: ready probe: %v", ErrFileAnonymization, err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return presidioStatusError("ready", response)
+	}
+	if payload.Status != "ready" {
+		return fmt.Errorf("%w: ready returned status %q", ErrFileAnonymization, payload.Status)
+	}
+	return nil
 }
 
 func (c *Client) RegisterFileID(provider, id string) {
@@ -265,18 +295,18 @@ func (c *Client) extract(ctx context.Context, mediaType string, data []byte) (ex
 	if err != nil {
 		return result, err
 	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.base.ResolveReference(&url.URL{Path: "/v1/extract"}).String(), body)
-	request.Header.Set("Content-Type", contentType)
-	response, err := c.http.Do(request)
+	response, err := c.resty.R().
+		SetContext(ctx).
+		SetHeader("Content-Type", contentType).
+		ExpectContentType("application/json").
+		SetBody(body).
+		SetResult(&result).
+		Post(c.base.ResolveReference(&url.URL{Path: "/v1/extract"}).String())
 	if err != nil {
 		return result, fmt.Errorf("%w: extract: %v", ErrFileAnonymization, err)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode() != http.StatusOK {
 		return result, presidioStatusError("extract", response)
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&result); err != nil {
-		return result, fmt.Errorf("%w: decode extract: %v", ErrFileAnonymization, err)
 	}
 	return result, nil
 }
@@ -287,25 +317,32 @@ func (c *Client) render(ctx context.Context, mediaType string, data []byte, repl
 	if err != nil {
 		return nil, err
 	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.base.ResolveReference(&url.URL{Path: "/v1/render"}).String(), body)
-	request.Header.Set("Content-Type", contentType)
-	response, err := c.http.Do(request)
+	response, err := c.resty.R().
+		SetContext(ctx).
+		SetHeader("Content-Type", contentType).
+		SetBody(body).
+		Post(c.base.ResolveReference(&url.URL{Path: "/v1/render"}).String())
 	if err != nil {
 		return nil, fmt.Errorf("%w: render: %v", ErrFileAnonymization, err)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode() != http.StatusOK {
 		return nil, presidioStatusError("render", response)
 	}
-	output, err := io.ReadAll(io.LimitReader(response.Body, c.maxBytes+1))
-	if err != nil || int64(len(output)) > c.maxBytes {
+	output := response.Body()
+	if int64(len(output)) > c.maxBytes {
 		return nil, fmt.Errorf("%w: invalid render response", ErrFileAnonymization)
 	}
 	return output, nil
 }
 
-func presidioStatusError(stage string, response *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+func presidioStatusError(stage string, response interface {
+	StatusCode() int
+	Body() []byte
+}) error {
+	body := response.Body()
+	if len(body) > 4096 {
+		body = body[:4096]
+	}
 	var payload struct {
 		Error string `json:"error"`
 	}
@@ -317,9 +354,9 @@ func presidioStatusError(stage string, response *http.Response) error {
 		detail = detail[:1024]
 	}
 	if detail == "" {
-		return fmt.Errorf("%w: %s returned HTTP %d", ErrFileAnonymization, stage, response.StatusCode)
+		return fmt.Errorf("%w: %s returned HTTP %d", ErrFileAnonymization, stage, response.StatusCode())
 	}
-	return fmt.Errorf("%w: %s returned HTTP %d: %s", ErrFileAnonymization, stage, response.StatusCode, detail)
+	return fmt.Errorf("%w: %s returned HTTP %d: %s", ErrFileAnonymization, stage, response.StatusCode(), detail)
 }
 
 func multipartBody(data []byte, mediaType string, replacements []byte) (*bytes.Buffer, string, error) {

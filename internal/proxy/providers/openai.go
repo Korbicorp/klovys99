@@ -383,27 +383,44 @@ func (p *OpenAI) anonymizeWebSocketFrame(mapping *ResponseRestoreMapping, messag
 	if err != nil {
 		return mapping, nil, nil, nil, err
 	}
-	matches, err := ner.AnalyzeStrings(context.Background(), p.nerAnalyzer, openAIUserPromptTexts(payload))
+	preparation, err := parallelRequestPreparation(
+		context.Background(),
+		"openai",
+		payload,
+		openAIUserPromptTexts(payload),
+		p.nerAnalyzer,
+		p.fileAnonymizer,
+	)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	run := p.newRun(matches)
+	run := p.newRun(preparation.nerMatches)
+	for typ, count := range preparation.fileResult.stats {
+		run.stats[typ] += count
+	}
+	run.findings = append(run.findings, preparation.fileResult.findings...)
 	statsBefore := cloneEntityCountMap(run.stats)
 	findingsBefore := len(run.findings)
+	changed := preparation.filesChanged
 	if response, ok := payload["response"]; ok {
-		anonymized, changed := run.anonymizeResponsesValue(response, responsesContext{})
-		if changed {
+		anonymized, responseChanged := run.anonymizeResponsesValue(response, responsesContext{})
+		if responseChanged {
 			payload["response"] = anonymized
+			changed = true
 		}
 	} else {
-		anonymized, changed := run.anonymizeResponsesValue(payload, responsesContext{})
-		if changed {
+		anonymized, payloadChanged := run.anonymizeResponsesValue(payload, responsesContext{})
+		if payloadChanged {
 			payload = anonymized.(map[string]any)
+			changed = true
 		}
 	}
-	output, err := encodeJSON(payload)
-	if err != nil {
-		return mapping, nil, nil, nil, err
+	output := message
+	if changed {
+		output, err = encodeJSON(payload)
+		if err != nil {
+			return mapping, nil, nil, nil, err
+		}
 	}
 	nextMapping := p.mappingForPayload(previousResponseIDFromPayload(payload))
 	if mapping != nil && nextMapping.Empty() {
@@ -430,27 +447,46 @@ func (p *OpenAI) deanonymizeWebSocketFrame(mapping *ResponseRestoreMapping, mess
 }
 
 func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (AnonymizeResult, error) {
+	stepStart := time.Now()
+	p.logger.Debug().
+		Str("step", "openai_responses_request_decode").
+		Msg("debug step started")
 	payload, err := decodeJSONObject(body)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	filesChanged, fileResult, err := anonymizeInlineFiles(ctx, "openai", p.fileAnonymizer, payload)
+	p.logger.Debug().
+		Str("step", "openai_responses_request_decode").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
+
+	promptTexts := openAIUserPromptTexts(payload)
+	stepStart = time.Now()
+	p.logger.Debug().
+		Str("step", "openai_responses_request_preparation").
+		Msg("debug step started")
+	preparation, err := parallelRequestPreparation(ctx, "openai", payload, promptTexts, p.nerAnalyzer, p.fileAnonymizer)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, openAIUserPromptTexts(payload))
-	if err != nil {
-		return AnonymizeResult{}, err
-	}
-	run := p.newRun(matches)
-	for typ, count := range fileResult.stats {
+	p.logger.Debug().
+		Str("step", "openai_responses_request_preparation").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
+
+	stepStart = time.Now()
+	p.logger.Debug().
+		Str("step", "openai_responses_prompt_anonymization").
+		Msg("debug step started")
+	run := p.newRun(preparation.nerMatches)
+	for typ, count := range preparation.fileResult.stats {
 		run.stats[typ] += count
 	}
-	run.findings = append(run.findings, fileResult.findings...)
+	run.findings = append(run.findings, preparation.fileResult.findings...)
 	restoreMapping := p.mappingForPayload(previousResponseIDFromPayload(payload))
 	anonymized, changed := run.anonymizeResponsesValue(payload, responsesContext{})
 	output := body
-	if changed || filesChanged {
+	if changed || preparation.filesChanged {
 		output, err = encodeJSON(anonymized)
 		if err != nil {
 			return AnonymizeResult{}, err
@@ -461,6 +497,10 @@ func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (Anony
 		output = rewriteBodyTokens(output, replacements)
 		run.findings = rewriteFindingsTokens(run.findings, replacements)
 	}
+	p.logger.Debug().
+		Str("step", "openai_responses_prompt_anonymization").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
 	if restoreMapping.Empty() {
 		restoreMapping = nil
 	}
@@ -468,28 +508,47 @@ func (p *OpenAI) anonymizeResponsesBody(ctx context.Context, body []byte) (Anony
 }
 
 func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) (AnonymizeResult, error) {
+	stepStart := time.Now()
+	p.logger.Debug().
+		Str("step", "openai_chat_request_decode").
+		Msg("debug step started")
 	payload, err := decodeJSONObject(body)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	filesChanged, fileResult, err := anonymizeInlineFiles(ctx, "openai", p.fileAnonymizer, payload)
-	if err != nil {
-		return AnonymizeResult{}, err
-	}
+	p.logger.Debug().
+		Str("step", "openai_chat_request_decode").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
+
 	messages, ok := payload["messages"].([]any)
 	if !ok {
 		return AnonymizeResult{}, fmt.Errorf("chat completions messages must be an array")
 	}
-	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, openAIChatUserPromptTexts(messages))
+	promptTexts := openAIChatUserPromptTexts(messages)
+	stepStart = time.Now()
+	p.logger.Debug().
+		Str("step", "openai_chat_request_preparation").
+		Msg("debug step started")
+	preparation, err := parallelRequestPreparation(ctx, "openai", payload, promptTexts, p.nerAnalyzer, p.fileAnonymizer)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	run := p.newRun(matches)
-	for typ, count := range fileResult.stats {
+	p.logger.Debug().
+		Str("step", "openai_chat_request_preparation").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
+
+	stepStart = time.Now()
+	p.logger.Debug().
+		Str("step", "openai_chat_prompt_anonymization").
+		Msg("debug step started")
+	run := p.newRun(preparation.nerMatches)
+	for typ, count := range preparation.fileResult.stats {
 		run.stats[typ] += count
 	}
-	run.findings = append(run.findings, fileResult.findings...)
-	changed := filesChanged
+	run.findings = append(run.findings, preparation.fileResult.findings...)
+	changed := preparation.filesChanged
 	for index, message := range messages {
 		messageMap, ok := message.(map[string]any)
 		if !ok {
@@ -499,12 +558,28 @@ func (p *OpenAI) anonymizeChatCompletionsBody(ctx context.Context, body []byte) 
 		changed = changed || messageChanged
 	}
 	if !changed {
+		p.logger.Debug().
+			Str("step", "openai_chat_prompt_anonymization").
+			Dur("elapsed", time.Since(stepStart)).
+			Msg("debug step finished")
 		return AnonymizeResult{Body: body, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
 	}
+	encodeStart := time.Now()
+	p.logger.Debug().
+		Str("step", "openai_chat_request_encode").
+		Msg("debug step started")
 	output, err := encodeJSON(payload)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
+	p.logger.Debug().
+		Str("step", "openai_chat_request_encode").
+		Dur("elapsed", time.Since(encodeStart)).
+		Msg("debug step finished")
+	p.logger.Debug().
+		Str("step", "openai_chat_prompt_anonymization").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
 	return AnonymizeResult{Body: output, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
 }
 
@@ -586,6 +661,9 @@ func (r *openAIAnonymizationRun) anonymizeResponsesValue(value any, context resp
 }
 
 func responsesChildContext(key string, parent map[string]any, context responsesContext) responsesContext {
+	if isOpenAIInlineFileField(parent, key) {
+		return responsesContext{}
+	}
 	if key == "instructions" || key == "input" || key == "text" || key == "output" {
 		return responsesContext{textValue: true}
 	}
@@ -593,6 +671,27 @@ func responsesChildContext(key string, parent map[string]any, context responsesC
 		return responsesContext{textValue: true}
 	}
 	return responsesContext{textValue: context.textValue && !isOpenAIMetadataKey(key)}
+}
+
+func isOpenAIInlineFileField(parent map[string]any, key string) bool {
+	if parent == nil {
+		return false
+	}
+	switch key {
+	case "file_data":
+		return stringMapValue(parent, "type") == "input_file"
+	case "image_url":
+		switch stringMapValue(parent, "type") {
+		case "input_image", "image_url", "image":
+			return true
+		default:
+			return false
+		}
+	case "source", "data":
+		return stringMapValue(parent, "type") == "document"
+	default:
+		return false
+	}
 }
 
 func isResponsesContentParent(parent map[string]any) bool {

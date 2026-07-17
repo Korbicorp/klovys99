@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/ner"
@@ -135,6 +136,22 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 		proxy.Transport = config.Transport
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
+		if response != nil && response.Request != nil {
+			stepStart := time.Now()
+			logger.Debug().
+				Str("step", "api_response_processing").
+				Str("method", response.Request.Method).
+				Str("path", response.Request.URL.Path).
+				Int("status_code", response.StatusCode).
+				Msg("debug step started")
+			defer logger.Debug().
+				Str("step", "api_response_processing").
+				Str("method", response.Request.Method).
+				Str("path", response.Request.URL.Path).
+				Int("status_code", response.StatusCode).
+				Dur("elapsed", time.Since(stepStart)).
+				Msg("debug step finished")
+		}
 		if response != nil && response.Request != nil && response.Request.Method == http.MethodPost && strings.HasSuffix(response.Request.URL.Path, "/v1/files") && response.StatusCode >= 200 && response.StatusCode < 300 {
 			providerName, _ := response.Request.Context().Value(uploadProviderContextKey{}).(string)
 			if err := registerUploadedFileResponse(config.FileAnonymizer, providerName, response); err != nil {
@@ -170,10 +187,21 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			return
 		}
 
-		logTrafficRequest(logger, "before_anonymization", string(requestBody))
 		var responseTransform responseTransformContext
 		if openAIProvider.ShouldAnonymizeHTTP(ctx.Request) {
+			stepStart := time.Now()
+			logger.Debug().
+				Str("step", "request_anonymization").
+				Str("provider", "openai").
+				Str("path", ctx.Request.URL.Path).
+				Msg("debug step started")
 			outcome, err := openAIProvider.AnonymizeHTTPRequest(ctx.Request, requestBody)
+			logger.Debug().
+				Str("step", "request_anonymization").
+				Str("provider", "openai").
+				Str("path", ctx.Request.URL.Path).
+				Dur("elapsed", time.Since(stepStart)).
+				Msg("debug step finished")
 			if err != nil {
 				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
 				writeAnonymizationError(ctx, err)
@@ -189,7 +217,19 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 				transform: openAIProvider.DeanonymizeHTTPResponse,
 			}
 		} else if anthropicProvider.ShouldAnonymizeHTTP(ctx.Request) {
+			stepStart := time.Now()
+			logger.Debug().
+				Str("step", "request_anonymization").
+				Str("provider", "anthropic").
+				Str("path", ctx.Request.URL.Path).
+				Msg("debug step started")
 			outcome, err := anthropicProvider.AnonymizeHTTPRequest(ctx.Request, logger, requestBody)
+			logger.Debug().
+				Str("step", "request_anonymization").
+				Str("provider", "anthropic").
+				Str("path", ctx.Request.URL.Path).
+				Dur("elapsed", time.Since(stepStart)).
+				Msg("debug step finished")
 			if err != nil {
 				recordStatsEvent(logger, config.StatsRecorder, statlog.Event{Event: statlog.EventRequestBodyError})
 				writeAnonymizationError(ctx, err)
@@ -213,7 +253,6 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 				contextWithResponseTransform(ctx.Request.Context(), responseTransform),
 			)
 		}
-		logTrafficRequest(logger, "after_anonymization", string(requestBody))
 		if strings.HasSuffix(ctx.Request.URL.Path, "/v1/files") {
 			providerName := "openai"
 			if strings.HasPrefix(ctx.Request.URL.Path, AnthropicRoutePrefix) {
@@ -221,7 +260,19 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 			}
 			ctx.Request = ctx.Request.WithContext(context.WithValue(ctx.Request.Context(), uploadProviderContextKey{}, providerName))
 		}
+		apiStart := time.Now()
+		logger.Debug().
+			Str("step", "api_request").
+			Str("method", ctx.Request.Method).
+			Str("path", ctx.Request.URL.Path).
+			Msg("debug step started")
 		proxy.ServeHTTP(ctx.Writer, ctx.Request)
+		logger.Debug().
+			Str("step", "api_request").
+			Str("method", ctx.Request.Method).
+			Str("path", ctx.Request.URL.Path).
+			Dur("elapsed", time.Since(apiStart)).
+			Msg("debug step finished")
 	}, nil
 }
 
@@ -360,10 +411,6 @@ func logAnonymizedStats(logger zerolog.Logger, stats map[anonymizer.EntityType]i
 	_ = findings
 	_ = includePII
 	event.Msg("request body anonymized")
-}
-
-func logTrafficRequest(logger zerolog.Logger, stage string, body string) {
-	logger.Debug().Str("stage", stage).Str("body", body).Msg("request traffic")
 }
 
 func writeAnonymizationError(ctx *gin.Context, err error) {

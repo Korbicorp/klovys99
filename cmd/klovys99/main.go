@@ -139,6 +139,10 @@ type aiWorkspaceService interface {
 	UnlinkClaudeOAuth() error
 }
 
+type readinessProbe interface {
+	Probe(context.Context) error
+}
+
 type previewService struct {
 	service  *anonymizer.Service
 	analyzer ner.Analyzer
@@ -183,6 +187,41 @@ func run(ctx context.Context, config runtimeConfig) error {
 		Str("default_target", defaultTarget).
 		Msg("proxy starting")
 	return http.ListenAndServe(app.addr, app.handler)
+}
+
+func waitForServiceReady(ctx context.Context, logger *zerolog.Logger, name string, probe readinessProbe) error {
+	if probe == nil {
+		return nil
+	}
+	attempt := 0
+	for {
+		attempt++
+		started := time.Now()
+		logger.Info().
+			Str("service", name).
+			Int("attempt", attempt).
+			Msg("waiting for service readiness")
+		err := probe.Probe(ctx)
+		if err == nil {
+			logger.Info().
+				Str("service", name).
+				Int("attempt", attempt).
+				Dur("elapsed", time.Since(started)).
+				Msg("service is ready")
+			return nil
+		}
+		logger.Warn().
+			Err(err).
+			Str("service", name).
+			Int("attempt", attempt).
+			Dur("elapsed", time.Since(started)).
+			Msg("service not ready yet")
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for %s readiness: %w", name, ctx.Err())
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // dashboardURLFromAddr converts the listen address into a local dashboard URL.
@@ -309,9 +348,6 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 			closeLogFile(logFile)
 			return nil, err
 		}
-		if client, ok := nerAnalyzer.(*ner.Client); ok {
-			_ = client.Probe(ctx)
-		}
 	}
 	anonymizerService := anonymizer.NewServiceWithProtectionPolicyAndTokenStore(detectorResult.Detectors, configStore, tokenStore)
 	presidioConfig := config.PresidioConfig
@@ -321,6 +357,18 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 	presidioConfig.NERAnalyzer = nerAnalyzer
 	presidioClient, err := fileanonymizer.New(presidioConfig)
 	if err != nil {
+		_ = tokenStore.Close()
+		closeLogFile(logFile)
+		return nil, err
+	}
+	if client, ok := nerAnalyzer.(*ner.Client); ok {
+		if err := waitForServiceReady(ctx, config.Logger, "gliner", client); err != nil {
+			_ = tokenStore.Close()
+			closeLogFile(logFile)
+			return nil, err
+		}
+	}
+	if err := waitForServiceReady(ctx, config.Logger, "presidio", presidioClient); err != nil {
 		_ = tokenStore.Close()
 		closeLogFile(logFile)
 		return nil, err

@@ -22,7 +22,10 @@ func AnalyzeStrings(ctx context.Context, analyzer Analyzer, texts []string) (Mat
 		return nil, nil
 	}
 	start := time.Now()
-	log.Debug().Strs("prompts", texts).Msg("prompt sent to gliner")
+	log.Debug().
+		Str("step", "ner_batch_analysis").
+		Int("input_count", len(texts)).
+		Msg("debug step started")
 	seen := make(map[string]struct{}, len(texts))
 	deduped := make([]string, 0, len(texts))
 	for _, text := range texts {
@@ -46,7 +49,12 @@ func AnalyzeStrings(ctx context.Context, analyzer Analyzer, texts []string) (Mat
 	for index, text := range deduped {
 		matchSet[text] = results[index]
 	}
-	log.Info().Str("elapsed", time.Since(start).String()).Msg("Gliner exec time")
+	log.Debug().
+		Str("step", "ner_batch_analysis").
+		Int("input_count", len(texts)).
+		Int("deduped_count", len(deduped)).
+		Dur("elapsed", time.Since(start)).
+		Msg("debug step finished")
 	return matchSet, nil
 }
 

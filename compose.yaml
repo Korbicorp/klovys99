@@ -48,10 +48,8 @@ services:
       args:
         CLAUDE_CODE_NPM_PACKAGE: ${CLAUDE_CODE_NPM_PACKAGE:-@anthropic-ai/claude-code}
     depends_on:
-      gliner:
-        condition: service_healthy
-      presidio:
-        condition: service_healthy
+      - gliner
+      - presidio
     network_mode: "service:gliner"
     env_file:
       - .env
@@ -69,8 +67,8 @@ services:
       KLOVIS_PRESIDIO_FAILURE_POLICY: ${KLOVIS_PRESIDIO_FAILURE_POLICY:-remove}
       KLOVYS99_AI_WORKSPACE_KEY: ${KLOVYS99_AI_WORKSPACE_KEY:?KLOVYS99_AI_WORKSPACE_KEY is required}
       KLOVYS99_AI_WORKSPACE_DIR: ${KLOVYS99_AI_WORKSPACE_DIR:-/data/ai-workspace}
-      KLOVIS_PROXY_DEBUG: false
-      KLOVIS_LOG_TO_FILE: false
+      KLOVIS_PROXY_DEBUG: true
+      KLOVIS_LOG_TO_FILE: true
     restart: unless-stopped
     volumes:
       - ${KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR:?KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR is required}:/data/ai-workspace

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/ner"
@@ -113,6 +114,10 @@ func (p *Anthropic) Anonymize(ctx context.Context, logger zerolog.Logger, body [
 }
 
 func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body []byte, forceStreamFalse bool) (AnonymizeResult, error) {
+	stepStart := time.Now()
+	logger.Debug().
+		Str("step", "anthropic_request_decode").
+		Msg("debug step started")
 	var payload any
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.UseNumber()
@@ -123,37 +128,67 @@ func (p *Anthropic) anonymize(ctx context.Context, logger zerolog.Logger, body [
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return AnonymizeResult{Body: body}, nil
 	}
-	filesChanged, fileResult, err := anonymizeInlineFiles(ctx, "anthropic", p.fileAnonymizer, payload)
-	if err != nil {
-		return AnonymizeResult{}, err
-	}
+	logger.Debug().
+		Str("step", "anthropic_request_decode").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
 
-	matches, err := ner.AnalyzeStrings(ctx, p.nerAnalyzer, anthropicUserPromptTexts(payload))
+	promptTexts := anthropicUserPromptTexts(payload)
+	stepStart = time.Now()
+	logger.Debug().
+		Str("step", "anthropic_request_preparation").
+		Msg("debug step started")
+	preparation, err := parallelRequestPreparation(ctx, "anthropic", payload, promptTexts, p.nerAnalyzer, p.fileAnonymizer)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
-	run := p.newRun(matches)
-	for typ, count := range fileResult.stats {
+	logger.Debug().
+		Str("step", "anthropic_request_preparation").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
+
+	stepStart = time.Now()
+	logger.Debug().
+		Str("step", "anthropic_prompt_anonymization").
+		Msg("debug step started")
+	run := p.newRun(preparation.nerMatches)
+	for typ, count := range preparation.fileResult.stats {
 		run.stats[typ] += count
 	}
-	run.findings = append(run.findings, fileResult.findings...)
+	run.findings = append(run.findings, preparation.fileResult.findings...)
 	run.readToolIDs = collectAnthropicReadToolIDs(payload)
 	anonymized, changed := run.anonymizeRequestValue(payload, anthropicContext{})
-	changed = changed || filesChanged
+	changed = changed || preparation.filesChanged
 	if forceStreamFalse {
 		changed = forceAnthropicNonStreaming(payload) || changed
 	}
 	if !changed {
+		logger.Debug().
+			Str("step", "anthropic_prompt_anonymization").
+			Dur("elapsed", time.Since(stepStart)).
+			Msg("debug step finished")
 		if len(run.stats) > 0 {
 			logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
 		}
 		return AnonymizeResult{Body: body, RestoreMapping: NewResponseRestoreMapping(run.findings), Stats: run.stats, Findings: run.findings}, nil
 	}
 
+	encodeStart := time.Now()
+	logger.Debug().
+		Str("step", "anthropic_request_encode").
+		Msg("debug step started")
 	output, err := encodeJSON(anonymized)
 	if err != nil {
 		return AnonymizeResult{}, err
 	}
+	logger.Debug().
+		Str("step", "anthropic_request_encode").
+		Dur("elapsed", time.Since(encodeStart)).
+		Msg("debug step finished")
+	logger.Debug().
+		Str("step", "anthropic_prompt_anonymization").
+		Dur("elapsed", time.Since(stepStart)).
+		Msg("debug step finished")
 	if len(run.stats) > 0 {
 		logAnonymizedStats(logger, run.stats, run.findings, p.logPIIFindings)
 	}
