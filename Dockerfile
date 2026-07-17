@@ -17,6 +17,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     KLOVIS_ADDR=0.0.0.0:8080 \
     KLOVIS_GLINER_MODE=full \
     KLOVIS_GLINER_URL=http://gliner:8091 \
+	KLOVIS_PRESIDIO_MODE=full \
+	KLOVIS_PRESIDIO_URL=http://presidio:8092 \
     KLOVYS99_AI_WORKSPACE_DIR=/data/ai-workspace
 
 RUN apt-get update \

@@ -9,8 +9,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	"github.com/rs/zerolog/log"
 )
 
 type ResponseRestoreMapping struct {
@@ -148,38 +150,42 @@ func restoreHTTPJSONResponseWithDebug(mapping *ResponseRestoreMapping, response 
 	if mapping == nil || mapping.Empty() || response == nil || response.Body == nil {
 		return nil
 	}
+	_ = rawLabel
+	_ = restoredLabel
+	start := time.Now()
+	path := ""
+	if response.Request != nil && response.Request.URL != nil {
+		path = response.Request.URL.Path
+	}
+	log.Debug().
+		Str("step", "response_deanonymization").
+		Str("path", path).
+		Msg("debug step started")
+	defer log.Debug().
+		Str("step", "response_deanonymization").
+		Str("path", path).
+		Dur("elapsed", time.Since(start)).
+		Msg("debug step finished")
 
 	body, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if err != nil {
 		return err
 	}
-	if rawLabel != "" {
-		fmt.Printf("%s %s\n", rawLabel, string(body))
-	}
 	if len(body) == 0 {
 		response.Body = io.NopCloser(bytes.NewReader(nil))
 		response.ContentLength = 0
 		response.Header.Set("Content-Length", "0")
-		if restoredLabel != "" {
-			fmt.Printf("%s\n", restoredLabel)
-		}
 		return nil
 	}
-
+	log.Debug().Str("body", string(body)).Msg("body before restore")
 	output, changed, err := restoreJSONBody(mapping, body)
 	if err != nil {
-		if rawLabel != "" {
-			fmt.Printf("%s restore error: %v\n", rawLabel, err)
-		}
 		output = body
 		changed = false
 	}
 	if !changed {
 		output = body
-	}
-	if restoredLabel != "" {
-		fmt.Printf("%s %s\n", restoredLabel, string(output))
 	}
 
 	response.Body = io.NopCloser(bytes.NewReader(output))

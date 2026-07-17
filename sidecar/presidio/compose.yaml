@@ -1,0 +1,16 @@
+services:
+  presidio:
+    build: .
+    image: klovys99-presidio:local
+    restart: unless-stopped
+    environment:
+      PRESIDIO_MAX_FILE_BYTES: ${KLOVIS_PRESIDIO_MAX_FILE_BYTES:-52428800}
+      PRESIDIO_OCR_LANG: ${KLOVIS_PRESIDIO_OCR_LANG:-eng+fra}
+    ports:
+      - "127.0.0.1:8092:8092"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s

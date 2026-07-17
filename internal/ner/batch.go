@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/rs/zerolog/log"
@@ -20,7 +21,11 @@ func AnalyzeStrings(ctx context.Context, analyzer Analyzer, texts []string) (Mat
 	if analyzer == nil {
 		return nil, nil
 	}
-	log.Debug().Strs("prompts", texts).Msg("prompt sent to gliner")
+	start := time.Now()
+	log.Debug().
+		Str("step", "ner_batch_analysis").
+		Int("input_count", len(texts)).
+		Msg("debug step started")
 	seen := make(map[string]struct{}, len(texts))
 	deduped := make([]string, 0, len(texts))
 	for _, text := range texts {
@@ -44,6 +49,12 @@ func AnalyzeStrings(ctx context.Context, analyzer Analyzer, texts []string) (Mat
 	for index, text := range deduped {
 		matchSet[text] = results[index]
 	}
+	log.Debug().
+		Str("step", "ner_batch_analysis").
+		Int("input_count", len(texts)).
+		Int("deduped_count", len(deduped)).
+		Dur("elapsed", time.Since(start)).
+		Msg("debug step finished")
 	return matchSet, nil
 }
 

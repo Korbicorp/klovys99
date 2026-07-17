@@ -17,6 +17,8 @@ function resolveSettings(args, env = process.env, home = os.homedir()) {
 
 function resolveStartSettings(args, env = process.env, home = os.homedir()) {
   const { options, binaryArgs } = parseStartArgs(args);
+  const presidioMode = resolveMode(options.presidioMode || env.KLOVIS_PRESIDIO_MODE || MODE_FULL);
+  if (!presidioMode) throw new Error("Presidio mode must be full or off.");
   const mode = resolveMode(options.mode || env.KLOVIS_GLINER_MODE || "");
   if (!mode) {
     throw new Error("GLiNER mode must be full or off.");
@@ -29,12 +31,14 @@ function resolveStartSettings(args, env = process.env, home = os.homedir()) {
         ...process.env,
         KLOVIS_GLINER_MODE: MODE_OFF,
         KLOVIS_GLINER_ENABLED: "false",
+        KLOVIS_PRESIDIO_MODE: presidioMode,
       },
     };
   }
   return {
     ...settingsFromOptions({ ...options, mode }, env, home),
     mode,
+    presidioMode,
     binaryArgs,
   };
 }
@@ -98,6 +102,7 @@ function parseStartArgs(args) {
       "--gliner-model": "model",
       "--gliner-revision": "revision",
       "--gliner-data-dir": "dataDir",
+      "--presidio-mode": "presidioMode",
       "--mode": "mode",
       "--model": "model",
       "--revision": "revision",
@@ -202,8 +207,15 @@ function start(settings, packageRoot, spawn = spawnSync) {
     KLOVIS_GLINER_MODEL: settings.model,
     KLOVIS_GLINER_MODEL_REVISION: settings.revision,
     KLOVIS_GLINER_DATA_DIR: path.resolve(settings.dataDir),
+    KLOVIS_PRESIDIO_MODE: settings.presidioMode || process.env.KLOVIS_PRESIDIO_MODE || MODE_FULL,
   };
   run("docker", ["compose", "-f", composePath, "up", "-d", "--no-build"], { env }, spawn);
+  if ((settings.presidioMode || MODE_FULL) === MODE_FULL) {
+    const presidioDir = path.join(packageRoot, "sidecar", "presidio");
+    run("docker", ["build", "-t", "klovys99-presidio:local", presidioDir], {}, spawn);
+    run("docker", ["compose", "-f", path.join(presidioDir, "compose.yaml"), "up", "-d", "--no-build"], { env }, spawn);
+    env.KLOVIS_PRESIDIO_URL = process.env.KLOVIS_PRESIDIO_URL || "http://127.0.0.1:8092";
+  }
   return env;
 }
 

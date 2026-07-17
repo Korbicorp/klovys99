@@ -21,7 +21,11 @@
     "sidecar/gliner/compose.yaml",
     "sidecar/gliner/requirements.txt",
     "sidecar/gliner/server.py",
-    "sidecar/gliner/install_model.py"
+    "sidecar/gliner/install_model.py",
+    "sidecar/presidio/Dockerfile",
+    "sidecar/presidio/compose.yaml",
+    "sidecar/presidio/requirements.txt",
+    "sidecar/presidio/server.py"
   ],
   "bin": {
     "klovis": "npm/cli.js",

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1066,6 +1067,50 @@ func TestNewHTTPHandlerDelegatesAIWorkspaceCompletion(t *testing.T) {
 	}
 	if len(service.requests) != 1 || service.requests[0].AnonymizedPrompt != "hello [EMAIL_1]" {
 		t.Fatalf("service requests = %#v, want delegated completion request", service.requests)
+	}
+}
+
+func TestNewHTTPHandlerAcceptsAIWorkspaceMultipartAttachment(t *testing.T) {
+	service := &fakeAIWorkspaceService{response: aiworkspace.CompletionResponse{ResponseText: "ok"}}
+	handler := newHTTPHandler(noopProxyHandler(), nil, nil, nil, service)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("request", `{"provider":"openai","method":"api_key","anonymized_prompt":"review"}`); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("file", "document.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/ai-workspace/complete", &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	if len(service.requests) != 1 || service.requests[0].Attachment == nil {
+		t.Fatalf("requests=%#v", service.requests)
+	}
+	attachment := service.requests[0].Attachment
+	if attachment.Filename != "document.pdf" || attachment.MediaType != "application/octet-stream" || string(attachment.Data) != "original" {
+		t.Fatalf("attachment=%#v", attachment)
 	}
 }
 

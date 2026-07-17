@@ -53,6 +53,7 @@ test("resolveStartSettings defaults start flow to full", () => {
     revision: DEFAULT_REVISION,
     dataDir: path.join("/tmp/home", ".klovys99", "gliner"),
     mode: MODE_FULL,
+    presidioMode: MODE_FULL,
     binaryArgs: ["--stats"],
   });
 });
@@ -71,6 +72,12 @@ test("resolveStartSettings supports explicit full mode", () => {
   assert.deepEqual(settings.binaryArgs, ["--stats"]);
   assert.equal(settings.model, DEFAULT_MODEL);
   assert.equal(settings.revision, DEFAULT_REVISION);
+});
+
+test("resolveStartSettings supports disabling Presidio independently", () => {
+  const settings = resolveStartSettings(["--presidio-mode", "off", "--stats"], {}, "/tmp/home");
+  assert.equal(settings.presidioMode, MODE_OFF);
+  assert.deepEqual(settings.binaryArgs, ["--stats"]);
 });
 
 test("install builds before explicit model download", () => {
@@ -106,4 +113,6 @@ test("start auto-installs missing model, uses compose without rebuilding and ena
   assert.equal(env.KLOVIS_GLINER_MODE, MODE_FULL);
   assert.equal(env.KLOVIS_GLINER_ENABLED, "true");
   assert.equal(env.KLOVIS_GLINER_MODEL_REVISION, "abc123");
+  assert.equal(env.KLOVIS_PRESIDIO_MODE, MODE_FULL);
+  assert.equal(env.KLOVIS_PRESIDIO_URL, "http://127.0.0.1:8092");
 });

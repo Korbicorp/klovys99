@@ -8,6 +8,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SIDECAR_DIR="$REPO_ROOT/sidecar/gliner"
+PRESIDIO_DIR="$REPO_ROOT/sidecar/presidio"
 ENV_FILE="$REPO_ROOT/.env"
 ENV_EXAMPLE="$REPO_ROOT/.env.example"
 
@@ -33,6 +34,11 @@ mkdir -p "$DATA_DIR"
 
 echo "==> Building GLiNER sidecar image"
 docker build -t klovys99-gliner:local "$SIDECAR_DIR"
+
+if [[ "${KLOVIS_PRESIDIO_MODE:-full}" == "full" ]]; then
+  echo "==> Building Presidio sidecar image"
+  docker build -t klovys99-presidio:local "$PRESIDIO_DIR"
+fi
 
 if ! grep -q "\"revision\": *\"$REVISION\"" "$MANIFEST" 2>/dev/null; then
   echo "==> Downloading GLiNER model ($MODEL @ $REVISION)"

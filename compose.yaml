@@ -1,4 +1,21 @@
 services:
+  presidio:
+    build:
+      context: ./sidecar/presidio
+    image: klovys99-presidio:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PRESIDIO_MAX_FILE_BYTES: ${KLOVIS_PRESIDIO_MAX_FILE_BYTES:-52428800}
+      PRESIDIO_OCR_LANG: ${KLOVIS_PRESIDIO_OCR_LANG:-eng+fra}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+
   gliner:
     build:
       context: ./sidecar/gliner
@@ -31,21 +48,27 @@ services:
       args:
         CLAUDE_CODE_NPM_PACKAGE: ${CLAUDE_CODE_NPM_PACKAGE:-@anthropic-ai/claude-code}
     depends_on:
-      gliner:
-        condition: service_healthy
+      - gliner
+      - presidio
     network_mode: "service:gliner"
     env_file:
       - .env
     environment:
       KLOVIS_ADDR: ${KLOVIS_ADDR:-0.0.0.0:8080}
+      KLOVIS_GLINER_TIMEOUT: 30s
       KLOVIS_GLINER_MODE: ${KLOVIS_GLINER_MODE:-full}
       KLOVIS_GLINER_URL: http://127.0.0.1:8091
       KLOVIS_GLINER_MODEL: ${KLOVIS_GLINER_MODEL:?KLOVIS_GLINER_MODEL is required}
       KLOVIS_GLINER_MODEL_REVISION: ${KLOVIS_GLINER_MODEL_REVISION:?KLOVIS_GLINER_MODEL_REVISION is required}
+      KLOVIS_PRESIDIO_MODE: ${KLOVIS_PRESIDIO_MODE:-full}
+      KLOVIS_PRESIDIO_URL: http://presidio:8092
+      KLOVIS_PRESIDIO_TIMEOUT: ${KLOVIS_PRESIDIO_TIMEOUT:-60s}
+      KLOVIS_PRESIDIO_MAX_FILE_BYTES: ${KLOVIS_PRESIDIO_MAX_FILE_BYTES:-52428800}
+      KLOVIS_PRESIDIO_FAILURE_POLICY: ${KLOVIS_PRESIDIO_FAILURE_POLICY:-remove}
       KLOVYS99_AI_WORKSPACE_KEY: ${KLOVYS99_AI_WORKSPACE_KEY:?KLOVYS99_AI_WORKSPACE_KEY is required}
       KLOVYS99_AI_WORKSPACE_DIR: ${KLOVYS99_AI_WORKSPACE_DIR:-/data/ai-workspace}
-      KLOVIS_PROXY_DEBUG: false
-      KLOVIS_LOG_TO_FILE: false
+      KLOVIS_PROXY_DEBUG: true
+      KLOVIS_LOG_TO_FILE: true
     restart: unless-stopped
     volumes:
       - ${KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR:?KLOVYS99_DOCKER_AI_WORKSPACE_DATA_DIR is required}:/data/ai-workspace

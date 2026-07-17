@@ -20,6 +20,7 @@ import (
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	appconfig "github.com/Korbicorp/klovys99/internal/appconfig"
 	"github.com/Korbicorp/klovys99/internal/detectors"
+	"github.com/Korbicorp/klovys99/internal/fileanonymizer"
 	"github.com/Korbicorp/klovys99/internal/ner"
 	"github.com/Korbicorp/klovys99/internal/proxy"
 	statlog "github.com/Korbicorp/klovys99/internal/stats"
@@ -48,6 +49,11 @@ const (
 	glinerConcurrencyEnv     = "KLOVIS_GLINER_MAX_CONCURRENCY"
 	glinerBatchCharsEnv      = "KLOVIS_GLINER_MAX_BATCH_CHARS"
 	glinerFailurePolicyEnv   = "KLOVIS_GLINER_FAILURE_POLICY"
+	presidioModeEnv          = "KLOVIS_PRESIDIO_MODE"
+	presidioURLEnv           = "KLOVIS_PRESIDIO_URL"
+	presidioTimeoutEnv       = "KLOVIS_PRESIDIO_TIMEOUT"
+	presidioMaxFileBytesEnv  = "KLOVIS_PRESIDIO_MAX_FILE_BYTES"
+	presidioFailurePolicyEnv = "KLOVIS_PRESIDIO_FAILURE_POLICY"
 )
 
 const (
@@ -97,6 +103,7 @@ type runtimeConfig struct {
 	NERConfig       ner.Config
 	NERAnalyzer     ner.Analyzer
 	TokenStorePath  string
+	PresidioConfig  fileanonymizer.Config
 }
 
 type application struct {
@@ -130,6 +137,10 @@ type aiWorkspaceService interface {
 	SubmitClaudeOAuth(ctx context.Context, request aiworkspace.ClaudeOAuthSubmitRequest) (aiworkspace.ClaudeOAuthStatusResponse, error)
 	CancelClaudeOAuth() error
 	UnlinkClaudeOAuth() error
+}
+
+type readinessProbe interface {
+	Probe(context.Context) error
 }
 
 type previewService struct {
@@ -176,6 +187,41 @@ func run(ctx context.Context, config runtimeConfig) error {
 		Str("default_target", defaultTarget).
 		Msg("proxy starting")
 	return http.ListenAndServe(app.addr, app.handler)
+}
+
+func waitForServiceReady(ctx context.Context, logger *zerolog.Logger, name string, probe readinessProbe) error {
+	if probe == nil {
+		return nil
+	}
+	attempt := 0
+	for {
+		attempt++
+		started := time.Now()
+		logger.Info().
+			Str("service", name).
+			Int("attempt", attempt).
+			Msg("waiting for service readiness")
+		err := probe.Probe(ctx)
+		if err == nil {
+			logger.Info().
+				Str("service", name).
+				Int("attempt", attempt).
+				Dur("elapsed", time.Since(started)).
+				Msg("service is ready")
+			return nil
+		}
+		logger.Warn().
+			Err(err).
+			Str("service", name).
+			Int("attempt", attempt).
+			Dur("elapsed", time.Since(started)).
+			Msg("service not ready yet")
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for %s readiness: %w", name, ctx.Err())
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // dashboardURLFromAddr converts the listen address into a local dashboard URL.
@@ -302,11 +348,31 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 			closeLogFile(logFile)
 			return nil, err
 		}
-		if client, ok := nerAnalyzer.(*ner.Client); ok {
-			_ = client.Probe(ctx)
-		}
 	}
 	anonymizerService := anonymizer.NewServiceWithProtectionPolicyAndTokenStore(detectorResult.Detectors, configStore, tokenStore)
+	presidioConfig := config.PresidioConfig
+	presidioConfig.Anonymizer = anonymizerService
+	presidioConfig.Logger = config.Logger
+	presidioConfig.RegistryPath = strings.TrimSpace(config.TokenStorePath)
+	presidioConfig.NERAnalyzer = nerAnalyzer
+	presidioClient, err := fileanonymizer.New(presidioConfig)
+	if err != nil {
+		_ = tokenStore.Close()
+		closeLogFile(logFile)
+		return nil, err
+	}
+	if client, ok := nerAnalyzer.(*ner.Client); ok {
+		if err := waitForServiceReady(ctx, config.Logger, "gliner", client); err != nil {
+			_ = tokenStore.Close()
+			closeLogFile(logFile)
+			return nil, err
+		}
+	}
+	if err := waitForServiceReady(ctx, config.Logger, "presidio", presidioClient); err != nil {
+		_ = tokenStore.Close()
+		closeLogFile(logFile)
+		return nil, err
+	}
 	proxyHandler, err := proxy.NewProxyHandler(proxy.Config{
 		Target: config.Target,
 		RouteTargets: map[string]*url.URL{
@@ -318,6 +384,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		StatsRecorder:  statsRecorder,
 		LogPIIFindings: config.LogPIIFindings,
 		NERAnalyzer:    nerAnalyzer,
+		FileAnonymizer: presidioClient,
 	})
 	if err != nil {
 		_ = tokenStore.Close()
@@ -325,7 +392,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewService(anonymizerService))
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewServiceWithFiles(anonymizerService, presidioClient))
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,
@@ -549,8 +616,42 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 		})
 		router.POST("/api/ai-workspace/complete", func(ctx *gin.Context) {
 			var request aiworkspace.CompletionRequest
-			if err := ctx.ShouldBindJSON(&request); err != nil {
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode completion request: %v", err)})
+			contentType := ctx.ContentType()
+			var decodeErr error
+			if contentType == "multipart/form-data" {
+				decodeErr = json.Unmarshal([]byte(ctx.PostForm("request")), &request)
+				if decodeErr == nil {
+					file, err := ctx.FormFile("file")
+					if err == nil {
+						opened, openErr := file.Open()
+						if openErr != nil {
+							decodeErr = openErr
+						} else {
+							defer opened.Close()
+							maxBytes := fileanonymizer.DefaultMaxFileBytes
+							if provider, ok := aiService.(interface{ MaxAttachmentBytes() int64 }); ok {
+								maxBytes = provider.MaxAttachmentBytes()
+							}
+							data, readErr := io.ReadAll(io.LimitReader(opened, maxBytes+1))
+							if readErr != nil {
+								decodeErr = readErr
+							} else {
+								mediaType := file.Header.Get("Content-Type")
+								if mediaType == "" {
+									mediaType = "application/octet-stream"
+								}
+								request.Attachment = &aiworkspace.UploadedAttachment{Filename: file.Filename, MediaType: mediaType, Data: data}
+							}
+						}
+					} else if err != http.ErrMissingFile {
+						decodeErr = err
+					}
+				}
+			} else {
+				decodeErr = ctx.ShouldBindJSON(&request)
+			}
+			if decodeErr != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode completion request: %v", decodeErr)})
 				return
 			}
 			response, err := aiService.Complete(ctx.Request.Context(), request)
@@ -781,6 +882,22 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	presidioMode := fileanonymizer.NormalizeMode(envStringWithDefault(presidioModeEnv, fileanonymizer.ModeOff))
+	if presidioMode == "" {
+		return runtimeConfig{}, fmt.Errorf("parse %s: value must be full or off", presidioModeEnv)
+	}
+	presidioPolicy := fileanonymizer.NormalizeFailurePolicy(envStringWithDefault(presidioFailurePolicyEnv, fileanonymizer.PolicyRemove))
+	if presidioPolicy == "" {
+		return runtimeConfig{}, fmt.Errorf("parse %s: value must be remove, reject, or passthrough", presidioFailurePolicyEnv)
+	}
+	presidioTimeout, err := envDurationWithDefault(presidioTimeoutEnv, 60*time.Second)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	presidioMaxBytes, err := envInt64WithDefault(presidioMaxFileBytesEnv, fileanonymizer.DefaultMaxFileBytes)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	return runtimeConfig{
 		Addr:            envStringWithDefault(proxyAddrEnv, defaultProxyAdr),
 		Target:          target,
@@ -807,6 +924,7 @@ func runtimeConfigFromEnv() (runtimeConfig, error) {
 			MaxBatchChars:  glinerBatchChars,
 		},
 		TokenStorePath: envStringWithDefault(tokenStorePathEnv, defaultTokenStorePath),
+		PresidioConfig: fileanonymizer.Config{Mode: presidioMode, URL: envStringWithDefault(presidioURLEnv, fileanonymizer.DefaultURL), Timeout: presidioTimeout, MaxFileBytes: presidioMaxBytes, FailurePolicy: presidioPolicy},
 	}, nil
 }
 
@@ -932,6 +1050,18 @@ func envIntWithDefault(name string, def int) (int, error) {
 		return 0, fmt.Errorf("parse %s: value must be greater than zero", name)
 	}
 	return parsed, nil
+}
+
+func envInt64WithDefault(name string, def int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("parse %s: value must be a positive integer", name)
+	}
+	return value, nil
 }
 
 func envFloatWithDefault(name string, def float64) (float64, error) {

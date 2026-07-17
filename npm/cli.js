@@ -134,6 +134,7 @@ Usage:
   klovys99 start
   klovys99 gliner install --model MODEL --revision COMMIT_SHA
   klovys99 start [--gliner-mode full|off]
+  klovys99 start [--presidio-mode full|off]
   klovys99 start --gliner-model MODEL --gliner-revision COMMIT_SHA
   klovys99 configure codex [--base-url http://127.0.0.1:8080]
   klovys99 configure claude [--base-url http://127.0.0.1:8080]

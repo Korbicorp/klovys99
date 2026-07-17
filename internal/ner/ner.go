@@ -2,12 +2,10 @@
 package ner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
+	resty "gopkg.in/resty.v1"
 )
 
 const (
@@ -79,6 +78,7 @@ type Client struct {
 	labelThreshold map[string]float64
 	maxBatchChars  int
 	httpClient     *http.Client
+	restyClient    *resty.Client
 	slots          chan struct{}
 	queue          chan struct{}
 	mu             sync.RWMutex
@@ -192,6 +192,7 @@ func NewClient(config Config) (*Client, error) {
 		labelThreshold: config.LabelThreshold,
 		maxBatchChars:  config.MaxBatchChars,
 		httpClient:     config.HTTPClient,
+		restyClient:    resty.NewWithClient(config.HTTPClient),
 		slots:          make(chan struct{}, config.MaxConcurrency),
 		queue:          make(chan struct{}, config.MaxQueue),
 		status: Status{
@@ -209,27 +210,25 @@ func (c *Client) Probe(ctx context.Context) error {
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	started := time.Now()
-	request, err := http.NewRequestWithContext(callCtx, http.MethodGet, c.readyEndpoint.String(), nil)
-	if err != nil {
-		c.failure()
-		return err
-	}
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		c.failure()
-		return fmt.Errorf("local NER unavailable: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		c.failure()
-		return fmt.Errorf("local NER readiness status %d", response.StatusCode)
-	}
 	var payload struct {
 		Status        string `json:"status"`
 		Model         string `json:"model"`
 		ModelRevision string `json:"model_revision"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&payload); err != nil ||
+	response, err := c.restyClient.R().
+		SetContext(callCtx).
+		ExpectContentType("application/json").
+		SetResult(&payload).
+		Get(c.readyEndpoint.String())
+	if err != nil {
+		c.failure()
+		return fmt.Errorf("local NER unavailable: %w", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		c.failure()
+		return fmt.Errorf("local NER readiness status %d", response.StatusCode())
+	}
+	if payload.Status == "" ||
 		payload.Status != "ready" || payload.Model != c.model || payload.ModelRevision != c.revision {
 		c.failure()
 		return fmt.Errorf("local NER readiness identity mismatch")
@@ -283,29 +282,21 @@ func (c *Client) AnalyzeBatch(ctx context.Context, texts []string) ([][]anonymiz
 		c.failure()
 		return nil, fmt.Errorf("encode local NER request: %w", err)
 	}
-	request, err := http.NewRequestWithContext(callCtx, http.MethodPost, c.endpoint.String(), bytes.NewReader(payload))
-	if err != nil {
-		c.failure()
-		return nil, fmt.Errorf("create local NER request: %w", err)
-	}
-	request.Header.Set("content-type", "application/json")
-	response, err := c.httpClient.Do(request)
+	var decoded analyzeResponse
+	response, err := c.restyClient.R().
+		SetContext(callCtx).
+		SetHeader("content-type", "application/json").
+		ExpectContentType("application/json").
+		SetBody(payload).
+		SetResult(&decoded).
+		Post(c.endpoint.String())
 	if err != nil {
 		c.failure()
 		return nil, fmt.Errorf("local NER unavailable: %w", err)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode() != http.StatusOK {
 		c.failure()
-		return nil, fmt.Errorf("local NER returned status %d", response.StatusCode)
-	}
-	var decoded analyzeResponse
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&decoded); err != nil {
-		c.failure()
-		return nil, fmt.Errorf("invalid local NER response")
+		return nil, fmt.Errorf("local NER returned status %d", response.StatusCode())
 	}
 	if decoded.Model != c.model || decoded.ModelRevision != c.revision {
 		c.failure()
