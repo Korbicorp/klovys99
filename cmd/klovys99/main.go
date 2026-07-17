@@ -392,7 +392,7 @@ func buildApplication(ctx context.Context, config runtimeConfig) (*application, 
 		return nil, err
 	}
 
-	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewService(anonymizerService))
+	handler := newHTTPHandler(proxyHandler, statsRecorder, configStore, previewService{service: anonymizerService, analyzer: nerAnalyzer}, aiworkspace.NewServiceWithFiles(anonymizerService, presidioClient))
 	return &application{
 		addr:          config.Addr,
 		handler:       handler,
@@ -616,8 +616,42 @@ func newHTTPHandler(proxyHandler gin.HandlerFunc, statsStore statsStore, configS
 		})
 		router.POST("/api/ai-workspace/complete", func(ctx *gin.Context) {
 			var request aiworkspace.CompletionRequest
-			if err := ctx.ShouldBindJSON(&request); err != nil {
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode completion request: %v", err)})
+			contentType := ctx.ContentType()
+			var decodeErr error
+			if contentType == "multipart/form-data" {
+				decodeErr = json.Unmarshal([]byte(ctx.PostForm("request")), &request)
+				if decodeErr == nil {
+					file, err := ctx.FormFile("file")
+					if err == nil {
+						opened, openErr := file.Open()
+						if openErr != nil {
+							decodeErr = openErr
+						} else {
+							defer opened.Close()
+							maxBytes := fileanonymizer.DefaultMaxFileBytes
+							if provider, ok := aiService.(interface{ MaxAttachmentBytes() int64 }); ok {
+								maxBytes = provider.MaxAttachmentBytes()
+							}
+							data, readErr := io.ReadAll(io.LimitReader(opened, maxBytes+1))
+							if readErr != nil {
+								decodeErr = readErr
+							} else {
+								mediaType := file.Header.Get("Content-Type")
+								if mediaType == "" {
+									mediaType = "application/octet-stream"
+								}
+								request.Attachment = &aiworkspace.UploadedAttachment{Filename: file.Filename, MediaType: mediaType, Data: data}
+							}
+						}
+					} else if err != http.ErrMissingFile {
+						decodeErr = err
+					}
+				}
+			} else {
+				decodeErr = ctx.ShouldBindJSON(&request)
+			}
+			if decodeErr != nil {
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("decode completion request: %v", decodeErr)})
 				return
 			}
 			response, err := aiService.Complete(ctx.Request.Context(), request)

@@ -26,6 +26,7 @@ def uploaded():
 
 
 def kind(media_type):
+    if media_type in ("text/plain", "text/csv", "application/csv"): return "text"
     if media_type == "application/pdf": return "pdf"
     if media_type in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",): return "docx"
     if media_type in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",): return "xlsx"
@@ -46,6 +47,9 @@ def image_words(image):
 
 def extract(data, media_type):
     file_kind = kind(media_type)
+    if file_kind == "text":
+        text = data.decode("utf-8-sig")
+        return [{"id": "text:0", "text": text}] if text else []
     if file_kind == "docx":
         doc = Document(io.BytesIO(data)); result = []
         for i, paragraph in enumerate(doc.paragraphs):
@@ -96,6 +100,8 @@ def set_paragraph_text(paragraph, text):
 def render(data, media_type, replacements):
     values = {item["id"]: item["text"] for item in replacements}
     file_kind = kind(media_type)
+    if file_kind == "text":
+        return values.get("text:0", "").encode("utf-8")
     if file_kind == "docx":
         doc = Document(io.BytesIO(data))
         for i, paragraph in enumerate(doc.paragraphs):

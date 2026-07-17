@@ -76,6 +76,13 @@ type replacement struct {
 	Text string `json:"text"`
 }
 
+// Output contains both renderings produced by a single Presidio pass.
+type Output struct {
+	Data   []byte
+	Text   string
+	Result anonymizer.Result
+}
+
 func NormalizeMode(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", ModeOff:
@@ -156,6 +163,13 @@ func (c *Client) FailurePolicy() string {
 	return c.failurePolicy
 }
 
+func (c *Client) MaxBytes() int64 {
+	if c == nil {
+		return DefaultMaxFileBytes
+	}
+	return c.maxBytes
+}
+
 func (c *Client) Probe(ctx context.Context) error {
 	if c == nil || !c.Enabled() {
 		return nil
@@ -225,12 +239,17 @@ func (c *Client) AnonymizePlainText(data []byte) ([]byte, anonymizer.Result) {
 }
 
 func (c *Client) Anonymize(ctx context.Context, provider, mediaType string, data []byte) ([]byte, anonymizer.Result, error) {
+	output, err := c.AnonymizeWithText(ctx, provider, mediaType, data)
+	return output.Data, output.Result, err
+}
+
+func (c *Client) AnonymizeWithText(ctx context.Context, provider, mediaType string, data []byte) (Output, error) {
 	result := anonymizer.Result{Stats: make(map[anonymizer.EntityType]anonymizer.EntityStats)}
 	if !c.Enabled() {
-		return data, result, nil
+		return Output{Data: data, Result: result}, nil
 	}
 	if int64(len(data)) > c.maxBytes {
-		return nil, result, fmt.Errorf("%w: file exceeds %d bytes", ErrFileAnonymization, c.maxBytes)
+		return Output{Result: result}, fmt.Errorf("%w: file exceeds %d bytes", ErrFileAnonymization, c.maxBytes)
 	}
 	c.logger.Info().
 		Str("provider", provider).
@@ -252,7 +271,7 @@ func (c *Client) Anonymize(ctx context.Context, provider, mediaType string, data
 	extracted, err := c.extract(ctx, mediaType, data)
 	if err != nil {
 		failure = err
-		return nil, result, err
+		return Output{Result: result}, err
 	}
 	stage = "analyze"
 	run := c.anonymizer.NewRun()
@@ -264,9 +283,10 @@ func (c *Client) Anonymize(ctx context.Context, provider, mediaType string, data
 	matches, err := ner.AnalyzeStrings(ctx, c.nerAnalyzer, texts)
 	if err != nil {
 		failure = fmt.Errorf("%w: analyze extracted text: %v", ErrFileAnonymization, err)
-		return nil, result, failure
+		return Output{Result: result}, failure
 	}
 	replacements := make([]replacement, 0, len(extracted.Segments))
+	anonymizedTexts := make([]string, 0, len(extracted.Segments))
 	for _, item := range extracted.Segments {
 		anonymized, itemResult := run.AnonymizeWithMatches(item.Text, matches[item.Text])
 		for typ, s := range itemResult.Stats {
@@ -277,16 +297,19 @@ func (c *Client) Anonymize(ctx context.Context, provider, mediaType string, data
 		}
 		result.Findings = append(result.Findings, itemResult.Findings...)
 		replacements = append(replacements, replacement{ID: item.ID, Text: anonymized})
+		if strings.TrimSpace(anonymized) != "" {
+			anonymizedTexts = append(anonymizedTexts, anonymized)
+		}
 	}
 	stage = "render"
 	output, err := c.render(ctx, mediaType, data, replacements)
 	if err != nil {
 		failure = err
-		return nil, result, err
+		return Output{Result: result}, err
 	}
 	status = "ok"
 	stage = "complete"
-	return output, result, nil
+	return Output{Data: output, Text: strings.Join(anonymizedTexts, "\n"), Result: result}, nil
 }
 
 func (c *Client) extract(ctx context.Context, mediaType string, data []byte) (extractResponse, error) {

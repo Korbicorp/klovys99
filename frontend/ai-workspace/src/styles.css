@@ -129,6 +129,7 @@ body {
 }
 
 .chat-main {
+  position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
@@ -136,6 +137,41 @@ body {
   height: 100dvh;
   overflow: hidden;
 }
+
+.chat-drop-overlay {
+  position: absolute;
+  inset: 16px;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  border: 2px dashed color-mix(in srgb, var(--primary) 64%, var(--border));
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--background) 92%, var(--primary));
+  pointer-events: none;
+}
+
+.chat-drop-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--secondary);
+}
+
+.chat-drop-overlay-content span {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.chat-drop-overlay-content strong { font-size: 1.05rem; }
+.chat-drop-overlay-content small { color: var(--muted-foreground); }
 
 .chat-thread {
   min-height: 0;
@@ -377,6 +413,40 @@ body {
   padding: 16px 18px 14px;
 }
 
+.chat-file-input { display: none; }
+
+.chat-attach-button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--background);
+  color: var(--secondary);
+  font-size: 22px;
+  cursor: pointer;
+}
+
+.chat-selected-attachment { display: flex; align-items: center; gap: 8px; width: 100%; }
+.chat-selected-attachment > button { border: 0; background: transparent; font-size: 20px; cursor: pointer; }
+
+.chat-attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: 4px 0 8px;
+  border: 1px solid #d9dee7;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  max-width: 100%;
+}
+.chat-attachment-badge span { display: flex; flex-direction: column; min-width: 0; }
+.chat-attachment-badge strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-attachment-badge small { color: #667085; font-size: 11px; }
+.chat-attachment-badge em { color: #9a5b00; font-size: 11px; font-style: normal; }
+.chat-attachment-badge-warning { border-color: #e8bd75; background: #fff8ea; }
+.chat-attachment-icon { font-size: 20px; }
+
 .chat-composer-input {
   width: 100%;
   min-height: 94px;
@@ -500,7 +570,7 @@ body {
 .chat-composer-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 12px;
   margin-top: 12px;
 }

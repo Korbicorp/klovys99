@@ -3,6 +3,7 @@ package aiworkspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Korbicorp/klovys99/internal/anonymizer"
 	"github.com/Korbicorp/klovys99/internal/credential"
+	"github.com/Korbicorp/klovys99/internal/fileanonymizer"
 )
 
 func TestServiceMetadataIncludesExpectedProviders(t *testing.T) {
@@ -36,6 +38,98 @@ func TestServiceMetadataIncludesExpectedProviders(t *testing.T) {
 	}
 	if oauthMethod.Available || oauthMethod.UnavailableReason != "Connect Claude OAuth in Compte IA" {
 		t.Fatalf("claude oauth method = %#v, want unavailable oauth_token before link", oauthMethod)
+	}
+}
+
+type stubWorkspaceFiles struct {
+	policy string
+	calls  int
+	output fileanonymizer.Output
+	err    error
+}
+
+func (s *stubWorkspaceFiles) Enabled() bool         { return true }
+func (s *stubWorkspaceFiles) FailurePolicy() string { return s.policy }
+func (s *stubWorkspaceFiles) MaxBytes() int64       { return fileanonymizer.DefaultMaxFileBytes }
+func (s *stubWorkspaceFiles) AnonymizeWithText(context.Context, string, string, []byte) (fileanonymizer.Output, error) {
+	s.calls++
+	return s.output, s.err
+}
+
+func configureTestProvider(service *Service, inspect func([]ConversationMessage)) {
+	descriptor := service.providers["openai"].descriptor
+	descriptor.Available = true
+	method := service.providers["openai"].methods["api_key"].descriptor
+	method.Available = true
+	service.providers["openai"] = providerDefinition{descriptor: descriptor, methods: map[string]providerMethod{"api_key": {
+		descriptor: method,
+		call: func(_ context.Context, _ *http.Client, _ string, _ string, messages []ConversationMessage, _ map[string]string) (providerCallResult, error) {
+			if inspect != nil {
+				inspect(messages)
+			}
+			return providerCallResult{ResponseText: "ok"}, nil
+		},
+	}}}
+}
+
+func TestServicePersistsAndReusesAnonymizedAttachmentWithoutReprocessing(t *testing.T) {
+	t.Setenv(credential.SecretEnv, "test-secret")
+	t.Setenv(aiWorkspaceDirEnv, t.TempDir())
+	files := &stubWorkspaceFiles{policy: fileanonymizer.PolicyReject, output: fileanonymizer.Output{Data: []byte("sanitized"), Text: "safe text"}}
+	service := NewServiceWithFiles(nil, files)
+	call := 0
+	configureTestProvider(service, func(messages []ConversationMessage) {
+		call++
+		if messages[0].Attachment == nil || string(messages[0].Attachment.Data) != "sanitized" {
+			t.Fatalf("attachment not loaded: %#v", messages[0].Attachment)
+		}
+	})
+	first, err := service.Complete(context.Background(), CompletionRequest{Provider: "openai", Method: "api_key", AnonymizedPrompt: "review", Config: map[string]string{"api_key": "sk"}, Attachment: &UploadedAttachment{Filename: "doc.pdf", MediaType: "application/pdf", Data: []byte("original")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files.calls != 1 || first.Attachment == nil || !first.Attachment.Reusable {
+		t.Fatalf("calls=%d attachment=%#v", files.calls, first.Attachment)
+	}
+	stored, err := service.store.Get(first.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Messages[0].Attachment == nil || len(stored.Messages[0].Attachment.Data) != 0 {
+		t.Fatalf("stored attachment=%#v", stored.Messages[0].Attachment)
+	}
+	data, err := os.ReadFile(service.attachmentPath(stored.Messages[0].Attachment.ID))
+	if err != nil || string(data) != "sanitized" {
+		t.Fatalf("persisted data=%q err=%v", data, err)
+	}
+	_, err = service.Complete(context.Background(), CompletionRequest{ConversationID: first.ConversationID, Provider: "openai", Method: "api_key", AnonymizedPrompt: "continue", Config: map[string]string{"api_key": "sk"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files.calls != 1 || call != 2 {
+		t.Fatalf("anonymizer calls=%d provider calls=%d", files.calls, call)
+	}
+}
+
+func TestServicePassthroughDoesNotPersistOriginal(t *testing.T) {
+	t.Setenv(credential.SecretEnv, "test-secret")
+	t.Setenv(aiWorkspaceDirEnv, t.TempDir())
+	files := &stubWorkspaceFiles{policy: fileanonymizer.PolicyPassthrough, err: errors.New("presidio down")}
+	service := NewServiceWithFiles(nil, files)
+	configureTestProvider(service, nil)
+	response, err := service.Complete(context.Background(), CompletionRequest{Provider: "openai", Method: "api_key", Config: map[string]string{"api_key": "sk"}, Attachment: &UploadedAttachment{Filename: "doc.pdf", MediaType: "application/pdf", Data: []byte("original")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Warning == "" || response.Attachment == nil || response.Attachment.Reusable {
+		t.Fatalf("response=%#v", response)
+	}
+	stored, err := service.store.Get(response.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Messages[0].Attachment.ID != "" || len(stored.Messages[0].Attachment.Data) != 0 {
+		t.Fatalf("stored=%#v", stored.Messages[0].Attachment)
 	}
 }
 

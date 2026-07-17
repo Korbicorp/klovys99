@@ -28,10 +28,11 @@ type ConversationSummary struct {
 }
 
 type ConversationMessage struct {
-	Role            string           `json:"role"`
-	Content         string           `json:"content"`
-	CreatedAt       time.Time        `json:"created_at"`
-	PIIReplacements []PIIReplacement `json:"pii_replacements,omitempty"`
+	Role            string             `json:"role"`
+	Content         string             `json:"content"`
+	CreatedAt       time.Time          `json:"created_at"`
+	PIIReplacements []PIIReplacement   `json:"pii_replacements,omitempty"`
+	Attachment      *MessageAttachment `json:"attachment,omitempty"`
 }
 
 type PIIReplacement struct {

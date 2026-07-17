@@ -45,12 +45,12 @@ func TestAnonymizeUsesExtractedTextAndRendersReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, result, err := client.Anonymize(context.Background(), "openai", "application/pdf", []byte("original"))
+	fullOutput, err := client.AnonymizeWithText(context.Background(), "openai", "application/pdf", []byte("original"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(output) != "sanitized" || !strings.Contains(rendered, `"id":"p:0"`) || !strings.Contains(rendered, `"text":"[EMAIL_1]"`) || result.Stats[anonymizer.EntityEmail].Count != 1 {
-		t.Fatalf("output=%q replacements=%q result=%+v", output, rendered, result)
+	if string(fullOutput.Data) != "sanitized" || fullOutput.Text != "[EMAIL_1]" || !strings.Contains(rendered, `"id":"p:0"`) || !strings.Contains(rendered, `"text":"[EMAIL_1]"`) || fullOutput.Result.Stats[anonymizer.EntityEmail].Count != 1 {
+		t.Fatalf("output=%q text=%q replacements=%q result=%+v", fullOutput.Data, fullOutput.Text, rendered, fullOutput.Result)
 	}
 }
 

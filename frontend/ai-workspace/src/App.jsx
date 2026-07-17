@@ -2,6 +2,27 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getLocale, translate } from "./i18n";
 
 const workspaceSelectionStorageKey = "klovys99.ai-workspace.selection";
+const acceptedAttachmentTypes = "application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/plain,text/csv,application/csv,image/*";
+const acceptedAttachmentExtensions = [".pdf", ".docx", ".xls", ".xlsx", ".txt", ".csv"];
+
+function isSupportedAttachment(file) {
+  if (!file) return false;
+  if (file.type?.startsWith("image/")) return true;
+  if (acceptedAttachmentTypes.split(",").includes(file.type)) return true;
+  const filename = file.name?.toLowerCase() || "";
+  return acceptedAttachmentExtensions.some((extension) => filename.endsWith(extension));
+}
+
+function hasDraggedFiles(dataTransfer) {
+  return Array.from(dataTransfer?.types || []).includes("Files");
+}
+
+function normalizeTextAttachment(file) {
+  const filename = file.name?.toLowerCase() || "";
+  const mediaType = filename.endsWith(".csv") ? "text/csv" : filename.endsWith(".txt") ? "text/plain" : "";
+  if (!mediaType || file.type === mediaType) return file;
+  return new File([file], file.name, { type: mediaType, lastModified: file.lastModified });
+}
 
 function getBackendBaseURL() {
   const configured = import.meta.env.VITE_KLOVYS_BASE_URL?.trim();
@@ -846,6 +867,20 @@ function ProviderCard({
         <div className="settings-provider-body">
           <div className="settings-provider-copy">
             {isClaudeOAuth ? null : <p>{text.providerHelp}</p>}
+            {provider.id === "gemini" ? (
+              <p>
+                {text.geminiFreeAPIKeyPrefix}{" "}
+                <a
+                  className="workspace-inline-link"
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {text.geminiFreeAPIKeyLink}
+                </a>
+                .
+              </p>
+            ) : null}
             {isClaudeOAuth ? (
               <p>
                 {claudeOAuth.pending
@@ -926,7 +961,7 @@ function ProviderCard({
                   className="workspace-textarea workspace-textarea-small"
                   value={config[field.key] || ""}
                   onChange={(event) => onConfigChange(field.key, event.target.value)}
-                  placeholder={field.placeholder || ""}
+                  placeholder={field.secret && currentMethod?.available ? "******" : field.placeholder || ""}
                 />
               ) : (
                 <input
@@ -935,7 +970,7 @@ function ProviderCard({
                   type={field.input_type === "password" ? "password" : "text"}
                   value={config[field.key] || ""}
                   onChange={(event) => onConfigChange(field.key, event.target.value)}
-                  placeholder={field.placeholder || ""}
+                  placeholder={field.secret && currentMethod?.available ? "******" : field.placeholder || ""}
                 />
               )}
             </label>
@@ -1000,7 +1035,20 @@ function ProviderCard({
   );
 }
 
-function ChatBubble({ role, content, label, pending = false, pendingLabel = "", piiReplacements = [] }) {
+function AttachmentBadge({ attachment, text }) {
+  if (!attachment) return null;
+  const size = attachment.size ? `${Math.max(1, Math.round(attachment.size / 1024))} KB` : "";
+  const issue = attachment.status === "passthrough" || attachment.status === "removed";
+  return (
+    <div className={`chat-attachment-badge ${issue ? "chat-attachment-badge-warning" : ""}`}>
+      <span className="chat-attachment-icon" aria-hidden="true">▱</span>
+      <span><strong>{attachment.filename}</strong><small>{[attachment.media_type, size].filter(Boolean).join(" · ")}</small></span>
+      {issue ? <em>{attachment.status === "passthrough" ? text.attachmentNotStored : text.attachmentRemoved}</em> : null}
+    </div>
+  );
+}
+
+function ChatBubble({ role, content, label, pending = false, pendingLabel = "", piiReplacements = [], attachment, text }) {
   const replacements = useMemo(() => normalizePIIReplacements(piiReplacements, content), [content, piiReplacements]);
   const injectedPlainContent = useMemo(() => injectPIIMarkers(content, replacements), [content, replacements]);
   const replacementsKey = useMemo(
@@ -1031,6 +1079,7 @@ function ChatBubble({ role, content, label, pending = false, pendingLabel = "", 
     <article className={`chat-bubble-row chat-bubble-row-${role}`}>
       <div className={`chat-bubble chat-bubble-${role} ${pending ? "chat-bubble-pending" : ""}`}>
         <span className="chat-bubble-label">{label}</span>
+        <AttachmentBadge attachment={attachment} text={text} />
         {pending ? (
           <div className="chat-bubble-loader" aria-label={pendingLabel} role="status">
             <span />
@@ -1072,6 +1121,8 @@ export function App() {
   const [model, setModel] = useState("");
   const [config, setConfig] = useState({});
   const [prompt, setPrompt] = useState("");
+  const [attachment, setAttachment] = useState(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [anonymizedPrompt, setAnonymizedPrompt] = useState("");
   const [previewSourceText, setPreviewSourceText] = useState("");
   const [previewFindings, setPreviewFindings] = useState([]);
@@ -1090,6 +1141,8 @@ export function App() {
   const [claudeOAuthAction, setClaudeOAuthAction] = useState("");
   const anonymizeRequestRef = useRef(0);
   const threadRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const dragDepthRef = useRef(0);
   const storedSelectionRef = useRef(readStoredWorkspaceSelection());
   const lastOpenedClaudeOAuthURLRef = useRef("");
 
@@ -1330,6 +1383,7 @@ export function App() {
     if (focus) {
       applyConversationSelection(payload);
       setPrompt("");
+      setAttachment(null);
       setAnonymizedPrompt("");
       setPreviewSourceText("");
       setPreviewFindings([]);
@@ -1631,7 +1685,7 @@ export function App() {
   }
 
   async function handleSend() {
-    if (!anonymizedPrompt) {
+    if (!anonymizedPrompt && !attachment) {
       return;
     }
     const hasStoredProvider = providers.some((provider) => (
@@ -1654,11 +1708,18 @@ export function App() {
     const anonymizedPromptSnapshot = anonymizedPrompt;
     const previewSourceTextSnapshot = previewSourceText;
     const previewFindingsSnapshot = previewFindings;
+    const attachmentSnapshot = attachment;
     const previousMessages = messages;
     const displayPromptSnapshot = previewSourceTextSnapshot || promptSnapshot;
     const optimisticUserMessage = {
       ...buildOptimisticMessage("user", displayPromptSnapshot),
       pii_replacements: previewFindingsSnapshot,
+      attachment: attachmentSnapshot ? {
+        filename: attachmentSnapshot.name,
+        media_type: attachmentSnapshot.type || "application/octet-stream",
+        size: attachmentSnapshot.size,
+        status: "anonymizing",
+      } : null,
     };
     const optimisticAssistantMessage = buildOptimisticMessage("assistant", "", { pending: true });
 
@@ -1669,20 +1730,27 @@ export function App() {
     setAnonymizedPrompt("");
     setPreviewSourceText("");
     setPreviewFindings([]);
+    setAttachment(null);
     setStatus(text.sendingStatus);
     try {
-      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/complete"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const completionRequest = {
           conversation_id: activeConversationID,
           provider: providerID,
           method: methodID,
           model,
           anonymized_prompt: anonymizedPromptSnapshot,
           config,
-        }),
-      });
+      };
+      let body = JSON.stringify(completionRequest);
+      const headers = { "Content-Type": "application/json" };
+      if (attachmentSnapshot) {
+        const form = new FormData();
+        form.append("request", body);
+        form.append("file", attachmentSnapshot, attachmentSnapshot.name);
+        body = form;
+        delete headers["Content-Type"];
+      }
+      const response = await fetch(buildBackendURL(backendBaseURL, "/api/ai-workspace/complete"), { method: "POST", headers, body });
       const payload = await readJSON(response);
       if (!response.ok) {
         throw new Error(payload.error || text.providerError);
@@ -1690,6 +1758,7 @@ export function App() {
       const nextConversationID = payload.conversation_id || activeConversationID;
       const restoredResponseText = String(payload.response_text || "");
       const responsePIIReplacements = normalizePIIReplacements(payload.response_pii_replacements);
+      optimisticUserMessage.attachment = payload.attachment || optimisticUserMessage.attachment;
       setMessages((current) => {
         if (current.length < 2) {
           return current;
@@ -1704,6 +1773,7 @@ export function App() {
         ];
       });
       setStatus(text.responseStatus);
+      if (payload.warning) setRequestError(payload.warning);
       await loadProviders({
         preserveSelection: true,
         nextProviderID: providerID,
@@ -1718,11 +1788,51 @@ export function App() {
       setAnonymizedPrompt(anonymizedPromptSnapshot);
       setPreviewSourceText(previewSourceTextSnapshot);
       setPreviewFindings(previewFindingsSnapshot);
+      setAttachment(attachmentSnapshot);
       setStatus(text.anonymizedStatus);
       setRequestError(error.message);
     } finally {
       setSending(false);
     }
+  }
+
+  function selectAttachment(file) {
+    if (!file) return;
+    if (!isSupportedAttachment(file)) {
+      setRequestError(text.unsupportedAttachment);
+      return;
+    }
+    setAttachment(normalizeTextAttachment(file));
+    setRequestError("");
+  }
+
+  function handleDragEnter(event) {
+    if (!hasDraggedFiles(event.dataTransfer) || sending) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDraggingFile(true);
+  }
+
+  function handleDragOver(event) {
+    if (!hasDraggedFiles(event.dataTransfer) || sending) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDragLeave(event) {
+    if (!hasDraggedFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDraggingFile(false);
+  }
+
+  function handleDrop(event) {
+    if (!hasDraggedFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDraggingFile(false);
+    if (sending) return;
+    selectAttachment(event.dataTransfer.files?.[0]);
   }
 
   const configFields = selectedMethod?.fields || [];
@@ -1735,7 +1845,8 @@ export function App() {
   const hasConfiguredProvider = providers.some((provider) => (
     provider.available || provider.methods?.some((method) => method.available)
   )) || hasSelectedCredentials;
-  const canSend = Boolean(anonymizedPrompt && activePreviewMatchesPrompt && !sending && !anonymizing);
+  const textReady = prompt.trim() ? Boolean(anonymizedPrompt && activePreviewMatchesPrompt) : true;
+  const canSend = Boolean((prompt.trim() || attachment) && textReady && !sending && !anonymizing);
 
   return (
     <div className="chat-app-shell">
@@ -1772,7 +1883,22 @@ export function App() {
         </div>
       </aside>
 
-      <main className="chat-main">
+      <main
+        className={`chat-main ${isDraggingFile ? "chat-main-dragging" : ""}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {isDraggingFile ? (
+          <div className="chat-drop-overlay" aria-hidden="true">
+            <div className="chat-drop-overlay-content">
+              <span>+</span>
+              <strong>{text.dropAttachment}</strong>
+              <small>{text.dropAttachmentFormats}</small>
+            </div>
+          </div>
+        ) : null}
         <section ref={threadRef} className="chat-thread">
           {messages.length === 0 ? (
             <div className="chat-empty-state">
@@ -1786,6 +1912,8 @@ export function App() {
                   role={message.role}
                   content={message.content}
                   piiReplacements={message.pii_replacements}
+                  attachment={message.attachment}
+                  text={text}
                   pending={message.pending}
                   pendingLabel={text.responsePending}
                   label={message.role === "user" ? text.sentLabel : `${selectedProvider?.label || "AI"} ${text.receivedLabel}`}
@@ -1810,6 +1938,12 @@ export function App() {
           </div>
 
           <div className="chat-composer">
+            {attachment ? (
+              <div className="chat-selected-attachment">
+                <AttachmentBadge attachment={{ filename: attachment.name, media_type: attachment.type, size: attachment.size, status: "selected" }} text={text} />
+                <button type="button" onClick={() => setAttachment(null)} aria-label={text.removeAttachment}>×</button>
+              </div>
+            ) : null}
             <RichTextPromptEditor
               value={prompt}
               findings={displayPreviewFindings}
@@ -1819,11 +1953,22 @@ export function App() {
               onInteraction={() => setRequestError("")}
               onChange={setPrompt}
             />
+            <input
+              ref={fileInputRef}
+              className="chat-file-input"
+              type="file"
+              accept={acceptedAttachmentTypes}
+              onChange={(event) => {
+                selectAttachment(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
             <button className="chat-send-button" type="button" onClick={handleSend} disabled={!canSend}>
               ↑
             </button>
 
             <div className="chat-composer-footer">
+              <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={sending} aria-label={text.addAttachment}>+</button>
               <div className="chat-composer-right">
                 {!hasConfiguredProvider ? (
                   <button className="chat-config-pill" type="button" onClick={() => setSettingsOpen(true)}>
