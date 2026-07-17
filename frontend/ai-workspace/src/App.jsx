@@ -688,6 +688,27 @@ function renderInlineMarkdown(text, keyPrefix, markers = [], toggledTokens = new
   return parts;
 }
 
+function parseMarkdownTableRow(line) {
+  const trimmed = line.trim();
+  const content = trimmed.startsWith("|") ? trimmed.slice(1) : trimmed;
+  const withoutTrailingPipe = content.endsWith("|") ? content.slice(0, -1) : content;
+  return withoutTrailingPipe.split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line, expectedColumns) {
+  const cells = parseMarkdownTableRow(line);
+  return cells.length === expectedColumns && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isMarkdownTableStart(lines, index) {
+  if (index + 1 >= lines.length || !lines[index].includes("|")) {
+    return false;
+  }
+
+  const headerCells = parseMarkdownTableRow(lines[index]);
+  return headerCells.length > 1 && isMarkdownTableSeparator(lines[index + 1], headerCells.length);
+}
+
 function renderMarkdown(content, replacements = [], toggledTokens = new Set(), onToggle = () => {}) {
   const injected = injectPIIMarkers(content, replacements);
   const normalized = injected.content.replace(/\r\n?/g, "\n");
@@ -733,6 +754,50 @@ function renderMarkdown(content, replacements = [], toggledTokens = new Set(), o
         </HeadingTag>,
       );
       index += 1;
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const headers = parseMarkdownTableRow(lines[index]);
+      const rows = [];
+      index += 2;
+
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        const cells = parseMarkdownTableRow(lines[index]);
+        if (cells.length !== headers.length) {
+          break;
+        }
+        rows.push(cells);
+        index += 1;
+      }
+
+      const tableKey = `table-${blocks.length}`;
+      blocks.push(
+        <div key={tableKey} className="chat-bubble-table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                {headers.map((header, cellIndex) => (
+                  <th key={`${tableKey}-header-${cellIndex}`} scope="col">
+                    {renderInlineMarkdown(header, `${tableKey}-header-${cellIndex}`, injected.markers, toggledTokens, onToggle)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`${tableKey}-row-${rowIndex}`}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={`${tableKey}-cell-${rowIndex}-${cellIndex}`}>
+                      {renderInlineMarkdown(cell, `${tableKey}-cell-${rowIndex}-${cellIndex}`, injected.markers, toggledTokens, onToggle)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
       continue;
     }
 
@@ -793,6 +858,7 @@ function renderMarkdown(content, replacements = [], toggledTokens = new Set(), o
       if (
         !candidateTrimmed
         || candidateTrimmed.startsWith("```")
+        || isMarkdownTableStart(lines, index)
         || /^#{1,6}\s+/.test(candidate)
         || /^>\s?/.test(candidateTrimmed)
         || /^[-*]\s+/.test(candidateTrimmed)

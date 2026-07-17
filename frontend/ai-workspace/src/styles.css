@@ -336,6 +336,42 @@ body {
   padding-left: 12px;
 }
 
+.chat-bubble-table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
+  border-radius: 14px;
+}
+
+.chat-bubble-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.chat-bubble-markdown th,
+.chat-bubble-markdown td {
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.chat-bubble-markdown th {
+  background: color-mix(in srgb, var(--primary) 9%, white);
+  color: var(--secondary);
+  font-weight: 700;
+}
+
+.chat-bubble-markdown td {
+  border-top: 1px solid color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.chat-bubble-markdown th + th,
+.chat-bubble-markdown td + td {
+  border-left: 1px solid color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
 .chat-bubble-loader {
   display: inline-flex;
   align-items: center;
