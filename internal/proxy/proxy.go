@@ -185,6 +185,9 @@ func NewProxyHandler(config Config) (gin.HandlerFunc, error) {
 				return
 			}
 			recordStatsEvent(logger, config.StatsRecorder, requestProcessedEvent(outcome.Stats))
+			if len(outcome.Stats) > 0 {
+				logAnonymizedStats(logger, outcome.Stats, outcome.Findings, config.LogPIIFindings)
+			}
 			requestBody = outcome.Body
 			responseTransform = responseTransformContext{
 				mapping:   outcome.RestoreMapping,
